@@ -1,0 +1,1274 @@
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import uuid
+from collections import Counter
+from collections.abc import Iterable
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Iterator, Protocol
+
+from .models import (
+    ExtractionResult,
+    ManualMemoryRequest,
+    MemoryView,
+    MessageInput,
+    MessageReceipt,
+    ModelMessage,
+    PersonReasoningResult,
+    PersonView,
+    ProcessingStatus,
+    QueryContext,
+    QueryRequest,
+    RelationshipReasoningResult,
+    RelationshipView,
+    SupersedeRequest,
+    utc_now,
+)
+
+
+def _id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def _now() -> str:
+    return utc_now().isoformat()
+
+
+def _normalized(value: str) -> str:
+    return " ".join(value.casefold().split())
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _loads(value: str | None, default: Any) -> Any:
+    if not value:
+        return default
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return default
+
+
+def _fts_query(question: str, excluded: Iterable[str] = ()) -> str | None:
+    """Build a conservative FTS5 OR query from natural-language input."""
+
+    if question.casefold().strip() in {"dossier", "reason"}:
+        return None
+    excluded_terms = {_normalized(value) for value in excluded}
+    terms: list[str] = []
+    for token in re.findall(r"[^\W_]+", question.casefold(), flags=re.UNICODE):
+        if len(token) < 3 or _normalized(token) in excluded_terms:
+            continue
+        if any("\u4e00" <= char <= "\u9fff" for char in token) and len(token) > 3:
+            terms.extend(token[index : index + 3] for index in range(len(token) - 2))
+        else:
+            terms.append(token)
+    unique = list(dict.fromkeys(terms))[:16]
+    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in unique) or None
+
+
+class WorldStore(Protocol):
+    """Internal persistence seam expressed in social-memory operations."""
+
+    def initialize(self) -> None: ...
+
+    def ensure_space(self, space_id: str, name: str | None = None) -> str: ...
+
+    def record_messages(
+        self, space_id: str, messages: list[MessageInput]
+    ) -> list[MessageReceipt]: ...
+
+    def load_message(self, space_id: str, message_id: str) -> ModelMessage | None: ...
+
+    def apply_extraction(
+        self, space_id: str, message_id: str, result: ExtractionResult
+    ) -> tuple[set[str], set[str]]: ...
+
+    def read(self, space_id: str, request: QueryRequest) -> QueryContext: ...
+
+
+class AmbiguousPersonError(ValueError):
+    def __init__(self, reference: str) -> None:
+        super().__init__(f"person reference is ambiguous: {reference}")
+        self.reference = reference
+
+
+class SqliteWorldStore:
+    """SQLite Adapter. Each method owns its short atomic write internally."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        connection = sqlite3.connect(self.path, timeout=10.0)
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA busy_timeout = 10000")
+        try:
+            with connection:
+                yield connection
+        finally:
+            connection.close()
+
+    def initialize(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        with self._connect() as connection:
+            connection.executescript(schema)
+
+    def ensure_space(self, space_id: str, name: str | None = None) -> str:
+        with self._connect() as connection:
+            now = _now()
+            connection.execute(
+                "INSERT OR IGNORE INTO spaces(id, name, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?)",
+                (space_id, name or space_id, now, now),
+            )
+            row = connection.execute(
+                "SELECT ego_person_id FROM spaces WHERE id = ?", (space_id,)
+            ).fetchone()
+            if row and row["ego_person_id"]:
+                return row["ego_person_id"]
+
+            ego_id = _id("person")
+            connection.execute(
+                """
+                INSERT INTO people(
+                    id, space_id, display_name, normalized_name, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (ego_id, space_id, "Me", "me", now, now),
+            )
+            connection.execute(
+                "UPDATE spaces SET ego_person_id = ? WHERE id = ?", (ego_id, space_id)
+            )
+            return ego_id
+
+    def _find_person(
+        self, connection: sqlite3.Connection, space_id: str, reference: str
+    ) -> sqlite3.Row | None:
+        row = connection.execute(
+            "SELECT * FROM people WHERE space_id = ? AND id = ? AND status = 'active'",
+            (space_id, reference),
+        ).fetchone()
+        if row:
+            return row
+        normalized = _normalized(reference)
+        rows = connection.execute(
+            """
+            SELECT * FROM people
+            WHERE space_id = ? AND normalized_name = ? AND status = 'active'
+            LIMIT 2
+            """,
+            (space_id, normalized),
+        ).fetchall()
+        if len(rows) == 1:
+            return rows[0]
+        if len(rows) > 1:
+            raise AmbiguousPersonError(reference)
+        alias_rows = connection.execute(
+            """
+            SELECT p.* FROM people p
+            JOIN person_aliases a ON a.person_id = p.id
+            WHERE p.space_id = ? AND a.normalized_value = ? AND p.status = 'active'
+            LIMIT 2
+            """,
+            (space_id, normalized),
+        ).fetchall()
+        if len(alias_rows) == 1:
+            return alias_rows[0]
+        if len(alias_rows) > 1:
+            raise AmbiguousPersonError(reference)
+        return None
+
+    def _create_person(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        display_name: str,
+        *,
+        reuse_unique_name: bool = True,
+    ) -> str:
+        if reuse_unique_name:
+            existing = self._find_person(connection, space_id, display_name)
+            if existing:
+                return existing["id"]
+        person_id = _id("person")
+        now = _now()
+        connection.execute(
+            """
+            INSERT INTO people(
+                id, space_id, display_name, normalized_name, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (person_id, space_id, display_name, _normalized(display_name), now, now),
+        )
+        return person_id
+
+    def _resolve_author(
+        self, connection: sqlite3.Connection, space_id: str, message: MessageInput
+    ) -> str | None:
+        author = message.author
+        if author.is_ego:
+            space = connection.execute(
+                "SELECT ego_person_id FROM spaces WHERE id = ?", (space_id,)
+            ).fetchone()
+            if not space or not space["ego_person_id"]:
+                raise ValueError(f"space {space_id!r} has no ego person")
+            person_id = space["ego_person_id"]
+            if author.display_name:
+                connection.execute(
+                    """
+                    UPDATE people SET display_name = ?, normalized_name = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        author.display_name,
+                        _normalized(author.display_name),
+                        _now(),
+                        person_id,
+                    ),
+                )
+            if author.external_id:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO person_external_identities(
+                        id, space_id, person_id, provider, external_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        _id("identity"),
+                        space_id,
+                        person_id,
+                        author.provider,
+                        author.external_id,
+                        _now(),
+                    ),
+                )
+            return person_id
+        if author.external_id:
+            existing = connection.execute(
+                """
+                SELECT person_id FROM person_external_identities
+                WHERE space_id = ? AND provider = ? AND external_id = ?
+                """,
+                (space_id, author.provider, author.external_id),
+            ).fetchone()
+            if existing:
+                return existing["person_id"]
+
+        display_name = author.display_name or author.external_id
+        if not display_name:
+            return None
+        # A previously unseen stable external identity is stronger evidence of a
+        # distinct person than a matching display name is evidence of sameness.
+        person_id = self._create_person(
+            connection,
+            space_id,
+            display_name,
+            reuse_unique_name=not bool(author.external_id),
+        )
+        if author.external_id:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO person_external_identities(
+                    id, space_id, person_id, provider, external_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _id("identity"),
+                    space_id,
+                    person_id,
+                    author.provider,
+                    author.external_id,
+                    _now(),
+                ),
+            )
+            winner = connection.execute(
+                """
+                SELECT person_id FROM person_external_identities
+                WHERE space_id = ? AND provider = ? AND external_id = ?
+                """,
+                (space_id, author.provider, author.external_id),
+            ).fetchone()
+            if winner and winner["person_id"] != person_id:
+                # Another caller established the same stable identity first.
+                # The just-created Person has no references and can be removed.
+                connection.execute(
+                    "DELETE FROM people WHERE id = ?", (person_id,)
+                )
+                person_id = winner["person_id"]
+        return person_id
+
+    def record_messages(
+        self, space_id: str, messages: list[MessageInput]
+    ) -> list[MessageReceipt]:
+        self.ensure_space(space_id)
+        receipts: list[MessageReceipt] = []
+        with self._connect() as connection:
+            for message in messages:
+                duplicate = None
+                if message.idempotency_key:
+                    duplicate = connection.execute(
+                        """
+                        SELECT id, extraction_state FROM messages
+                        WHERE space_id = ? AND idempotency_key = ?
+                        """,
+                        (space_id, message.idempotency_key),
+                    ).fetchone()
+                if not duplicate and message.source.item_id:
+                    duplicate = connection.execute(
+                        """
+                        SELECT id, extraction_state FROM messages
+                        WHERE space_id = ? AND source_provider = ?
+                          AND source_conversation_key IS ? AND source_item_id = ?
+                        """,
+                        (
+                            space_id,
+                            message.source.provider,
+                            message.source.conversation_key,
+                            message.source.item_id,
+                        ),
+                    ).fetchone()
+                if duplicate:
+                    receipts.append(
+                        MessageReceipt(
+                            id=duplicate["id"],
+                            state=duplicate["extraction_state"],
+                            duplicate=True,
+                        )
+                    )
+                    continue
+
+                message_id = _id("message")
+                author_person_id = self._resolve_author(connection, space_id, message)
+                author_raw = (
+                    message.author.display_name
+                    or message.author.external_id
+                    or "unknown"
+                )
+                try:
+                    connection.execute(
+                        """
+                        INSERT INTO messages(
+                            id, space_id, author_person_id, author_raw, content,
+                            occurred_at, ingested_at, source_provider,
+                            source_conversation_key, source_item_id, source_metadata,
+                            idempotency_key, extraction_policy
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            message_id,
+                            space_id,
+                            author_person_id,
+                            author_raw,
+                            message.content,
+                            message.occurred_at.isoformat(),
+                            _now(),
+                            message.source.provider,
+                            message.source.conversation_key,
+                            message.source.item_id,
+                            _json(message.source.metadata),
+                            message.idempotency_key,
+                            message.extraction_policy,
+                        ),
+                    )
+                except sqlite3.IntegrityError:
+                    # A concurrent caller may have won either unique identity
+                    # after our preflight read. Resolve the durable winner.
+                    if message.idempotency_key:
+                        duplicate = connection.execute(
+                            """
+                            SELECT id, extraction_state FROM messages
+                            WHERE space_id = ? AND idempotency_key = ?
+                            """,
+                            (space_id, message.idempotency_key),
+                        ).fetchone()
+                    if not duplicate and message.source.item_id:
+                        duplicate = connection.execute(
+                            """
+                            SELECT id, extraction_state FROM messages
+                            WHERE space_id = ? AND source_provider = ?
+                              AND source_conversation_key IS ? AND source_item_id = ?
+                            """,
+                            (
+                                space_id,
+                                message.source.provider,
+                                message.source.conversation_key,
+                                message.source.item_id,
+                            ),
+                        ).fetchone()
+                    if not duplicate:
+                        raise
+                    receipts.append(
+                        MessageReceipt(
+                            id=duplicate["id"],
+                            state=duplicate["extraction_state"],
+                            duplicate=True,
+                        )
+                    )
+                    continue
+                receipts.append(MessageReceipt(id=message_id, state="pending"))
+        return receipts
+
+    def load_message(self, space_id: str, message_id: str) -> ModelMessage | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM messages WHERE space_id = ? AND id = ?",
+                (space_id, message_id),
+            ).fetchone()
+            if not row:
+                return None
+            return ModelMessage(
+                id=row["id"],
+                space_id=row["space_id"],
+                author_person_id=row["author_person_id"],
+                author_raw=row["author_raw"],
+                content=row["content"],
+                occurred_at=row["occurred_at"],
+                source_provider=row["source_provider"],
+                source_conversation_key=row["source_conversation_key"],
+                source_item_id=row["source_item_id"],
+                source_metadata=_loads(row["source_metadata"], {}),
+                extraction_policy=row["extraction_policy"],
+            )
+
+    def mark_extraction_attempt(self, space_id: str, message_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE messages
+                SET extraction_attempts = extraction_attempts + 1,
+                    extraction_state = 'pending', last_extraction_error = NULL
+                WHERE space_id = ? AND id = ? AND extraction_state != 'completed'
+                """,
+                (space_id, message_id),
+            )
+
+    def fail_extraction(self, space_id: str, message_id: str, error: str) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """
+                UPDATE messages SET extraction_state = 'failed', last_extraction_error = ?
+                WHERE space_id = ? AND id = ? AND extraction_state != 'completed'
+                """,
+                (error[:2000], space_id, message_id),
+            )
+
+    def _ensure_relationship(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        person_a_id: str,
+        person_b_id: str,
+        facets: list[dict[str, Any]],
+    ) -> str:
+        if person_a_id == person_b_id:
+            raise ValueError("a relationship requires two different people")
+        person_a_id, person_b_id = sorted((person_a_id, person_b_id))
+        row = connection.execute(
+            """
+            SELECT id FROM relationships
+            WHERE space_id = ? AND person_a_id = ? AND person_b_id = ?
+            """,
+            (space_id, person_a_id, person_b_id),
+        ).fetchone()
+        if row:
+            if facets:
+                connection.execute(
+                    "UPDATE relationships SET facets = ?, updated_at = ? WHERE id = ?",
+                    (_json(facets), _now(), row["id"]),
+                )
+            return row["id"]
+        relationship_id = _id("relationship")
+        now = _now()
+        connection.execute(
+            """
+            INSERT INTO relationships(
+                id, space_id, person_a_id, person_b_id, facets, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                relationship_id,
+                space_id,
+                person_a_id,
+                person_b_id,
+                _json(facets),
+                now,
+                now,
+            ),
+        )
+        return relationship_id
+
+    def apply_extraction(
+        self, space_id: str, message_id: str, result: ExtractionResult
+    ) -> tuple[set[str], set[str]]:
+        affected_people: set[str] = set()
+        affected_relationships: set[str] = set()
+        with self._connect() as connection:
+            message = connection.execute(
+                "SELECT * FROM messages WHERE space_id = ? AND id = ?",
+                (space_id, message_id),
+            ).fetchone()
+            if not message:
+                raise KeyError(message_id)
+            if message["extraction_state"] == "completed":
+                return affected_people, affected_relationships
+
+            people_by_ref: dict[str, str] = {}
+            if message["author_person_id"]:
+                people_by_ref["author"] = message["author_person_id"]
+            extracted_name_counts = Counter(
+                _normalized(person.display_name) for person in result.people
+            )
+            for person in result.people:
+                person_id = self._create_person(
+                    connection,
+                    space_id,
+                    person.display_name,
+                    reuse_unique_name=(
+                        extracted_name_counts[_normalized(person.display_name)] == 1
+                    ),
+                )
+                people_by_ref[person.ref] = person_id
+                for alias in person.aliases:
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO person_aliases(
+                            id, space_id, person_id, value, normalized_value
+                        ) VALUES (?, ?, ?, ?, ?)
+                        """,
+                        (
+                            _id("alias"),
+                            space_id,
+                            person_id,
+                            alias,
+                            _normalized(alias),
+                        ),
+                    )
+
+            now = _now()
+            for candidate in result.memories:
+                memory_id = _id("memory")
+                connection.execute(
+                    """
+                    INSERT INTO memories(
+                        id, space_id, content, kind, basis, valid_from, valid_to,
+                        created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
+                    """,
+                    (
+                        memory_id,
+                        space_id,
+                        candidate.content,
+                        candidate.kind,
+                        candidate.basis,
+                        candidate.valid_from,
+                        candidate.valid_to,
+                        now,
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO memory_sources(memory_id, message_id, evidence_text)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        memory_id,
+                        message_id,
+                        candidate.evidence_text or message["content"],
+                    ),
+                )
+                for link in candidate.people:
+                    person_id = people_by_ref.get(link.ref)
+                    if not person_id:
+                        found = self._find_person(connection, space_id, link.ref)
+                        person_id = found["id"] if found else None
+                    if not person_id:
+                        continue
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO memory_people(memory_id, person_id, role)
+                        VALUES (?, ?, ?)
+                        """,
+                        (memory_id, person_id, link.role),
+                    )
+                    affected_people.add(person_id)
+
+                for relationship in candidate.relationships:
+                    person_a_id = people_by_ref.get(relationship.person_a_ref)
+                    person_b_id = people_by_ref.get(relationship.person_b_ref)
+                    if not person_a_id or not person_b_id:
+                        continue
+                    relationship_id = self._ensure_relationship(
+                        connection,
+                        space_id,
+                        person_a_id,
+                        person_b_id,
+                        relationship.facets,
+                    )
+                    connection.execute(
+                        """
+                        INSERT OR IGNORE INTO memory_relationships(
+                            memory_id, relationship_id
+                        ) VALUES (?, ?)
+                        """,
+                        (memory_id, relationship_id),
+                    )
+                    affected_relationships.add(relationship_id)
+
+            for person_id in affected_people:
+                connection.execute(
+                    """
+                    UPDATE people SET memory_revision = memory_revision + 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, person_id),
+                )
+            for relationship_id in affected_relationships:
+                connection.execute(
+                    """
+                    UPDATE relationships
+                    SET memory_revision = memory_revision + 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (now, relationship_id),
+                )
+            connection.execute(
+                """
+                UPDATE messages
+                SET extraction_state = 'completed', extracted_at = ?,
+                    last_extraction_error = NULL
+                WHERE id = ?
+                """,
+                (now, message_id),
+            )
+        return affected_people, affected_relationships
+
+    def pending_messages(self) -> list[tuple[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT space_id, id FROM messages
+                WHERE extraction_state IN ('pending', 'failed')
+                ORDER BY ingested_at
+                """
+            ).fetchall()
+            return [(row["space_id"], row["id"]) for row in rows]
+
+    def processing_status(
+        self, space_id: str, message_id: str
+    ) -> ProcessingStatus | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT id, extraction_state, extraction_attempts, extracted_at,
+                       last_extraction_error
+                FROM messages WHERE space_id = ? AND id = ?
+                """,
+                (space_id, message_id),
+            ).fetchone()
+            if not row:
+                return None
+            return ProcessingStatus(
+                id=row["id"],
+                state=row["extraction_state"],
+                attempts=row["extraction_attempts"],
+                extracted_at=row["extracted_at"],
+                last_error=row["last_extraction_error"],
+            )
+
+    def _memory_view(
+        self,
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        include_evidence: bool,
+    ) -> MemoryView:
+        people = [
+            {"id": item["person_id"], "name": item["display_name"], "role": item["role"]}
+            for item in connection.execute(
+                """
+                SELECT mp.person_id, p.display_name, mp.role
+                FROM memory_people mp JOIN people p ON p.id = mp.person_id
+                WHERE mp.memory_id = ? ORDER BY mp.role, p.display_name
+                """,
+                (row["id"],),
+            ).fetchall()
+        ]
+        evidence: list[dict[str, Any]] = []
+        if include_evidence:
+            evidence = [
+                {
+                    "message_id": item["message_id"],
+                    "text": item["evidence_text"],
+                    "author": item["author_raw"],
+                    "occurred_at": item["occurred_at"],
+                    "source_provider": item["source_provider"],
+                }
+                for item in connection.execute(
+                    """
+                    SELECT ms.message_id, ms.evidence_text, m.author_raw,
+                           m.occurred_at, m.source_provider
+                    FROM memory_sources ms JOIN messages m ON m.id = ms.message_id
+                    WHERE ms.memory_id = ?
+                    """,
+                    (row["id"],),
+                ).fetchall()
+            ]
+        return MemoryView(
+            id=row["id"],
+            content=row["content"],
+            kind=row["kind"],
+            basis=row["basis"],
+            status=row["status"],
+            people=people,
+            evidence=evidence,
+            created_at=row["created_at"],
+        )
+
+    def _person_view(self, row: sqlite3.Row) -> PersonView:
+        return PersonView(
+            id=row["id"],
+            display_name=row["display_name"],
+            profile_card=_loads(row["profile_card"], {}),
+            memory_revision=row["memory_revision"],
+            profile_memory_revision=row["profile_memory_revision"],
+            stale=row["profile_memory_revision"] < row["memory_revision"],
+        )
+
+    def _relationship_view(self, row: sqlite3.Row) -> RelationshipView:
+        return RelationshipView(
+            id=row["id"],
+            person_a_id=row["person_a_id"],
+            person_b_id=row["person_b_id"],
+            facets=_loads(row["facets"], []),
+            closeness=row["closeness"],
+            tone=row["tone"],
+            status=row["status"],
+            summary=row["summary"],
+            stale=row["profile_memory_revision"] < row["memory_revision"],
+        )
+
+    def read(self, space_id: str, request: QueryRequest) -> QueryContext:
+        with self._connect() as connection:
+            person_ids: list[str] = []
+            people: list[PersonView] = []
+            for reference in request.people:
+                row = self._find_person(connection, space_id, reference)
+                if row and row["id"] not in person_ids:
+                    person_ids.append(row["id"])
+                    people.append(self._person_view(row))
+
+            relationships: list[RelationshipView] = []
+            relationship_ids: list[str] = []
+            if request.include_relationships and person_ids:
+                placeholders = ",".join("?" for _ in person_ids)
+                if request.expand_relationships:
+                    sql = f"""
+                        SELECT * FROM relationships WHERE space_id = ? AND (
+                            person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders})
+                        ) ORDER BY updated_at DESC
+                    """
+                    params: list[Any] = [space_id, *person_ids, *person_ids]
+                else:
+                    sql = f"""
+                        SELECT * FROM relationships WHERE space_id = ?
+                          AND person_a_id IN ({placeholders})
+                          AND person_b_id IN ({placeholders})
+                        ORDER BY updated_at DESC
+                    """
+                    params = [space_id, *person_ids, *person_ids]
+                rows = connection.execute(sql, params).fetchall()
+                relationships = [self._relationship_view(row) for row in rows]
+                relationship_ids = [row["id"] for row in rows]
+                if request.expand_relationships:
+                    expanded_ids = {
+                        endpoint
+                        for row in rows
+                        for endpoint in (row["person_a_id"], row["person_b_id"])
+                    }
+                    new_ids = expanded_ids.difference(person_ids)
+                    if new_ids:
+                        placeholders = ",".join("?" for _ in new_ids)
+                        expanded_rows = connection.execute(
+                            f"SELECT * FROM people WHERE space_id = ? AND id IN ({placeholders})",
+                            [space_id, *new_ids],
+                        ).fetchall()
+                        people.extend(self._person_view(row) for row in expanded_rows)
+                        person_ids.extend(row["id"] for row in expanded_rows)
+
+            if request.people and not person_ids:
+                memory_rows = []
+            elif person_ids:
+                person_placeholders = ",".join("?" for _ in person_ids)
+                relation_clause = ""
+                params = [space_id, *person_ids]
+                if relationship_ids:
+                    relation_placeholders = ",".join("?" for _ in relationship_ids)
+                    relation_clause = (
+                        " OR m.id IN (SELECT memory_id FROM memory_relationships "
+                        f"WHERE relationship_id IN ({relation_placeholders}))"
+                    )
+                    params.extend(relationship_ids)
+                memory_rows = connection.execute(
+                    f"""
+                    SELECT DISTINCT m.* FROM memories m
+                    WHERE m.space_id = ? AND m.status = 'active' AND (
+                        m.id IN (SELECT memory_id FROM memory_people
+                                 WHERE person_id IN ({person_placeholders}))
+                        {relation_clause}
+                    )
+                    ORDER BY m.created_at DESC
+                    """,
+                    params,
+                ).fetchall()
+            else:
+                memory_rows = connection.execute(
+                    """
+                    SELECT * FROM memories
+                    WHERE space_id = ? AND status = 'active'
+                    ORDER BY created_at DESC
+                    """,
+                    (space_id,),
+                ).fetchall()
+
+            fts_query = _fts_query(request.question, request.people)
+            if fts_query and memory_rows:
+                memory_ids = [row["id"] for row in memory_rows]
+                placeholders = ",".join("?" for _ in memory_ids)
+                matched = connection.execute(
+                    f"""
+                    SELECT m.* FROM memory_fts
+                    JOIN memories m ON m.rowid = memory_fts.rowid
+                    WHERE memory_fts MATCH ? AND m.id IN ({placeholders})
+                    ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?
+                    """,
+                    [fts_query, *memory_ids, request.limit],
+                ).fetchall()
+                # Natural-language wording can have no lexical overlap. In
+                # that case the latest structurally scoped memories remain a
+                # useful fallback for synthesis.
+                if matched:
+                    memory_rows = matched
+            memory_rows = memory_rows[: request.limit]
+            memories = [
+                self._memory_view(connection, row, request.include_evidence)
+                for row in memory_rows
+            ]
+            return QueryContext(
+                people=people,
+                relationships=relationships,
+                memories=memories,
+            )
+
+    def person_context(
+        self, space_id: str, person_id: str
+    ) -> tuple[PersonView, list[MemoryView]] | None:
+        request = QueryRequest(question="reason", people=[person_id], limit=100)
+        context = self.read(space_id, request)
+        if not context.people:
+            return None
+        return context.people[0], context.memories
+
+    def relationship_context(
+        self, space_id: str, relationship_id: str
+    ) -> tuple[RelationshipView, list[MemoryView]] | None:
+        with self._connect() as connection:
+            relationship = connection.execute(
+                "SELECT * FROM relationships WHERE space_id = ? AND id = ?",
+                (space_id, relationship_id),
+            ).fetchone()
+            if not relationship:
+                return None
+            rows = connection.execute(
+                """
+                SELECT DISTINCT m.* FROM memories m
+                LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
+                LEFT JOIN memory_people a ON a.memory_id = m.id
+                LEFT JOIN memory_people b ON b.memory_id = m.id
+                WHERE m.space_id = ? AND m.status = 'active' AND (
+                    mr.relationship_id = ? OR
+                    (a.person_id = ? AND b.person_id = ?)
+                ) ORDER BY m.created_at DESC LIMIT 100
+                """,
+                (
+                    space_id,
+                    relationship_id,
+                    relationship["person_a_id"],
+                    relationship["person_b_id"],
+                ),
+            ).fetchall()
+            return (
+                self._relationship_view(relationship),
+                [self._memory_view(connection, row, True) for row in rows],
+            )
+
+    def _insert_inferred_memories(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        inferred: Iterable[Any],
+        person_id: str | None = None,
+        relationship_id: str | None = None,
+    ) -> bool:
+        inserted = False
+        for item in inferred:
+            existing = connection.execute(
+                """
+                SELECT id FROM memories
+                WHERE space_id = ? AND status = 'active' AND basis = 'inferred'
+                  AND content = ?
+                """,
+                (space_id, item.content),
+            ).fetchone()
+            if existing:
+                continue
+            valid_sources = [
+                row["id"]
+                for row in connection.execute(
+                    f"""
+                    SELECT id FROM memories
+                    WHERE space_id = ? AND id IN ({','.join('?' for _ in item.source_memory_ids)})
+                    """,
+                    [space_id, *item.source_memory_ids],
+                ).fetchall()
+            ]
+            if not valid_sources:
+                continue
+            memory_id = _id("memory")
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO memories(
+                    id, space_id, content, kind, basis, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'inferred', 'reasoner', ?, ?)
+                """,
+                (memory_id, space_id, item.content, item.kind, now, now),
+            )
+            if person_id:
+                connection.execute(
+                    "INSERT INTO memory_people(memory_id, person_id, role) VALUES (?, ?, 'subject')",
+                    (memory_id, person_id),
+                )
+            if relationship_id:
+                connection.execute(
+                    "INSERT INTO memory_relationships(memory_id, relationship_id) VALUES (?, ?)",
+                    (memory_id, relationship_id),
+                )
+            connection.executemany(
+                """
+                INSERT INTO memory_derivations(derived_memory_id, source_memory_id)
+                VALUES (?, ?)
+                """,
+                [(memory_id, source_id) for source_id in valid_sources],
+            )
+            inserted = True
+        return inserted
+
+    def apply_person_reasoning(
+        self,
+        space_id: str,
+        person_id: str,
+        expected_revision: int,
+        result: PersonReasoningResult,
+    ) -> bool:
+        with self._connect() as connection:
+            claimed = connection.execute(
+                """
+                UPDATE people SET profile_card = ?, profile_memory_revision = ?,
+                    profile_updated_at = ?, updated_at = ?
+                WHERE space_id = ? AND id = ? AND memory_revision = ?
+                  AND profile_memory_revision < ?
+                """,
+                (
+                    _json(result.profile_card),
+                    expected_revision,
+                    _now(),
+                    _now(),
+                    space_id,
+                    person_id,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            if claimed.rowcount != 1:
+                return False
+            inserted = self._insert_inferred_memories(
+                connection, space_id, result.inferred_memories, person_id=person_id
+            )
+            final_revision = expected_revision + (1 if inserted else 0)
+            connection.execute(
+                """
+                UPDATE people SET profile_card = ?, memory_revision = ?,
+                    profile_memory_revision = ?, profile_updated_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _json(result.profile_card),
+                    final_revision,
+                    final_revision,
+                    _now(),
+                    _now(),
+                    person_id,
+                ),
+            )
+            return True
+
+    def apply_relationship_reasoning(
+        self,
+        space_id: str,
+        relationship_id: str,
+        expected_revision: int,
+        result: RelationshipReasoningResult,
+    ) -> bool:
+        with self._connect() as connection:
+            claimed = connection.execute(
+                """
+                UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
+                    status = ?, summary = ?, profile_memory_revision = ?,
+                    profile_updated_at = ?, updated_at = ?
+                WHERE space_id = ? AND id = ? AND memory_revision = ?
+                  AND profile_memory_revision < ?
+                """,
+                (
+                    _json(result.facets),
+                    result.closeness,
+                    result.tone,
+                    result.status,
+                    result.summary,
+                    expected_revision,
+                    _now(),
+                    _now(),
+                    space_id,
+                    relationship_id,
+                    expected_revision,
+                    expected_revision,
+                ),
+            )
+            if claimed.rowcount != 1:
+                return False
+            inserted = self._insert_inferred_memories(
+                connection,
+                space_id,
+                result.inferred_memories,
+                relationship_id=relationship_id,
+            )
+            final_revision = expected_revision + (1 if inserted else 0)
+            now = _now()
+            connection.execute(
+                """
+                UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
+                    status = ?, summary = ?, memory_revision = ?,
+                    profile_memory_revision = ?, profile_updated_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    _json(result.facets),
+                    result.closeness,
+                    result.tone,
+                    result.status,
+                    result.summary,
+                    final_revision,
+                    final_revision,
+                    now,
+                    now,
+                    relationship_id,
+                ),
+            )
+            return True
+
+    def stale_entities(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+        with self._connect() as connection:
+            people = [
+                (row["space_id"], row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT space_id, id FROM people
+                    WHERE status = 'active' AND profile_memory_revision < memory_revision
+                    """
+                ).fetchall()
+            ]
+            relationships = [
+                (row["space_id"], row["id"])
+                for row in connection.execute(
+                    """
+                    SELECT space_id, id FROM relationships
+                    WHERE profile_memory_revision < memory_revision
+                    """
+                ).fetchall()
+            ]
+            return people, relationships
+
+    def add_manual_memory(
+        self, space_id: str, request: ManualMemoryRequest
+    ) -> str:
+        self.ensure_space(space_id)
+        with self._connect() as connection:
+            memory_id = _id("memory")
+            now = _now()
+            connection.execute(
+                """
+                INSERT INTO memories(
+                    id, space_id, content, kind, basis, valid_from, valid_to,
+                    created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, 'human', ?, ?)
+                """,
+                (
+                    memory_id,
+                    space_id,
+                    request.content,
+                    request.kind,
+                    request.valid_from,
+                    request.valid_to,
+                    now,
+                    now,
+                ),
+            )
+            affected: set[str] = set()
+            for link in request.people:
+                person = self._find_person(connection, space_id, link.ref)
+                if not person:
+                    person_id = self._create_person(connection, space_id, link.ref)
+                else:
+                    person_id = person["id"]
+                connection.execute(
+                    "INSERT INTO memory_people(memory_id, person_id, role) VALUES (?, ?, ?)",
+                    (memory_id, person_id, link.role),
+                )
+                affected.add(person_id)
+            for person_id in affected:
+                connection.execute(
+                    "UPDATE people SET memory_revision = memory_revision + 1 WHERE id = ?",
+                    (person_id,),
+                )
+            return memory_id
+
+    def supersede_memory(
+        self,
+        space_id: str,
+        memory_id: str,
+        request: SupersedeRequest,
+    ) -> str | None:
+        with self._connect() as connection:
+            original = connection.execute(
+                "SELECT * FROM memories WHERE space_id = ? AND id = ? AND status = 'active'",
+                (space_id, memory_id),
+            ).fetchone()
+            if not original:
+                return None
+            now = _now()
+            replacement_id = _id("memory")
+            connection.execute(
+                """
+                INSERT INTO memories(
+                    id, space_id, content, kind, basis, valid_from, valid_to,
+                    supersedes_memory_id, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, 'human', ?, ?)
+                """,
+                (
+                    replacement_id,
+                    space_id,
+                    request.content,
+                    request.kind or original["kind"],
+                    request.valid_from,
+                    request.valid_to,
+                    memory_id,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                """
+                INSERT INTO memory_people(memory_id, person_id, role)
+                SELECT ?, person_id, role FROM memory_people WHERE memory_id = ?
+                """,
+                (replacement_id, memory_id),
+            )
+            connection.execute(
+                """
+                INSERT INTO memory_relationships(memory_id, relationship_id, role)
+                SELECT ?, relationship_id, role
+                FROM memory_relationships WHERE memory_id = ?
+                """,
+                (replacement_id, memory_id),
+            )
+            connection.execute(
+                """
+                UPDATE memories SET status = 'superseded', invalidated_at = ?,
+                    invalidation_reason = ?, updated_at = ? WHERE id = ?
+                """,
+                (now, request.reason, now, memory_id),
+            )
+            connection.execute(
+                """
+                UPDATE people SET memory_revision = memory_revision + 1, updated_at = ?
+                WHERE id IN (
+                    SELECT DISTINCT person_id FROM memory_people WHERE memory_id = ?
+                )
+                """,
+                (now, replacement_id),
+            )
+            connection.execute(
+                """
+                UPDATE relationships
+                SET memory_revision = memory_revision + 1, updated_at = ?
+                WHERE id IN (
+                    SELECT DISTINCT relationship_id FROM memory_relationships
+                    WHERE memory_id = ?
+                )
+                """,
+                (now, replacement_id),
+            )
+            return replacement_id
+
+    def retract_memory(
+        self, space_id: str, memory_id: str, reason: str | None = None
+    ) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT status FROM memories WHERE space_id = ? AND id = ?",
+                (space_id, memory_id),
+            ).fetchone()
+            if not row:
+                return False
+            if row["status"] == "retracted":
+                return True
+            people = connection.execute(
+                "SELECT DISTINCT person_id FROM memory_people WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchall()
+            relationships = connection.execute(
+                """
+                SELECT DISTINCT relationship_id FROM memory_relationships
+                WHERE memory_id = ?
+                """,
+                (memory_id,),
+            ).fetchall()
+            now = _now()
+            connection.execute(
+                """
+                UPDATE memories SET status = 'retracted', invalidated_at = ?,
+                    invalidation_reason = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now, reason, now, memory_id),
+            )
+            connection.executemany(
+                "UPDATE people SET memory_revision = memory_revision + 1 WHERE id = ?",
+                [(item["person_id"],) for item in people],
+            )
+            connection.executemany(
+                """
+                UPDATE relationships SET memory_revision = memory_revision + 1
+                WHERE id = ?
+                """,
+                [(item["relationship_id"],) for item in relationships],
+            )
+            return True

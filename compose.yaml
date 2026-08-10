@@ -1,0 +1,16 @@
+services:
+  gossipmemo:
+    build: .
+    ports:
+      - "127.0.0.1:8765:8765"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GOSSIPMEMO_DATABASE_PATH: /data/gossipmemo.db
+    volumes:
+      - gossipmemo-data:/data
+    restart: unless-stopped
+
+volumes:
+  gossipmemo-data:

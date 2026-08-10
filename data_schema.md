@@ -1,316 +1,297 @@
-# GossipMemo 数据结构草案
+# GossipMemo Data Schema
 
-> Status: draft for review
+> Status: first-version draft
 
-## 1. 设计目标
+本文只定义 GossipMemo 的持久数据结构、关联和约束。处理阶段、HTTP endpoints 和产品功能见 [design.md](design.md)。
 
-GossipMemo 把零散消息整理成两类持续更新的认识：
+## 1. 模型范围
 
-- 对一个人的认识（`Person`）
-- 对两个人之间关系的认识（`Relationship`）
-
-原始消息本身不是长期记忆。系统从消息中挑选、整理出值得长期保留的 `Memory`，再用这些 Memory 更新 Person 和 Relationship 的当前画像。
+GossipMemo 保存一个以个人为观察原点、沿人物和关系向外扩展的社交世界模型。
 
 ```text
-Session ──contains──> Message ──extract/reconcile──> Memory
-                                                        │
-                                                        ├──> Person profile
-                                                        └──> Relationship profile
+Space
+├── Person
+├── Relationship (Person ↔ Person)
+├── Message
+└── Memory
+    ├── Person roles
+    ├── Relationship links
+    └── Message evidence
 ```
 
-第一版只保留五个核心领域实体：
+第一版的持久领域实体只有：
 
 ```text
 Person
 Relationship
-Session
 Message
 Memory
 ```
 
-`Space` 是数据隔离和视角边界，不属于社交记忆领域模型。不同用户、Agent 或互相不可见的记忆空间使用不同的 Space。
+`Space` 是数据隔离和观察视角，不是社交实体。
 
-## 2. 核心边界
+核心约束：
 
-### Message
+- Space 是全局长期记忆边界；对话线程不是 Memory namespace。
+- Conversation、thread、channel 只作为 Message 的外部来源坐标。
+- Group 不作为第一版实体；多人查询通过一组 Person ID 表达。
+- Message author、Memory subject、asserter 和 reporter 不得混为一个字段。
+- Person 和 Relationship 的画像是可重建 projection，Memory 和 Message 才是其依据。
+- 人物合并必须显式发生，不能仅凭同名或语义相似自动合并。
 
-Message 是不可变的原始输入，回答“当时具体说了什么”。它主要用于回溯和重新抽取，不直接充当人物画像。
+## 2. spaces
 
-### Memory
-
-Memory 是从一条或多条 Message 中整理出来、值得长期保留、可以独立引用和修正的一条记忆卡片。
-
-它回答“系统决定把什么认识带到未来”。Memory 可以是：
-
-- 直接表达的事实或偏好
-- 一次值得记住的事件
-- 当前计划或处境
-- 第三方转述
-- 系统根据多次互动形成的印象
-
-Memory 不是每条 Message 的机械摘要，也不是完整的人物或关系画像。
-
-### Person
-
-Person 表示一个经过身份解析的人物，并保存系统对这个人的当前归纳。仅仅在消息中出现一个名字，不自动创建 Person。
-
-### Relationship
-
-Relationship 是两个 Person 之间独立、持续、会演化的关系对象。它不是某条 Memory 的附属物。
-
-Relationship 拥有自己的类型、状态和当前摘要。Memory 可以与 Relationship 关联，成为更新关系画像的材料；Relationship 即使暂时没有关联 Memory，也可以由人工创建并独立存在。
-
-### Session
-
-Session 是一段具有明确参与者和时间边界的共同上下文，例如一次群聊、私聊线程、会议或导入 episode。它回答“哪些人在什么时候共同看到了哪些 Message”。
-
-Session 不能只退化成 Message 上的来源字符串。参与者的加入和离开会影响人物归因、可见范围，以及成员离开后能否正确保留其历史。
-
-## 3. 逻辑数据结构
-
-以下结构表达领域语义，不限定最终使用 SQLite 还是 PostgreSQL。
-
-### 3.1 spaces
+一个 Space 表示一份全局社交世界及其观察原点。
 
 ```yaml
-id: space_01
-name: personal
-created_at: 2026-08-09T12:00:00Z
-```
-
-规则：
-
-- 所有 Person、Relationship、Session、Message 和 Memory 都属于一个 Space。
-- 第一版在 Space 内共享可见性，不实现逐条 Memory 的复杂 audience ACL。
-- 如果两个 Agent 不应共享记忆，应使用不同 Space。
-
-### 3.2 people
-
-```yaml
-id: person_wang
-space_id: space_01
-display_name: 小王
-aliases:
-  - 王明
-  - 产品小王
-profile:
-  summary: 小王是产品负责人，做事强调确定性和提前规划。
-  traits:
-    - 对临时变化比较敏感
-  preferences:
-    - 重要安排最好提前通知
-  current_situation:
-    - 正在推动新版产品上线
-status: active
-merged_into_person_id: null
+id: space_personal
+name: My social world
+ego_person_id: person_me
 created_at: 2026-08-09T12:00:00Z
 updated_at: 2026-08-09T12:00:00Z
 ```
 
-建议字段：
+| 字段 | 含义 |
+| --- | --- |
+| `id` | 稳定 Space ID |
+| `name` | 人类可读名称 |
+| `ego_person_id` | 该社交世界的观察原点，引用同一 Space 内的 Person |
+| `created_at` / `updated_at` | 创建和更新时间 |
+
+第一版在 Space 内共享可见性。需要完全隔离的用户、Agent 或记忆世界使用不同 Space，不实现逐条 Memory ACL。
+
+## 3. people
+
+Person 表示社交世界中的一个人。一个人不需要与 ego 有直接关系；只要身份足够明确，就可以通过其他 Person 或 Relationship 进入模型。
+
+```yaml
+id: person_bob
+space_id: space_personal
+display_name: Bob
+status: active
+merged_into_person_id: null
+
+profile_card:
+  summary: Bob 是 Alice 的同事，近期可能在考虑换工作。
+  traits:
+    - 做决定前倾向先收集信息
+  preferences:
+    - 重要安排更喜欢提前确认
+  current_state:
+    - 最近工作状态不太稳定
+  interaction_notes:
+    - 询问工作变化时不宜把传闻当作已确认事实
+
+memory_revision: 12
+profile_memory_revision: 12
+profile_updated_at: 2026-08-09T12:30:00Z
+created_at: 2026-08-01T09:00:00Z
+updated_at: 2026-08-09T12:30:00Z
+```
 
 | 字段 | 含义 |
 | --- | --- |
-| `id` | 稳定人物 ID |
-| `space_id` | 所属记忆空间 |
+| `id` | 稳定 Person ID |
+| `space_id` | 所属 Space |
 | `display_name` | 当前显示名称 |
-| `profile` | 当前人物画像，可先用 JSON 保存 |
 | `status` | `active \| merged \| deleted` |
-| `merged_into_person_id` | 人物合并后的目标 ID |
+| `merged_into_person_id` | 合并后的目标 Person |
+| `profile_card` | 当前人物画像 JSON；属于可重建 projection |
+| `memory_revision` | 与此人关联的有效 Memory 集合版本 |
+| `profile_memory_revision` | 当前 profile card 已处理到的 Memory 版本 |
+| `profile_updated_at` | 当前 profile card 的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
-别名建议实际存入 `person_aliases` 表，以支持同名、上下文别名和后续身份合并：
+当 `profile_memory_revision < memory_revision` 时，profile card 处于 stale 状态。查询仍可读取最新 Memory，不应把 stale card 当作完整现状。
+
+### person_aliases
+
+别名是身份解析线索，不是稳定身份。
 
 ```yaml
-id: alias_01
-person_id: person_wang
-value: 产品小王
-context_key: group_product
+id: alias_bob_01
+person_id: person_bob
+value: 产品 Bob
+context_key: telegram:product-chat
 valid_from: null
 valid_to: null
 ```
 
-外部系统 ID 与别名分开保存。平台 ID 是身份解析依据，显示名只是线索：
+`context_key` 可用于表达只在某个来源中成立的昵称。“妈妈”“老板”“小王”等相对称呼不能被当作全局唯一别名。
+
+### person_external_identities
+
+外部平台 ID 与别名分开保存。
 
 ```yaml
-id: identity_01
-person_id: person_wang
-provider: honcho
-external_id: peer_wang_9988
+id: identity_bob_telegram
+person_id: person_bob
+provider: telegram
+external_id: user_9988
+created_at: 2026-08-01T09:00:00Z
 ```
 
-建议对 `(space_id, provider, external_id)` 建唯一约束。这样同名人物不会因为名称相似被自动合并，成员离开 Session 后也不会丢失原 Person。
+约束：
 
-### 3.3 relationships
+```text
+UNIQUE(space_id, provider, external_id)
+```
 
-一个 Relationship 表示 Space 内一对人物之间的整体关系档案。两个人可以同时是朋友、同事和上下级，这些身份作为同一个 Relationship 的多个 facet 保存。
+如果来源只提供显示名而没有稳定 ID，应保留 unresolved author/mention，不自动合并到同名 Person。
+
+## 4. relationships
+
+Relationship 是两个 Person 之间独立、持续、会演化的关系档案。它不是 Person 属性，也不依附于某条 Memory。
+
+同一对人物默认只有一个 Relationship；朋友、同事、上下级等多重身份作为 facets 共存。
 
 ```yaml
-id: rel_alice_bob
-space_id: space_01
+id: relationship_alice_bob
+space_id: space_personal
 person_a_id: person_alice
 person_b_id: person_bob
+
 facets:
   - kind: coworker
     direction: symmetric
     status: active
-    since: 2025-03
-    until: null
-  - kind: friend
-    direction: symmetric
+    valid_from: 2025-03
+    valid_to: null
+  - kind: manager
+    from_person_id: person_alice
+    to_person_id: person_bob
     status: active
-    since: 2025-11
-    until: null
-closeness: close
+    valid_from: 2026-01
+    valid_to: null
+
+closeness: regular
 tone: mixed
 summary: >
-  Alice 与 Bob 合作频繁。近期主要摩擦来自排期和临时需求变更，
-  但双方仍愿意配合推进项目。
+  Alice 与 Bob 合作频繁。近期在排期和需求变更上有摩擦，
+  但双方仍愿意继续配合。
 status: active
-started_at: 2025-03
-ended_at: null
-created_at: 2026-08-09T12:00:00Z
-updated_at: 2026-08-09T12:00:00Z
-```
 
-建议字段：
+memory_revision: 8
+profile_memory_revision: 8
+profile_updated_at: 2026-08-09T12:30:00Z
+created_at: 2026-08-01T09:00:00Z
+updated_at: 2026-08-09T12:30:00Z
+```
 
 | 字段 | 含义 |
 | --- | --- |
-| `id` | 稳定关系 ID |
-| `space_id` | 所属记忆空间 |
+| `id` | 稳定 Relationship ID |
+| `space_id` | 所属 Space |
 | `person_a_id` / `person_b_id` | 关系双方 |
-| `facets` | 朋友、同事、家人等可并存的关系类型 |
-| `closeness` | 可选的关系接近程度，使用分类而非伪精确分数 |
-| `tone` | 可选的当前关系氛围，例如 `positive \| mixed \| tense` |
-| `summary` | 对这段关系的当前归纳 |
+| `facets` | 可并存、可带方向和有效时间的当前关系身份 projection |
+| `closeness` | 可选的粗粒度接近程度，如 `distant \| acquaintance \| regular \| close` |
+| `tone` | 可选的当前氛围，如 `positive \| mixed \| tense` |
+| `summary` | 当前关系画像；属于可重建 projection |
 | `status` | `active \| ended \| unknown` |
-| `started_at` / `ended_at` | 已知的关系有效时间 |
+| `memory_revision` | 与此关系关联的有效 Memory 集合版本 |
+| `profile_memory_revision` | 当前关系画像已处理到的 Memory 版本 |
+| `profile_updated_at` | 当前关系画像的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
 约束：
 
-- 同一 Space 内，同一对人物默认只有一个 Relationship。
-- `person_a_id` 和 `person_b_id` 使用稳定排序，避免 A-B 与 B-A 重复。
-- facet 可以是对称的，也可以包含 `from_person_id` / `to_person_id` 表达“Alice 是 Bob 的经理”这类方向性身份；整个 Relationship 仍然没有方向。
-- 群体关系不纳入第一版；需要时再引入 Group 或多参与者关系。
+- `person_a_id` 和 `person_b_id` 使用稳定排序，防止 A-B 与 B-A 重复。
+- 同一 Space 内对 `(person_a_id, person_b_id)` 建唯一约束。
+- 共同出现在一条 Message 中不会自动创建 Relationship。
+- Relationship 可以人工创建，即使暂时没有关联 Memory。
 
-### 3.4 sessions
+## 5. messages
+
+Message 是不可变的原始 evidence，回答“输入中实际说了什么”。Agent 对话、私聊转述和批量导入的群聊消息都归一成同一种结构。
 
 ```yaml
-id: session_product_chat
-space_id: space_01
-source_system: honcho
-source_session_id: external_session_77
-kind: group_chat
-title: 产品群聊
-started_at: 2026-08-01T09:00:00Z
-ended_at: null
-status: active
-metadata: {}
-created_at: 2026-08-01T09:00:01Z
-```
+id: message_123
+space_id: space_personal
+author_person_id: person_me
+author_raw: me
+content: Alice 跟我说，Bob 最近可能准备离职。
+occurred_at: 2026-08-09T12:00:00Z
+ingested_at: 2026-08-09T12:00:05Z
 
-建议字段：
+source_provider: agent_chat
+source_conversation_key: conversation_456
+source_item_id: turn_789
+source_metadata: {}
+
+extraction_state: pending
+extraction_attempts: 0
+extracted_at: null
+last_extraction_error: null
+```
 
 | 字段 | 含义 |
 | --- | --- |
-| `id` | 内部稳定 Session ID |
-| `space_id` | 所属记忆空间 |
-| `source_system` / `source_session_id` | 外部系统中的稳定来源引用 |
-| `kind` | `direct_chat \| group_chat \| meeting \| episode \| import` |
-| `title` | 可选的人类可读名称 |
-| `started_at` / `ended_at` | Session 的时间边界 |
-| `status` | `active \| ended \| archived` |
-| `metadata` | 来源特有信息 |
-
-参与者及其成员生命周期存入 `session_people`：
-
-```yaml
-session_id: session_product_chat
-person_id: person_wang
-role: member
-joined_at: 2026-08-01T09:00:00Z
-left_at: 2026-08-07T18:00:00Z
-```
-
-规则：
-
-- Session 与 Person 是多对多关系。
-- 参与者离开只结束 `session_people` 的成员区间，不删除 Person、历史 Message 或 Memory。
-- 谁能观察到一条 Message，第一版由 Message 时间与参与者成员区间推导，不物化完整的 observer-observed 表示。
-- 对于无法提供成员变动历史的来源，可把参与者视为覆盖整个 Session。
-
-### 3.5 messages
-
-```yaml
-id: msg_456
-space_id: space_01
-session_id: session_product_chat
-source_message_id: external_msg_9988
-author_person_id: person_wang
-author_raw: 小王
-content: 下个月发布前，千万不要再临时改需求了。
-sent_at: 2026-08-09T11:30:00Z
-ingested_at: 2026-08-09T11:30:05Z
-metadata: {}
-```
-
-建议字段：
-
-| 字段 | 含义 |
-| --- | --- |
-| `id` | 内部稳定 ID |
-| `space_id` | 所属记忆空间 |
-| `session_id` | 所属 Session；来源系统由 Session 提供 |
-| `source_message_id` | 外部系统中的消息 ID |
-| `author_person_id` | 已解析的作者；无法确认时为空 |
-| `author_raw` | 原始作者名称或标识 |
+| `id` | 内部稳定 Message ID |
+| `space_id` | 所属 Space |
+| `author_person_id` | 已解析的原始消息作者；无法确认时为空 |
+| `author_raw` | 来源中的原始作者标识 |
 | `content` | 原始消息内容 |
-| `sent_at` / `ingested_at` | 消息时间和入库时间 |
-| `metadata` | 来源特有信息 |
+| `occurred_at` | 消息实际发生时间 |
+| `ingested_at` | 系统接收时间 |
+| `source_provider` | Agent chat、Telegram、Slack、CLI 等来源 |
+| `source_conversation_key` | 可选的 thread/channel/conversation 坐标，不是 Memory scope |
+| `source_item_id` | 外部系统中的稳定消息 ID |
+| `source_metadata` | 来源特有信息 |
+| `extraction_policy` | `conservative \| balanced \| comprehensive`；控制本条消息的抽取粒度，默认 `balanced` |
+| `extraction_state` | `pending \| completed \| failed`；用于恢复本地非持久 queue |
+| `extraction_attempts` | 已尝试 Extract 的次数 |
+| `extracted_at` | Extract 成功完成时间；即使产生零条 Memory 也必须记录 |
+| `last_extraction_error` | 最近一次失败摘要；不保存 secret 或完整 provider payload |
 
-唯一约束建议使用：
+推荐幂等约束：
 
 ```text
-(session_id, source_message_id)
+UNIQUE(space_id, source_provider, COALESCE(source_conversation_key, ''), source_item_id)
 ```
 
-### 3.6 memories
+无法提供稳定外部 ID 的来源应由 ingest 调用方提供 idempotency key。
+
+本地 LLM queue 不持久化。进程启动时重新安排 `pending/failed` Message；因此 extraction state 是处理完成标记，不是数据库任务队列，也没有 lease、owner 或 lock 字段。
+
+## 6. memories
+
+Memory 是系统决定长期保留的一条认识。它可以独立检索、修正、失效和追溯，不是每条 Message 的机械摘要，也不是完整画像。
 
 ```yaml
-id: mem_123
-space_id: space_01
-content: 小王不喜欢在发布前临时修改需求
-kind: preference
-basis: direct
-valid_from: null
-valid_to: null
+id: memory_bob_job_01
+space_id: space_personal
+content: Bob 最近可能在考虑离职
+kind: situation
+basis: reported
 status: active
+
+valid_from: 2026-08
+valid_to: null
 supersedes_memory_id: null
 invalidated_at: null
-created_by: extractor
-created_at: 2026-08-09T12:00:00Z
-updated_at: 2026-08-09T12:00:00Z
-```
+invalidation_reason: null
 
-建议字段：
+created_by: extractor
+created_at: 2026-08-09T12:00:08Z
+updated_at: 2026-08-09T12:00:08Z
+```
 
 | 字段 | 含义 |
 | --- | --- |
 | `id` | 稳定 Memory ID |
-| `space_id` | 所属记忆空间 |
+| `space_id` | 所属 Space |
 | `content` | 可独立理解的规范化自然语言内容 |
 | `kind` | 内容类别 |
-| `basis` | 信息如何得出 |
-| `valid_from` / `valid_to` | 内容描述的现实有效时间 |
+| `basis` | 该认识如何获得 |
 | `status` | 当前生命周期状态 |
+| `valid_from` / `valid_to` | 内容在现实世界中的有效时间 |
 | `supersedes_memory_id` | 此 Memory 替代的旧 Memory |
-| `invalidated_at` | 系统何时停止采用此 Memory；与现实世界的 `valid_to` 分开 |
-| `created_by` | `extractor \| consolidator \| human` |
+| `invalidated_at` | 系统何时停止采用此 Memory |
+| `invalidation_reason` | 人工 retract、supersede 或系统失效的原因 |
+| `created_by` | `extractor \| reasoner \| human` |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
-`kind` 第一版采用小型开放词表，不做严格领域建模：
+`kind` 使用小型开放词表：
 
 ```text
 fact
@@ -321,12 +302,13 @@ situation
 impression
 ```
 
-`basis` 只描述信息的来源方式：
+`basis`：
 
 ```text
-direct      当事人直接表达或系统直接观察
-reported    第三方转述
-inferred    系统从一条或多条材料中归纳
+stated      某人直接表达的事实、偏好或立场
+observed    某人直接观察到的事情
+reported    第三方转述、耳闻或 gossip
+inferred    系统综合一条或多条 Memory 形成的认识
 manual      人工直接录入
 ```
 
@@ -339,231 +321,147 @@ retracted
 expired
 ```
 
-第一版不加入数值 confidence。诸如“可能”“据说”“尚未确认”等不确定性应保留在 `content` 中，避免一个分数同时混合说话者确定性、来源可信度和抽取准确度。
+第一版不加入数值 confidence。诸如“可能”“据说”“尚未确认”等重要限定必须保留在 `content` 中，不能在整理时被改写成确定事实。
 
-## 4. 关联表
-
-Memory 与 Message、Person、Relationship、Session 都可以是多对多关系。
-
-### memory_sources
-
-记录产生或支持一条 Memory 的原始消息。
-
-```yaml
-memory_id: mem_123
-message_id: msg_456
-evidence_text: 下个月发布前，千万不要再临时改需求了。
-source_role: support
-```
-
-一条直接抽取的 Memory 通常只有一个 source；跨多次互动形成的 impression 可以有多个 source。`evidence_text` 保存最小必要原文片段，方便审计抽取结果；`source_role` 第一版使用 `support \| contradict`。
+## 7. Memory 关联
 
 ### memory_people
 
+Memory 与 Person 是多对多关系，并通过 role 表达语义。
+
 ```yaml
-memory_id: mem_123
-person_id: person_wang
+memory_id: memory_bob_job_01
+person_id: person_bob
 role: subject
 ```
 
 初始 role 词表：
 
 ```text
-subject       事情主要关于谁
-author        谁说出了来源消息
-reporter      谁转述、观察或提供了信息
-participant   事件中的其他参与者
+subject       这条认识主要关于谁
+asserter      这个说法、判断或立场归属于谁
+reporter      谁把别人的说法转述给 ego 或系统
+witness       谁直接观察到了相关事情
+participant   谁参与了相关事件
 ```
 
-同一个人可以在一条 Memory 中拥有多个角色。第一版不构建任意深度的转述链。
+Message author 不放入这里；它保存在 Message 上。只有当 author 同时承担 asserter、reporter、witness 等语义角色时，才在 `memory_people` 中建立对应关联。
+
+同一个人可以在同一条 Memory 中拥有多个 role。第一版不构建任意深度的转述链；无法结构化的来源细节保留在 Memory content 和 Message evidence 中。
 
 ### memory_relationships
 
 ```yaml
-memory_id: mem_123
-relationship_id: rel_alice_bob
+memory_id: memory_alice_bob_01
+relationship_id: relationship_alice_bob
 ```
 
-该关联表示 Memory 与这段关系有关。它不表示 Relationship 依附于 Memory，也不要求 Relationship 必须拥有 Memory。
+该关联表示 Memory 与这段关系有关。Relationship 有独立生命周期，不要求必须由某条 Memory 创建。
 
-### memory_sessions
+### memory_sources
 
 ```yaml
-memory_id: mem_group_norm_01
-session_id: session_product_chat
+memory_id: memory_bob_job_01
+message_id: message_123
+source_role: support
+evidence_text: Alice 跟我说，Bob 最近可能准备离职。
 ```
 
-该关联用于表达群体或 Session 层面的认识，例如“这个群通常先讨论再投票”。个人例外仍创建单独 Memory，并同时关联该 Person 与 Session，避免把群体规范直接套用到每个人身上。
-
-## 5. Memory 的产生与整理
-
-```text
-1. 创建或解析 Session，并更新参与者成员区间
-2. 保存原始 Message
-3. 判断消息中是否有未来仍有价值的内容
-4. 生成一个或多个 Memory candidate
-5. 解析涉及的 Person 和已有 Relationship
-6. 与现有 Memory 对比
-7. 执行 create / merge / ignore / supersede
-8. 必要时重写 Person profile 或 Relationship summary
-```
-
-写入可分为两条节奏：
-
-- 同步 retain：可靠保存 Session、Message 和来源 ID。
-- 异步 consolidate：抽取 Memory、跨消息归纳 impression，并刷新人物或关系画像。
-
-异步处理失败不能影响原始消息写入；任务应按 Session 顺序处理，并可根据 Message 重新执行。
-
-### 产生阈值
-
-通常值得形成 Memory：
-
-- 稳定偏好或习惯
-- 重要经历和事件
-- 当前处境、计划或承诺
-- 关系建立、变化或冲突
-- 对未来互动有帮助的印象
-
-通常不形成 Memory：
-
-- 寒暄和低信息量对话
-- 没有未来价值的即时状态
-- 已经存在的重复信息
-- 仅仅出现了某个人名
-
-### reconcile 行为
-
-| 行为 | 使用场景 |
+| 字段 | 含义 |
 | --- | --- |
-| `create` | 没有对应的已有记忆 |
-| `merge` | 多条信息共同支持同一个认识；补充 source 或改写内容 |
-| `ignore` | 重复、无价值或无法可靠解析 |
-| `supersede` | 新认识替代旧认识，旧 Memory 保留并标记为 superseded |
-| `retract` | 原信息被明确否认或录入错误 |
+| `memory_id` / `message_id` | Memory 与原始 evidence 的关联 |
+| `source_role` | `support \| contradict` |
+| `evidence_text` | 最小必要原文片段，便于人工回溯和抽取回归测试 |
 
-例子：
+一条 Message 可以产生多条 Memory；一条 inferred Memory 可以由多条 Message 和既有 Memory 共同支持。
 
-```text
-旧 Memory：小王对临时变化比较敏感
+### memory_derivations
 
-新 Memory：小王过去排斥临时变化，但最近适应性有所改善
+inferred Memory 与其直接依据的既有 Memory 通过单独关联保存。
 
-旧.status = superseded
-新.supersedes_memory_id = 旧.id
+```yaml
+derived_memory_id: memory_bob_planning_impression
+source_memory_id: memory_bob_delay_01
+derivation_role: support
 ```
 
-## 6. 画像更新
+`derivation_role` 第一版使用 `support \| contradict`。这不是通用 provenance graph，只保存一层直接依据，防止 reasoning 结论失去可解释性。
 
-Person.profile 和 Relationship.summary 是面向检索的当前归纳，不是不可变事实。
+## 8. Projection 与 canonical data
 
-更新画像时：
+数据分为两类：
 
-- 只使用当前有效且调用者可见的 Memory。
-- 可以做概括和判断，不要求逐句复述原消息。
-- 应保留重要的不确定性和时间变化。
-- 新信息与旧画像冲突时，应重新归纳，而不是机械追加。
-- 需要解释时，通过关联表回溯相关 Memory 和 Message。
+### Canonical
 
-默认查询顺序：
+- Person 身份、aliases 和 external identities
+- Relationship 身份；人工确认的关系认识先保存为 manual Memory
+- Message
+- Memory 及其状态、时间和关联
 
-```text
-Person profile / Relationship summary
-    ↓ 需要更多细节
-相关 active Memories
-    ↓ 需要验证或查看原话
-source Messages
-```
+### Regenerable projection
 
-## 7. 参考系统与取舍
+- Person.profile_card
+- Relationship.facets、summary、closeness、tone 和 status projection
+- 全文、embedding 或图索引
 
-### Monica
+Projection 可以删除并从 active Memory 重建。人工编辑 projection 时，系统应先创建一条 `created_by: human` 的 Memory，再重新生成 projection，避免人工判断只存在于可重建字段中。
 
-[Monica](https://github.com/monicahq/monica) 的价值在于 Personal CRM 的产品边界：Contact、联系人之间的 Relationship、Note 和 Activity 分开存在，并强调私有、可控和简单。
+## 9. 第一版数据库映射
 
-GossipMemo 借鉴：
+第一版 canonical store 使用 SQLite：
 
-- Relationship 是独立档案，不退化成 Person 属性或 Memory 类型。
-- 同一对人物允许多种关系身份。
-- 人物和关系都应该有便于人直接阅读和修改的页面级摘要。
+- JSON projection 和来源 metadata 以 JSON text 保存；
+- 时间统一保存为带时区的 ISO 8601 text；
+- 全文召回使用可重建的 FTS5 projection；
+- 每个写入方法只做一次短原子 apply，schema 不包含数据库任务 queue；
+- 一个数据库文件只由一个 GossipMemo server 进程使用。
 
-暂不借鉴提醒、任务、地址、联系方式等完整 PRM 功能。
+`WorldStore` 是 implementation 内部 seam。未来 PostgreSQL Adapter 可以使用不同 SQL、JSONB 或索引实现，但必须满足相同的幂等、revision check 和 provenance 行为；不会为了 SQL 语法可移植而降低 schema 约束。
 
-### Honcho
+## 10. 示例：转述与直接导入归一
 
-[Honcho](https://github.com/plastic-labs/honcho) 使用 Workspace → Peer ↔ Session → Message 作为稳定存储层，再由后台 deriver 产生 peer representation。它还支持基于 `(observer, observed)` 的方向性人物表示。
-
-GossipMemo 借鉴：
-
-- Space、Person、Session、Message 使用相同层次的稳定 ingest 边界。
-- Session 与 Person 多对多，保留加入和离开时间。
-- 原始写入同步完成，Memory 和画像异步推导。
-- Honcho adapter 的直接映射为 `Workspace → Space`、`Peer → person_external_id`、`Session → Session`、`Message → Message`。
-
-第一版不复制 Honcho 的 observer-observed collection、dreaming 或通用 peer 语义。GossipMemo 的 Person 专指社交世界中的人物；Agent、项目或抽象概念不自动建成 Person。
-
-### Graphiti
-
-[Graphiti](https://github.com/getzep/graphiti) 把原始 episode 与推导后的实体/关系分开，并为事实保存现实有效区间和失效历史。
-
-GossipMemo 借鉴：
-
-- Message 是可回溯的原始 evidence。
-- Memory 使用 `valid_from / valid_to` 表达现实时间，使用 `created_at / invalidated_at` 表达系统记录时间。
-- 新状态替代旧状态时保留 supersede 链，而不是覆盖或删除旧值。
-- Person 和 Relationship 的摘要随增量输入持续演化。
-
-第一版不采用图数据库，也不把每条人物认识建成 entity-edge triplet。
-
-### Hindsight
-
-[Hindsight](https://github.com/vectorize-io/hindsight) 区分 raw facts、自动归纳的 observations 和持续刷新的 mental models，并让写入、检索和反思使用不同操作节奏。
-
-GossipMemo 中的对应关系：
+### 通过 Agent 转述
 
 ```text
-Hindsight raw fact     ≈ direct/reported Memory
-Hindsight observation  ≈ inferred Memory
-Hindsight mental model ≈ Person.profile / Relationship.summary
-Hindsight bank         ≈ Space
+我 → Agent：Alice 跟我说，Bob 最近可能准备离职。
 ```
 
-不为这三层分别建表；Memory 的 `basis` 已足够区分直接材料和系统归纳，Profile/summary 作为更高层的持久画像。
+```yaml
+message.author_person_id: person_me
 
-### SocialMemBench
+memory.content: Bob 最近可能在考虑离职
+memory.basis: reported
+memory.people:
+  - { person: person_bob, role: subject }
+  - { person: person_alice, role: asserter }
+  - { person: person_me, role: reporter }
+```
 
-[SocialMemBench](https://arxiv.org/abs/2605.17789) 暴露了多人社交记忆的五类结构性失败：说话者与 subject 混淆、时间状态覆盖、人物错误合并、缺失跨人物知识、群体规范覆盖个人例外。
+### 直接导入群聊
 
-对当前 schema 的直接影响：
+```text
+Alice：Bob 最近可能准备离职。
+```
 
-- `memory_people.role` 明确保留 subject、author、reporter 和 participant。
-- 外部身份 ID 与显示名分离，Person 合并必须显式发生。
-- Session 成员离开不改变 Person 生命周期。
-- supersede 历史保留旧状态、变化后的状态和变化时间。
-- 群体规范使用 session-scoped Memory；个人例外使用 person + session-scoped Memory，不把两者合并成一个摘要事实。
-- `memory_sources.evidence_text` 保存最小证据片段，便于构造 attribution、temporal shift 和 relationship 的回归样例。
+```yaml
+message.author_person_id: person_alice
 
-第一版不物化 `KNOWS_ABOUT` 等 theory-of-mind 边。Session 成员区间和 Message 来源先保留足够信息，等评测证明有必要后再增加派生索引。
+memory.content: Bob 最近可能在考虑离职
+memory.basis: stated
+memory.people:
+  - { person: person_bob, role: subject }
+  - { person: person_alice, role: asserter }
+```
 
-## 8. 暂不进入第一版
+两种输入得到相同的 subject-centered Memory；来源差异完整保留在 Message 和人物角色中。Conversation 不是长期记忆边界。
 
-- 任意深度的 provenance graph
+## 11. 第一版不包含
+
+- Session 或 Episode 领域实体
+- Group、群体画像或群体规范实体
+- 任意深度的转述/provenance graph
+- 持久化 observer-observed 或 theory-of-mind 模型
 - 数值 confidence 和来源信誉评分
-- embedding 或图数据库作为 canonical store
 - Event、Claim、Follow-up 的独立实体
-- 群体 Relationship
-- 逐条 Memory 的复杂 audience ACL
-- 持久化的 observer-observed / theory-of-mind 表示
-- 自动人格诊断或固定人格标签体系
-
-这些能力后续可以从现有对象和关联中扩展，不需要提前进入核心 schema。
-
-## 9. 待 Review 的问题
-
-1. Person 的 `profile` 应保存为一段文本，还是保存为 `summary / traits / preferences / current_situation` 等结构化 JSON？
-2. 同一对人物是否始终只有一个 Relationship，并通过 facets 表达同事、朋友等多重身份？
-3. `kind` 是否需要固定枚举，还是完全由应用层使用开放标签？
-4. 跨多条消息形成 inferred Memory 时，应该新增 Memory，还是直接更新 Person/Relationship 画像？
-5. reported Memory 是否默认参与画像归纳，还是必须先经过人工确认？
-6. 第一版是否需要保存 Person profile 和 Relationship summary 的历史版本？
-7. Session 成员区间是否足以表达“谁看到过什么”，还是第一版就需要显式 observer 关联？
+- 逐条 Memory audience ACL
+- 图数据库作为 canonical store

@@ -1,0 +1,5 @@
+name: gossipmemo
+version: 0.1.0
+description: "Provenance-aware social memory backed by an external GossipMemo server."
+hooks:
+  - on_memory_write
