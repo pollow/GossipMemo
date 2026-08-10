@@ -35,6 +35,27 @@ Without an LLM model, raw and manual memories still work and query returns the
 retrieved memories without synthesis. Automatic extraction remains retryable
 until a model is configured.
 
+## Smoke test a running server
+
+After starting the server, run:
+
+```bash
+uv run python scripts/smoke_test.py
+```
+
+The script uses a separate `smoke-test` Space by default. It exercises health,
+automatic ingest/query when an LLM is configured, and the manual memory,
+supersede, and retract flow. Useful options:
+
+```bash
+uv run python scripts/smoke_test.py --policy conservative
+uv run python scripts/smoke_test.py --space personal
+uv run python scripts/smoke_test.py --skip-ingest
+```
+
+`GOSSIPMEMO_BASE_URL`, `GOSSIPMEMO_API_KEY`, and `GOSSIPMEMO_SPACE_ID` are also
+accepted from the environment.
+
 ## Minimal Python SDK usage
 
 ```python
