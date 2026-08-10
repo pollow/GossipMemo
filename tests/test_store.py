@@ -228,37 +228,6 @@ def test_local_llm_queue_is_fifo_and_continues_after_job_error():
     asyncio.run(scenario())
 
 
-def test_unconfigured_model_query_falls_back_to_retrieved_memories(store):
-    from gossipmemo.llm import UnavailableLlm
-    from gossipmemo.models import ManualMemoryRequest, PersonLink, QueryRequest
-    from gossipmemo.queue import LLMQueue
-    from gossipmemo.world import SocialMemoryWorld
-
-    async def scenario():
-        world = SocialMemoryWorld(store, UnavailableLlm(), LLMQueue())
-        await world.start()
-        try:
-            world.add_memory(
-                "personal",
-                ManualMemoryRequest(
-                    content="Bob prefers tea.",
-                    people=[PersonLink(ref="Bob", role="subject")],
-                ),
-            )
-            response = await world.query(
-                "personal", QueryRequest(question="What does Bob prefer?", people=["Bob"])
-            )
-            assert response.answer.startswith(
-                "Relevant memories (LLM synthesis is not configured):"
-            )
-            assert "Bob prefers tea." in response.answer
-            assert response.memories[0].content == "Bob prefers tea."
-        finally:
-            await world.stop()
-
-    asyncio.run(scenario())
-
-
 def test_fastapi_lifespan_ingest_wait_and_query(store):
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")
@@ -271,6 +240,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
         RelationshipReasoningResult,
     )
     from gossipmemo.app import create_app
+    from gossipmemo.config import Settings
     from gossipmemo.world import SocialMemoryWorld
 
     class FakeModel:
@@ -304,7 +274,15 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
 
     async def scenario():
         world = SocialMemoryWorld(store, FakeModel())
-        app = create_app(world=world)
+        app = create_app(
+            settings=Settings(
+                database_path=store.path,
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+            ),
+            world=world,
+        )
 
         # FastAPI runs synchronous dependencies in AnyIO's worker pool.  The
         # restricted test runner has no usable worker threads, so override the

@@ -12,7 +12,8 @@ Python SDK and memory-provider plugin; GossipMemo does not run inside Hermes.
 
 ```bash
 cp .env.example .env
-# Set GOSSIPMEMO_LLM_MODEL and GOSSIPMEMO_LLM_API_KEY in .env.
+# Set GOSSIPMEMO_LLM_BASE_URL, GOSSIPMEMO_LLM_MODEL, and
+# GOSSIPMEMO_LLM_API_KEY in .env.
 docker compose up --build
 ```
 
@@ -28,12 +29,16 @@ sequential.
 
 ```bash
 uv sync --extra server --extra dev
-uv run gossipmemo serve
+cp .env.example .env
+# Fill all three required GOSSIPMEMO_LLM_* values, then:
+uv run --env-file .env gossipmemo serve
 ```
 
-Without an LLM model, raw and manual memories still work and query returns the
-retrieved memories without synthesis. Automatic extraction remains retryable
-until a model is configured.
+Server startup is strict: `GOSSIPMEMO_LLM_BASE_URL`,
+`GOSSIPMEMO_LLM_MODEL`, and `GOSSIPMEMO_LLM_API_KEY` must all be non-empty.
+There is no default provider URL or no-LLM query fallback. Configuration is
+read once at process initialization and passed to the server modules as one
+immutable `Settings` value.
 
 ## Smoke test a running server
 
@@ -44,8 +49,8 @@ uv run python scripts/smoke_test.py
 ```
 
 The script uses a separate `smoke-test` Space by default. It exercises health,
-automatic ingest/query when an LLM is configured, and the manual memory,
-supersede, and retract flow. Useful options:
+automatic ingest/query, and the manual memory, supersede, and retract flow.
+Useful options:
 
 ```bash
 uv run python scripts/smoke_test.py --policy conservative

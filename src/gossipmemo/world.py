@@ -5,7 +5,7 @@ import logging
 from collections.abc import Coroutine
 from typing import Any
 
-from .llm import LLMModel, ModelUnavailableError
+from .llm import LLMModel
 from .models import (
     HealthResponse,
     IngestRequest,
@@ -114,8 +114,7 @@ class SocialMemoryWorld:
             )
         except Exception as error:
             self.store.fail_extraction(space_id, message_id, str(error))
-            if not isinstance(error, ModelUnavailableError):
-                logger.exception("extract failed for %s", message_id)
+            logger.exception("extract failed for %s", message_id)
             return
         if self._stopping:
             return
@@ -141,12 +140,9 @@ class SocialMemoryWorld:
             person, memories = context
             if not person.stale:
                 return
-            try:
-                result = await self.queue.submit(
-                    "reason-person", self.model.reason_person, person, memories
-                )
-            except ModelUnavailableError:
-                return
+            result = await self.queue.submit(
+                "reason-person", self.model.reason_person, person, memories
+            )
             if self.store.apply_person_reasoning(
                 space_id,
                 person_id,
@@ -173,15 +169,12 @@ class SocialMemoryWorld:
             relationship, memories = context
             if not relationship.stale:
                 return
-            try:
-                result = await self.queue.submit(
-                    "reason-relationship",
-                    self.model.reason_relationship,
-                    relationship,
-                    memories,
-                )
-            except ModelUnavailableError:
-                return
+            result = await self.queue.submit(
+                "reason-relationship",
+                self.model.reason_relationship,
+                relationship,
+                memories,
+            )
             if self.store.apply_relationship_reasoning(
                 space_id,
                 relationship_id,
@@ -192,21 +185,10 @@ class SocialMemoryWorld:
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
         context = self.store.read(space_id, request)
-        if not self.model.configured:
-            answer = self._fallback_answer(context.memories)
-        else:
-            answer = await self.queue.submit(
-                "query", self.model.synthesize, request.question, context
-            )
+        answer = await self.queue.submit(
+            "query", self.model.synthesize, request.question, context
+        )
         return QueryResponse(answer=answer, **context.model_dump())
-
-    @staticmethod
-    def _fallback_answer(memories: list[Any]) -> str:
-        if not memories:
-            return "No relevant memory was found."
-        lines = ["Relevant memories (LLM synthesis is not configured):"]
-        lines.extend(f"- {memory.content}" for memory in memories)
-        return "\n".join(lines)
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
         memory_id = self.store.add_manual_memory(space_id, request)

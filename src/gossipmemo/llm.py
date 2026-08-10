@@ -45,10 +45,8 @@ from .prompts import (
 class LlmModel(Protocol):
     """The application-facing asynchronous LLM seam.
 
-    Implementations may be deterministic fakes, a hosted model adapter, or
-    :class:`UnavailableLlm`.  ``configured`` is intentionally separate from
-    an invocation so health endpoints can report configuration without making
-    a network request.
+    Implementations may be deterministic fakes or a hosted model adapter.
+    Server configuration is validated before this interface is constructed.
     """
 
     @property
@@ -72,10 +70,6 @@ LLMModel = LlmModel
 
 class LLMError(RuntimeError):
     """Base class for model configuration, transport, and output failures."""
-
-
-class ModelUnavailableError(LLMError):
-    """Raised when no usable model configuration has been supplied."""
 
 
 class LLMRequestError(LLMError):
@@ -134,50 +128,11 @@ class ChatCompletionResponse(BaseModel):
     choices: list[ChatCompletionChoice] = Field(min_length=1)
 
 
-class UnavailableLlm:
-    """Explicit adapter used when model settings are absent.
-
-    Returning this adapter from application setup keeps configuration visible
-    in health checks while ensuring a queued extraction/reasoning/query job
-    fails with a clear, actionable error rather than an accidental network
-    call or an obscure ``None`` dereference.
-    """
-
-    def __init__(self, reason: str = "LLM is not configured") -> None:
-        self.reason = reason.strip() or "LLM is not configured"
-
-    @property
-    def configured(self) -> bool:
-        return False
-
-    def _error(self) -> ModelUnavailableError:
-        return ModelUnavailableError(self.reason)
-
-    async def extract(self, message: ModelMessage) -> ExtractionResult:
-        del message
-        raise self._error()
-
-    async def reason_person(
-        self, person: PersonView, memories: Sequence[MemoryView]
-    ) -> PersonReasoningResult:
-        del person, memories
-        raise self._error()
-
-    async def reason_relationship(
-        self, relationship: RelationshipView, memories: Sequence[MemoryView]
-    ) -> RelationshipReasoningResult:
-        del relationship, memories
-        raise self._error()
-
-    async def synthesize(self, question: str, context: QueryContext) -> str:
-        del question, context
-        raise self._error()
-
 class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapter"]):
-    """Adapter for OpenAI and servers exposing ``/chat/completions``.
+    """Adapter for servers exposing an OpenAI-compatible ``/chat/completions``.
 
-    ``base_url`` may be either the API root (for example
-    ``https://api.openai.com/v1``) or a complete chat-completions endpoint.
+    ``base_url`` may be either the configured API root or a complete
+    chat-completions endpoint. GossipMemo supplies no provider URL default.
     Supplying an ``httpx.AsyncClient`` is supported for tests and for callers
     that manage connection pooling themselves; when omitted, this adapter
     owns a lazily-created client and closes it in :meth:`aclose`.
@@ -186,7 +141,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     def __init__(
         self,
         base_url: str,
-        api_key: str | None,
+        api_key: str,
         model: str,
         *,
         timeout: float = 120.0,
@@ -200,13 +155,15 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             raise ValueError("LLM base_url must not be empty")
         if not model.strip():
             raise ValueError("LLM model must not be empty")
+        if not api_key.strip():
+            raise ValueError("LLM api_key must not be empty")
         if timeout <= 0:
             raise ValueError("LLM timeout must be greater than zero")
         if max_tokens is not None and max_tokens < 1:
             raise ValueError("LLM max_tokens must be greater than zero")
 
         self.base_url = normalized_base
-        self.api_key = (api_key or "").strip()
+        self.api_key = api_key.strip()
         self.model = model.strip()
         self.timeout = timeout
         self.temperature = temperature
@@ -216,34 +173,11 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self._headers = dict(headers or {})
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> LlmModel:
-        """Build an adapter or explicit unavailable implementation.
+    def from_settings(cls, settings: Settings) -> "OpenAICompatibleAdapter":
+        """Build the Adapter from the already-validated global settings."""
 
-        A model name is required for every provider.  Hosted OpenAI's default
-        endpoint additionally requires an API key; local/custom endpoints may
-        intentionally operate without one.  This keeps Ollama-style local
-        deployments possible while making the default unconfigured state
-        explicit.
-        """
-
-        base_url = (settings.llm_base_url or "").strip().rstrip("/")
-        missing: list[str] = []
-        if not base_url:
-            missing.append("GOSSIPMEMO_LLM_BASE_URL")
-        if not (settings.llm_model or "").strip():
-            missing.append("GOSSIPMEMO_LLM_MODEL")
-        is_openai_default = base_url in {
-            "https://api.openai.com/v1",
-            "https://api.openai.com",
-        }
-        if is_openai_default and not (settings.llm_api_key or "").strip():
-            missing.append("GOSSIPMEMO_LLM_API_KEY")
-        if missing:
-            return UnavailableLlm(
-                "LLM is not configured; set " + ", ".join(missing)
-            )
         return cls(
-            base_url=base_url,
+            base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
             model=settings.llm_model,
             timeout=settings.llm_timeout_seconds,
@@ -251,13 +185,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
 
     @property
     def configured(self) -> bool:
-        if not self.base_url or not self.model:
-            return False
-        if self.base_url in {
-            "https://api.openai.com/v1",
-            "https://api.openai.com",
-        }:
-            return bool(self.api_key)
         return True
 
     @property
@@ -324,10 +251,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         *,
         structured: bool,
     ) -> str:
-        if not self.configured:
-            raise ModelUnavailableError(
-                "OpenAI-compatible LLM is not configured; provide a model and API key"
-            )
         request = ChatCompletionRequest(
             model=self.model,
             messages=[
@@ -458,7 +381,7 @@ def _response_detail(response: httpx.Response) -> str:
 
 
 def create_llm(settings: Settings) -> LlmModel:
-    """Return the configured adapter, or an explicit unavailable adapter."""
+    """Build the model Adapter from validated process settings."""
 
     return OpenAICompatibleAdapter.from_settings(settings)
 
@@ -470,8 +393,6 @@ __all__ = [
     "LLMProtocolError",
     "LLMRequestError",
     "LlmModel",
-    "ModelUnavailableError",
     "OpenAICompatibleAdapter",
-    "UnavailableLlm",
     "create_llm",
 ]

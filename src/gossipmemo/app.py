@@ -32,10 +32,9 @@ def build_world(settings: Settings) -> SocialMemoryWorld:
 
 
 def create_app(
-    settings: Settings | None = None,
+    settings: Settings,
     world: SocialMemoryWorld | None = None,
 ) -> FastAPI:
-    settings = settings or Settings.from_env()
     world = world or build_world(settings)
 
     @asynccontextmanager
@@ -179,6 +178,3 @@ def create_app(
         }
 
     return app
-
-
-app = create_app()

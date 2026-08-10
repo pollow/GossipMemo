@@ -64,7 +64,13 @@ def run(args: argparse.Namespace) -> None:
         health = memory.health()
         show("health", health)
 
-        if health.get("llm_configured") and not args.skip_ingest:
+        if health.get("llm_configured") is not True:
+            raise RuntimeError(
+                "server started without a configured LLM; strict startup "
+                "validation is not active"
+            )
+
+        if not args.skip_ingest:
             receipt = memory.ingest(
                 content="Alice 跟我说，Bob 最近可能准备离职，但还没有最终决定。",
                 author={
@@ -105,10 +111,7 @@ def run(args: argparse.Namespace) -> None:
                     "inspect the extraction prompt/model output"
                 )
         else:
-            reason = "--skip-ingest was used"
-            if not health.get("llm_configured"):
-                reason = "the server reports llm_configured=false"
-            print(f"\nSkipping automatic ingest because {reason}.")
+            print("\nSkipping automatic ingest because --skip-ingest was used.")
 
         manual = memory.add_memory(
             f"Smoke Test Person prefers coffee. Test run: {run_id}",

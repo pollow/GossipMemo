@@ -49,6 +49,7 @@ apply(change)     纠正 Memory、合并 Person 或人工补充认识
 - production 使用实际模型 adapter；
 - 测试使用确定性 fake adapter；
 - module 的测试仍通过 `ingest/query/apply` interface 验证最终行为。
+- 进程初始化时从环境一次性构造 immutable global `Settings`，再显式分发给各 Module；`GOSSIPMEMO_LLM_BASE_URL`、`GOSSIPMEMO_LLM_MODEL` 或 `GOSSIPMEMO_LLM_API_KEY` 任一缺失都拒绝启动，不提供默认 provider URL 或无模型 fallback。
 
 Canonical store 通过内部 `WorldStore` seam 隔离数据库差异，第一版只实现 SQLite Adapter。这个 interface 表达 `record/read/apply` 等领域行为，不为每张表建立 CRUD repository。全文或 embedding 索引属于独立、可重建的 retrieval projection。
 

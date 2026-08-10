@@ -17,17 +17,49 @@ from gossipmemo.models import (
     MessageInput,
     ModelMessage,
     PersonLink,
+    PersonReasoningResult,
     QueryRequest,
     RelationshipCandidate,
+    RelationshipReasoningResult,
     SourceRef,
     SupersedeRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import OpenAICompatibleAdapter, UnavailableLlm
+from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
 from gossipmemo_client import AsyncGossipMemo, GossipMemo
+
+
+class FakeModel:
+    configured = True
+
+    async def extract(self, message):
+        del message
+        return ExtractionResult()
+
+    async def reason_person(self, person, memories):
+        del person, memories
+        return PersonReasoningResult()
+
+    async def reason_relationship(self, relationship, memories):
+        del relationship, memories
+        return RelationshipReasoningResult()
+
+    async def synthesize(self, question, context):
+        del question
+        return "\n".join(memory.content for memory in context.memories)
+
+
+def _settings(database_path, *, api_key: str = "") -> Settings:
+    return Settings(
+        database_path=database_path,
+        api_key=api_key,
+        llm_base_url="http://llm.test/v1",
+        llm_api_key="test-key",
+        llm_model="test-model",
+    )
 
 
 def _store(tmp_path) -> SqliteWorldStore:
@@ -262,9 +294,9 @@ def test_openai_compatible_adapter_validates_structured_output():
 def test_http_auth_and_correction_endpoints(tmp_path):
     async def scenario() -> None:
         store = _store(tmp_path)
-        world = SocialMemoryWorld(store, UnavailableLlm())
+        world = SocialMemoryWorld(store, FakeModel())
         app = create_app(
-            settings=Settings(database_path=tmp_path / "features.db", api_key="secret"),
+            settings=_settings(tmp_path / "features.db", api_key="secret"),
             world=world,
         )
         async with app.router.lifespan_context(app):

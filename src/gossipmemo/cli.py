@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from .config import Settings
+from .app import create_app
+from .config import ConfigurationError, get_settings
 
 
 def parser() -> argparse.ArgumentParser:
@@ -19,11 +20,14 @@ def main() -> None:
     if args.command == "serve":
         import uvicorn
 
-        settings = Settings.from_env()
+        try:
+            settings = get_settings()
+        except (ConfigurationError, ValueError) as error:
+            raise SystemExit(f"GossipMemo configuration error: {error}") from error
         # A single process is a product invariant for SQLite + the local FIFO
         # queue. Deliberately do not expose a workers option here.
         uvicorn.run(
-            "gossipmemo.app:app",
+            create_app(settings),
             host=args.host or settings.host,
             port=args.port or settings.port,
             workers=1,
