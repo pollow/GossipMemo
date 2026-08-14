@@ -16,7 +16,6 @@ from gossipmemo.models import (
     ExtractedMemory,
     MessageInput,
     ModelMessage,
-    PersonLink,
     PersonReasoningResult,
     QueryRequest,
     ExtractedRelationship,
@@ -74,14 +73,14 @@ def test_query_uses_fts_but_keeps_structural_fallback(tmp_path):
         "personal",
         ManualMemoryRequest(
             content="Alice plans a distinctive sabbatical in October.",
-            people=[PersonLink(ref="Alice", role="subject")],
+            people=["Alice"],
         ),
     )
     store.add_manual_memory(
         "personal",
         ManualMemoryRequest(
             content="Alice prefers green tea.",
-            people=[PersonLink(ref="Alice", role="subject")],
+            people=["Alice"],
         ),
     )
 
@@ -157,7 +156,7 @@ def test_supersede_preserves_history_and_retract_reason(tmp_path):
         "personal",
         ManualMemoryRequest(
             content="Bob prefers coffee.",
-            people=[PersonLink(ref="Bob", role="subject")],
+            people=["Bob"],
         ),
     )
     replacement_id = store.supersede_memory(
@@ -390,7 +389,7 @@ def test_http_auth_and_correction_endpoints(tmp_path):
                     headers=headers,
                     json={
                         "content": "Bob prefers coffee.",
-                        "people": [{"ref": "Bob", "role": "subject"}],
+                        "people": ["Bob"],
                     },
                 )
                 memory_id = created.json()["id"]

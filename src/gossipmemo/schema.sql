@@ -11,7 +11,6 @@ CREATE TABLE IF NOT EXISTS people (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
     display_name TEXT NOT NULL,
-    normalized_name TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     merged_into_person_id TEXT REFERENCES people(id),
     profile_card TEXT NOT NULL DEFAULT '{}',
@@ -28,11 +27,11 @@ CREATE TABLE IF NOT EXISTS person_aliases (
     person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
     value TEXT NOT NULL,
     normalized_value TEXT NOT NULL,
-    context_key TEXT,
-    valid_from TEXT,
-    valid_to TEXT,
-    UNIQUE(person_id, normalized_value, context_key)
+    UNIQUE(person_id, normalized_value)
 );
+
+CREATE INDEX IF NOT EXISTS person_alias_lookup
+ON person_aliases(space_id, normalized_value);
 
 CREATE TABLE IF NOT EXISTS relationships (
     id TEXT PRIMARY KEY,
@@ -114,8 +113,7 @@ ON memories(space_id, status, created_at DESC);
 CREATE TABLE IF NOT EXISTS memory_people (
     memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
     person_id TEXT NOT NULL REFERENCES people(id),
-    role TEXT NOT NULL,
-    PRIMARY KEY(memory_id, person_id, role)
+    PRIMARY KEY(memory_id, person_id)
 );
 
 CREATE INDEX IF NOT EXISTS memory_people_by_person

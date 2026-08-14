@@ -14,7 +14,7 @@ Space
 ├── Relationship (Person ↔ Person)
 ├── Message
 └── Memory
-    ├── Person roles
+    ├── Person links
     ├── Relationship links
     └── Message evidence
 ```
@@ -95,12 +95,12 @@ updated_at: 2026-08-09T12:30:00Z
 | `status` | `active \| merged \| deleted` |
 | `merged_into_person_id` | 合并后的目标 Person |
 | `profile_card` | 当前人物画像 JSON；属于可重建 projection |
-| `memory_revision` | 与此人关联的有效 Memory 集合版本 |
-| `profile_memory_revision` | 当前 profile card 已处理到的 Memory 版本 |
+| `memory_revision` | 与此人关联的有效 Memory 集合版本（当前实现） |
+| `profile_memory_revision` | 当前 profile card 已处理到的 Memory 版本（当前实现） |
 | `profile_updated_at` | 当前 profile card 的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
-当 `profile_memory_revision < memory_revision` 时，profile card 处于 stale 状态。查询仍可读取最新 Memory，不应把 stale card 当作完整现状。
+当前实现以 `profile_memory_revision < memory_revision` 判断 stale。我们正在评估改为时间戳或 induction change log，但尚未实施。
 
 ### person_aliases
 
@@ -108,14 +108,17 @@ updated_at: 2026-08-09T12:30:00Z
 
 ```yaml
 id: alias_bob_01
+space_id: space_personal
 person_id: person_bob
 value: 产品 Bob
-context_key: telegram:product-chat
-valid_from: null
-valid_to: null
+normalized_value: 产品 bob
 ```
 
-`context_key` 可用于表达只在某个来源中成立的昵称。“妈妈”“老板”“小王”等相对称呼不能被当作全局唯一别名。
+`person_aliases` 是按 normalized value 查询的独立 reverse index；Person 的 `display_name` 也应写入其中。相同 normalized alias 可以指向多个 Person，解析时必须报告 ambiguous，不能自动合并。
+
+“妈妈”“老板”“小王”等相对称呼不能被当作全局唯一别名；若未来需要来源上下文，应作为额外解析条件，而不是替代 alias index。
+
+约束：`UNIQUE(person_id, normalized_value)`，并建立 `(space_id, normalized_value)` 索引。
 
 ### person_external_identities
 
@@ -186,8 +189,8 @@ updated_at: 2026-08-09T12:30:00Z
 | `tone` | 可选的当前氛围，如 `positive \| mixed \| tense` |
 | `summary` | 当前关系画像；属于可重建 projection |
 | `status` | `active \| ended \| unknown` |
-| `memory_revision` | 与此关系关联的有效 Memory 集合版本 |
-| `profile_memory_revision` | 当前关系画像已处理到的 Memory 版本 |
+| `memory_revision` | 与此关系关联的有效 Memory 集合版本（当前实现） |
+| `profile_memory_revision` | 当前关系画像已处理到的 Memory 版本（当前实现） |
 | `profile_updated_at` | 当前关系画像的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
@@ -323,27 +326,16 @@ expired
 
 ### memory_people
 
-Memory 与 Person 是多对多关系，并通过 role 表达语义。
+Memory 与 Person 是多对多关系，只负责索引这条 Memory 涉及哪些人物，不保存人物在事实中的角色。
 
 ```yaml
 memory_id: memory_bob_job_01
 person_id: person_bob
-role: subject
-```
-
-初始 role 词表：
-
-```text
-subject       这条认识主要关于谁
-asserter      这个说法、判断或立场归属于谁
-reporter      消息中明确提到的转述者
-witness       谁直接观察到了相关事情
-participant   谁参与了相关事件
 ```
 
 Message author 不放入这里；`user` 和 `assistant` 只是消息角色，不是 Person。
 
-同一个人可以在同一条 Memory 中拥有多个 role。第一版不构建任意深度的转述链；无法结构化的来源细节保留在 Memory content 和 Message evidence 中。
+事实中的 subject、asserter、reporter、witness、participant 等语义直接保留在自然语言 `Memory.content` 和 Message evidence 中；不再定义 `PersonRole` 或 `PersonLink` 概念。
 
 ### memory_relationships
 
@@ -412,7 +404,7 @@ Projection 可以删除并从 active Memory 重建。人工编辑 projection 时
 - 每个写入方法只做一次短原子 apply，schema 不包含数据库任务 queue；
 - 一个数据库文件只由一个 GossipMemo server 进程使用。
 
-`WorldStore` 是 implementation 内部 seam。未来 PostgreSQL Adapter 可以使用不同 SQL、JSONB 或索引实现，但必须满足相同的幂等、revision check 和 provenance 行为；不会为了 SQL 语法可移植而降低 schema 约束。
+`WorldStore` 是 implementation 内部 seam。未来 PostgreSQL Adapter 可以使用不同 SQL、JSONB 或索引实现，但必须满足相同的幂等、projection freshness check 和 provenance 行为；具体 freshness watermark 的持久化形式仍待决定。
 
 ## 10. 示例：转述与直接导入归一
 
@@ -428,8 +420,8 @@ message.author: user
 memory.content: Bob 最近可能在考虑离职
 memory.basis: reported
 memory.people:
-  - { person: person_bob, role: subject }
-  - { person: person_alice, role: asserter }
+  - person_bob
+  - person_alice
 ```
 
 ### 直接导入群聊
@@ -444,11 +436,11 @@ message.author: user
 memory.content: Bob 最近可能在考虑离职
 memory.basis: stated
 memory.people:
-  - { person: person_bob, role: subject }
-  - { person: person_alice, role: asserter }
+  - person_bob
+  - person_alice
 ```
 
-两种输入得到相同的 subject-centered Memory；来源差异完整保留在 Message 和人物角色中。Conversation 不是长期记忆边界。
+两种输入得到相同的 Memory；转述来源等语义保留在自然语言 `content` 和 Message evidence 中。Conversation 不是长期记忆边界。
 
 ## 11. 第一版不包含
 

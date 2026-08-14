@@ -127,7 +127,7 @@ Extract 可以理解语言中的隐含语义，但不做跨历史的长期归纳
 
 - 将 candidate 与现有 Memory 比较。
 - 执行 `create / merge / ignore / supersede / retract`。
-- 维护 source Message 和人物角色关联。
+- 维护 source Message 和人物关联；人物在事实中的语义角色保留在 Memory content 和 evidence 中，不单独结构化。
 - 计算受影响的 Person 与 Relationship。
 - 增加对应实体的 `memory_revision`。
 
@@ -179,6 +179,8 @@ Reason 不在每条 Message 写入时同步执行，而是在 Reconcile 改变�
 进程内调度以 Person/Relationship 为 key 避免同时安排重复任务。例如连续导入 20 条关于 Bob 的消息，会在当前 Reason 完成后通过 revision 检查决定是否需要基于最新状态重算。LLM queue 本身只保证 FIFO，不实现 priority。
 
 Reason 在调用模型前读取 `memory_revision`，模型返回后用 optimistic revision check 写入。如果期间 Memory 已变化，旧结果不写入，直接读取新 revision 重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。
+
+`memory_revision` 是当前实现。是否改为时间戳或独立 induction change log 尚未决定。
 
 ### 4.3 Reason 做什么
 
@@ -357,13 +359,13 @@ POST /v1/spaces/{space_id}/reason
 
 - 接收单条或一批 Message。
 - 支持 Agent 对话中的转述和直接导入的多人消息。
-- 区分 author、subject、asserter、reporter、witness 和 participant。
+- 区分 author；Memory 涉及的人物及其语义角色保留在自然语言内容和 evidence 中。
 - 保留原文 evidence 和外部 source reference。
 
 ### 人物与身份
 
 - 创建和查询 Person；同名不自动合并。
-- 管理 aliases 和 external identities。
+- 管理 aliases 和 external identities；aliases 使用独立的 indexed reverse lookup。
 - 不因名字相同自动合并。
 - 从 ego 沿 Relationship 查询一跳社交网络。
 

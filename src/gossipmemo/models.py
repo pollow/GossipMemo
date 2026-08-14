@@ -10,7 +10,6 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-PersonRole = Literal["subject", "asserter", "reporter", "witness", "participant"]
 MemoryBasis = Literal["stated", "observed", "reported", "inferred", "manual"]
 MemoryKind = Literal["fact", "event", "preference", "plan", "situation", "impression"]
 ExtractionPolicy = Literal["conservative", "balanced", "comprehensive"]
@@ -48,11 +47,6 @@ class IngestResponse(BaseModel):
     message_ids: list[str]
 
 
-class PersonLink(BaseModel):
-    ref: str
-    role: PersonRole
-
-
 class ExtractedPerson(BaseModel):
     ref: str
     display_name: str
@@ -69,7 +63,7 @@ class ExtractedMemory(BaseModel):
     content: str = Field(min_length=1)
     kind: MemoryKind = "fact"
     basis: MemoryBasis
-    people: list[PersonLink] = Field(default_factory=list)
+    people: list[str] = Field(default_factory=list)
     relationships: list[ExtractedRelationship] = Field(default_factory=list)
     valid_from: str | None = None
     valid_to: str | None = None
@@ -154,7 +148,7 @@ class QueryResponse(QueryContext):
 class ManualMemoryRequest(BaseModel):
     content: str = Field(min_length=1)
     kind: MemoryKind = "fact"
-    people: list[PersonLink] = Field(default_factory=list)
+    people: list[str] = Field(default_factory=list)
     valid_from: str | None = None
     valid_to: str | None = None
 

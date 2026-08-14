@@ -146,18 +146,6 @@ class SqliteWorldStore:
         if row:
             return row
         normalized = _normalized(reference)
-        rows = connection.execute(
-            """
-            SELECT * FROM people
-            WHERE space_id = ? AND normalized_name = ? AND status = 'active'
-            LIMIT 2
-            """,
-            (space_id, normalized),
-        ).fetchall()
-        if len(rows) == 1:
-            return rows[0]
-        if len(rows) > 1:
-            raise AmbiguousPersonError(reference)
         alias_rows = connection.execute(
             """
             SELECT p.* FROM people p
@@ -190,10 +178,18 @@ class SqliteWorldStore:
         connection.execute(
             """
             INSERT INTO people(
-                id, space_id, display_name, normalized_name, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                id, space_id, display_name, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?)
             """,
-            (person_id, space_id, display_name, _normalized(display_name), now, now),
+            (person_id, space_id, display_name, now, now),
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO person_aliases(
+                id, space_id, person_id, value, normalized_value
+            ) VALUES (?, ?, ?, ?, ?)
+            """,
+            (_id("alias"), space_id, person_id, display_name, _normalized(display_name)),
         )
         return person_id
 
@@ -498,19 +494,19 @@ class SqliteWorldStore:
                         now,
                     ),
                 )
-                for link in candidate.people:
-                    person_id = people_by_ref.get(link.ref)
+                for reference in candidate.people:
+                    person_id = people_by_ref.get(reference)
                     if not person_id:
-                        found = self._find_person(connection, space_id, link.ref)
+                        found = self._find_person(connection, space_id, reference)
                         person_id = found["id"] if found else None
                     if not person_id:
                         continue
                     connection.execute(
                         """
-                        INSERT OR IGNORE INTO memory_people(memory_id, person_id, role)
-                        VALUES (?, ?, ?)
+                        INSERT OR IGNORE INTO memory_people(memory_id, person_id)
+                        VALUES (?, ?)
                         """,
-                        (memory_id, person_id, link.role),
+                        (memory_id, person_id),
                     )
                     affected_people.add(person_id)
 
@@ -594,12 +590,12 @@ class SqliteWorldStore:
         include_evidence: bool,
     ) -> MemoryView:
         people = [
-            {"id": item["person_id"], "name": item["display_name"], "role": item["role"]}
+            {"id": item["person_id"], "name": item["display_name"]}
             for item in connection.execute(
                 """
-                SELECT mp.person_id, p.display_name, mp.role
+                SELECT mp.person_id, p.display_name
                 FROM memory_people mp JOIN people p ON p.id = mp.person_id
-                WHERE mp.memory_id = ? ORDER BY mp.role, p.display_name
+                WHERE mp.memory_id = ? ORDER BY p.display_name
                 """,
                 (row["id"],),
             ).fetchall()
@@ -859,7 +855,7 @@ class SqliteWorldStore:
             )
             if person_id:
                 connection.execute(
-                    "INSERT INTO memory_people(memory_id, person_id, role) VALUES (?, ?, 'subject')",
+                    "INSERT INTO memory_people(memory_id, person_id) VALUES (?, ?)",
                     (memory_id, person_id),
                 )
             if relationship_id:
@@ -1037,15 +1033,15 @@ class SqliteWorldStore:
                 ),
             )
             affected: set[str] = set()
-            for link in request.people:
-                person = self._find_person(connection, space_id, link.ref)
+            for reference in request.people:
+                person = self._find_person(connection, space_id, reference)
                 if not person:
-                    person_id = self._create_person(connection, space_id, link.ref)
+                    person_id = self._create_person(connection, space_id, reference)
                 else:
                     person_id = person["id"]
                 connection.execute(
-                    "INSERT INTO memory_people(memory_id, person_id, role) VALUES (?, ?, ?)",
-                    (memory_id, person_id, link.role),
+                    "INSERT OR IGNORE INTO memory_people(memory_id, person_id) VALUES (?, ?)",
+                    (memory_id, person_id),
                 )
                 affected.add(person_id)
             for person_id in affected:
@@ -1091,8 +1087,8 @@ class SqliteWorldStore:
             )
             connection.execute(
                 """
-                INSERT INTO memory_people(memory_id, person_id, role)
-                SELECT ?, person_id, role FROM memory_people WHERE memory_id = ?
+                INSERT INTO memory_people(memory_id, person_id)
+                SELECT ?, person_id FROM memory_people WHERE memory_id = ?
                 """,
                 (replacement_id, memory_id),
             )

@@ -99,9 +99,10 @@ def extraction_prompt(messages: list[ModelMessage]) -> str:
     return (
         f"Extraction policy: {policy_name}. {policy}\n"
         "Extract the messages together as one conversational context.\n"
-        "The user/assistant author role is context and never a Person. `asserter` is "
-        "the person whose claim or stance this is; `reporter` is the person "
-        "relaying it. Preserve reported claims as `reported`, not facts.\n\n"
+        "The user/assistant author role is context and never a Person. List every "
+        "Person referenced by a memory in its `people` refs; express who said or "
+        "did what in the memory content itself. Preserve reported claims as "
+        "`reported`, not facts.\n\n"
         "Messages:\n"
         + _json(messages)
     )

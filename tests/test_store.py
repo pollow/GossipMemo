@@ -14,7 +14,6 @@ from gossipmemo.models import (
     ManualMemoryRequest,
     ExtractedMemory,
     MessageInput,
-    PersonLink,
     PersonReasoningResult,
     QueryRequest,
     ExtractedRelationship,
@@ -256,7 +255,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                     ExtractedMemory(
                         content="Bob prefers tea.",
                         basis="stated",
-                        people=[PersonLink(ref="bob", role="subject")],
+                        people=["bob"],
                     )
                 ],
             )
@@ -355,7 +354,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     asyncio.run(scenario())
 
 
-def test_extraction_keeps_roles_evidence_and_relationship(store):
+def test_extraction_keeps_people_evidence_and_relationship(store):
     receipt = store.record_messages("personal", [_message()])[0]
     result = ExtractionResult(
         people=[
@@ -367,10 +366,7 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
                 content="Bob may leave soon",
                 kind="situation",
                 basis="reported",
-                people=[
-                        PersonLink(ref="bob", role="subject"),
-                        PersonLink(ref="alice", role="asserter"),
-                ],
+                people=["bob", "alice"],
                 relationships=[
                     ExtractedRelationship(
                         person_a_ref="alice",
@@ -400,10 +396,7 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
     assert len(context.memories) == 1
     memory = context.memories[0]
     assert memory.basis == "reported"
-    assert {person["role"] for person in memory.people} == {
-        "subject",
-        "asserter",
-    }
+    assert {person["name"] for person in memory.people} == {"Alice", "Bob"}
     assert memory.evidence == [
         {
             "message_id": receipt,
@@ -422,7 +415,73 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
     }
 
 
-def test_manual_memory_retract_increments_person_revision_once_even_with_multiple_roles(
+def test_memory_people_is_plain_person_association_and_alias_resolves(store):
+    receipt = store.record_messages("personal", [_message()])[0]
+    store.apply_extraction(
+        "personal",
+        _batch(store, receipt),
+        ExtractionResult(
+            people=[ExtractedPerson(ref="alice", display_name="Alice", aliases=["Al"])],
+            memories=[
+                ExtractedMemory(
+                    content="Al is taking Friday off.", basis="stated", people=["alice"]
+                )
+            ],
+        ),
+    )
+
+    rows = _rows(
+        store,
+        "SELECT mp.memory_id, mp.person_id FROM memory_people mp "
+        "JOIN person_aliases pa ON pa.person_id = mp.person_id "
+        "WHERE pa.normalized_value = 'al'",
+    )
+    assert len(rows) == 1
+    assert set(rows[0].keys()) == {"memory_id", "person_id"}
+    assert _rows(store, "PRAGMA table_info(memory_people)")
+    assert "role" not in {
+        row["name"] for row in _rows(store, "PRAGMA table_info(memory_people)")
+    }
+
+    memory = store.add_manual_memory(
+        "personal",
+        ManualMemoryRequest(content="Al likes coffee.", people=["Al"]),
+    )
+    linked = _rows(
+        store,
+        "SELECT person_id FROM memory_people WHERE memory_id = ?",
+        (memory,),
+    )
+    assert [row["person_id"] for row in linked] == [rows[0]["person_id"]]
+
+
+def test_same_alias_for_two_people_is_ambiguous_not_merged(store):
+    receipt = store.record_messages("personal", [_message()])[0]
+    store.apply_extraction(
+        "personal",
+        _batch(store, receipt),
+        ExtractionResult(
+            people=[
+                ExtractedPerson(ref="one", display_name="One", aliases=["Alex"]),
+                ExtractedPerson(ref="two", display_name="Two", aliases=["Alex"]),
+            ],
+            memories=[],
+        ),
+    )
+
+    assert len(
+        _rows(
+            store,
+            "SELECT person_id FROM person_aliases WHERE normalized_value = 'alex'",
+        )
+    ) == 2
+    with pytest.raises(AmbiguousPersonError):
+        store.add_manual_memory(
+            "personal", ManualMemoryRequest(content="Alex did it.", people=["Alex"])
+        )
+
+
+def test_manual_memory_retract_updates_memory_people_once(
     store,
 ):
     memory_id = store.add_manual_memory(
@@ -430,10 +489,7 @@ def test_manual_memory_retract_increments_person_revision_once_even_with_multipl
         ManualMemoryRequest(
             content="Bob is taking a sabbatical.",
             kind="situation",
-            people=[
-                PersonLink(ref="Bob", role="subject"),
-                PersonLink(ref="Bob", role="asserter"),
-            ],
+            people=["Bob"],
         ),
     )
     bob = store.read(
@@ -458,7 +514,7 @@ def test_person_reasoning_uses_revision_as_compare_and_swap(store):
         "personal",
         ManualMemoryRequest(
             content="Bob likes tea.",
-            people=[PersonLink(ref="Bob", role="subject")],
+            people=["Bob"],
         ),
     )
     bob = store.read(
@@ -527,10 +583,7 @@ def test_same_display_name_references_are_not_automatically_merged(store):
                 ExtractedMemory(
                     content="Two people named Alex were mentioned.",
                     basis="observed",
-                    people=[
-                        PersonLink(ref="first", role="participant"),
-                        PersonLink(ref="second", role="participant"),
-                    ],
+                    people=["first", "second"],
                 )
             ],
         ),
@@ -538,7 +591,8 @@ def test_same_display_name_references_are_not_automatically_merged(store):
 
     alexes = _rows(
         store,
-        "SELECT id FROM people WHERE space_id = ? AND normalized_name = ?",
+        "SELECT person_id AS id FROM person_aliases "
+        "WHERE space_id = ? AND normalized_value = ?",
         ("personal", "alex"),
     )
     assert len(alexes) == 2
@@ -547,7 +601,7 @@ def test_same_display_name_references_are_not_automatically_merged(store):
             "personal",
             ManualMemoryRequest(
                 content="An ambiguous Alex fact.",
-                people=[PersonLink(ref="Alex", role="subject")],
+                people=["Alex"],
             ),
         )
 
@@ -557,7 +611,7 @@ def test_person_reasoning_revision_compare_and_swap_is_atomic(store):
         "personal",
         ManualMemoryRequest(
             content="Bob has a source fact.",
-            people=[PersonLink(ref="Bob", role="subject")],
+            people=["Bob"],
         ),
     )
     bob = store.read(
