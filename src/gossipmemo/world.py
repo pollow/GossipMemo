@@ -11,7 +11,6 @@ from .models import (
     IngestRequest,
     IngestResponse,
     ManualMemoryRequest,
-    ProcessingStatus,
     QueryRequest,
     QueryResponse,
     SupersedeRequest,
@@ -88,11 +87,10 @@ class SocialMemoryWorld:
         task.add_done_callback(self._tasks.discard)
 
     async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
-        receipts = self.store.record_messages(space_id, request.messages)
-        for receipt in receipts:
-            if receipt.state != "completed":
-                self._schedule_extract(space_id, receipt.id)
-        return IngestResponse(messages=receipts)
+        message_ids = self.store.record_messages(space_id, request.messages)
+        for message_id in message_ids:
+            self._schedule_extract(space_id, message_id)
+        return IngestResponse(message_ids=message_ids)
 
     def _schedule_extract(self, space_id: str, message_id: str) -> None:
         self._spawn(
@@ -219,11 +217,6 @@ class SocialMemoryWorld:
             self._schedule_person_reason(space_id, person_id)
         for space_id, relationship_id in relationships:
             self._schedule_relationship_reason(space_id, relationship_id)
-
-    def message_status(
-        self, space_id: str, message_id: str
-    ) -> ProcessingStatus | None:
-        return self.store.processing_status(space_id, message_id)
 
     def health(self) -> HealthResponse:
         return HealthResponse(

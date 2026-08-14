@@ -15,11 +15,9 @@ from .models import (
     ManualMemoryRequest,
     MemoryView,
     MessageInput,
-    MessageReceipt,
     ModelMessage,
     PersonReasoningResult,
     PersonView,
-    ProcessingStatus,
     QueryContext,
     QueryRequest,
     RelationshipReasoningResult,
@@ -81,7 +79,7 @@ class WorldStore(Protocol):
 
     def record_messages(
         self, space_id: str, messages: list[MessageInput]
-    ) -> list[MessageReceipt]: ...
+    ) -> list[str]: ...
 
     def load_message(self, space_id: str, message_id: str) -> ModelMessage | None: ...
 
@@ -130,25 +128,7 @@ class SqliteWorldStore:
                 "VALUES (?, ?, ?, ?)",
                 (space_id, name or space_id, now, now),
             )
-            row = connection.execute(
-                "SELECT ego_person_id FROM spaces WHERE id = ?", (space_id,)
-            ).fetchone()
-            if row and row["ego_person_id"]:
-                return row["ego_person_id"]
-
-            ego_id = _id("person")
-            connection.execute(
-                """
-                INSERT INTO people(
-                    id, space_id, display_name, normalized_name, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (ego_id, space_id, "Me", "me", now, now),
-            )
-            connection.execute(
-                "UPDATE spaces SET ego_person_id = ? WHERE id = ?", (ego_id, space_id)
-            )
-            return ego_id
+            return space_id
 
     def _find_person(
         self, connection: sqlite3.Connection, space_id: str, reference: str
@@ -211,106 +191,11 @@ class SqliteWorldStore:
         )
         return person_id
 
-    def _resolve_author(
-        self, connection: sqlite3.Connection, space_id: str, message: MessageInput
-    ) -> str | None:
-        author = message.author
-        if author.is_ego:
-            space = connection.execute(
-                "SELECT ego_person_id FROM spaces WHERE id = ?", (space_id,)
-            ).fetchone()
-            if not space or not space["ego_person_id"]:
-                raise ValueError(f"space {space_id!r} has no ego person")
-            person_id = space["ego_person_id"]
-            if author.display_name:
-                connection.execute(
-                    """
-                    UPDATE people SET display_name = ?, normalized_name = ?, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        author.display_name,
-                        _normalized(author.display_name),
-                        _now(),
-                        person_id,
-                    ),
-                )
-            if author.external_id:
-                connection.execute(
-                    """
-                    INSERT OR IGNORE INTO person_external_identities(
-                        id, space_id, person_id, provider, external_id, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        _id("identity"),
-                        space_id,
-                        person_id,
-                        author.provider,
-                        author.external_id,
-                        _now(),
-                    ),
-                )
-            return person_id
-        if author.external_id:
-            existing = connection.execute(
-                """
-                SELECT person_id FROM person_external_identities
-                WHERE space_id = ? AND provider = ? AND external_id = ?
-                """,
-                (space_id, author.provider, author.external_id),
-            ).fetchone()
-            if existing:
-                return existing["person_id"]
-
-        display_name = author.display_name or author.external_id
-        if not display_name:
-            return None
-        # A previously unseen stable external identity is stronger evidence of a
-        # distinct person than a matching display name is evidence of sameness.
-        person_id = self._create_person(
-            connection,
-            space_id,
-            display_name,
-            reuse_unique_name=not bool(author.external_id),
-        )
-        if author.external_id:
-            connection.execute(
-                """
-                INSERT OR IGNORE INTO person_external_identities(
-                    id, space_id, person_id, provider, external_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    _id("identity"),
-                    space_id,
-                    person_id,
-                    author.provider,
-                    author.external_id,
-                    _now(),
-                ),
-            )
-            winner = connection.execute(
-                """
-                SELECT person_id FROM person_external_identities
-                WHERE space_id = ? AND provider = ? AND external_id = ?
-                """,
-                (space_id, author.provider, author.external_id),
-            ).fetchone()
-            if winner and winner["person_id"] != person_id:
-                # Another caller established the same stable identity first.
-                # The just-created Person has no references and can be removed.
-                connection.execute(
-                    "DELETE FROM people WHERE id = ?", (person_id,)
-                )
-                person_id = winner["person_id"]
-        return person_id
-
     def record_messages(
         self, space_id: str, messages: list[MessageInput]
-    ) -> list[MessageReceipt]:
+    ) -> list[str]:
         self.ensure_space(space_id)
-        receipts: list[MessageReceipt] = []
+        message_ids: list[str] = []
         with self._connect() as connection:
             for message in messages:
                 duplicate = None
@@ -337,37 +222,24 @@ class SqliteWorldStore:
                         ),
                     ).fetchone()
                 if duplicate:
-                    receipts.append(
-                        MessageReceipt(
-                            id=duplicate["id"],
-                            state=duplicate["extraction_state"],
-                            duplicate=True,
-                        )
-                    )
+                    message_ids.append(duplicate["id"])
                     continue
 
                 message_id = _id("message")
-                author_person_id = self._resolve_author(connection, space_id, message)
-                author_raw = (
-                    message.author.display_name
-                    or message.author.external_id
-                    or "unknown"
-                )
                 try:
                     connection.execute(
                         """
                         INSERT INTO messages(
-                            id, space_id, author_person_id, author_raw, content,
+                            id, space_id, author, content,
                             occurred_at, ingested_at, source_provider,
                             source_conversation_key, source_item_id, source_metadata,
                             idempotency_key, extraction_policy
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             message_id,
                             space_id,
-                            author_person_id,
-                            author_raw,
+                            message.author,
                             message.content,
                             message.occurred_at.isoformat(),
                             _now(),
@@ -406,16 +278,10 @@ class SqliteWorldStore:
                         ).fetchone()
                     if not duplicate:
                         raise
-                    receipts.append(
-                        MessageReceipt(
-                            id=duplicate["id"],
-                            state=duplicate["extraction_state"],
-                            duplicate=True,
-                        )
-                    )
+                    message_ids.append(duplicate["id"])
                     continue
-                receipts.append(MessageReceipt(id=message_id, state="pending"))
-        return receipts
+                message_ids.append(message_id)
+        return message_ids
 
     def load_message(self, space_id: str, message_id: str) -> ModelMessage | None:
         with self._connect() as connection:
@@ -428,8 +294,7 @@ class SqliteWorldStore:
             return ModelMessage(
                 id=row["id"],
                 space_id=row["space_id"],
-                author_person_id=row["author_person_id"],
-                author_raw=row["author_raw"],
+                author=row["author"],
                 content=row["content"],
                 occurred_at=row["occurred_at"],
                 source_provider=row["source_provider"],
@@ -522,8 +387,6 @@ class SqliteWorldStore:
                 return affected_people, affected_relationships
 
             people_by_ref: dict[str, str] = {}
-            if message["author_person_id"]:
-                people_by_ref["author"] = message["author_person_id"]
             extracted_name_counts = Counter(
                 _normalized(person.display_name) for person in result.people
             )
@@ -663,28 +526,6 @@ class SqliteWorldStore:
             ).fetchall()
             return [(row["space_id"], row["id"]) for row in rows]
 
-    def processing_status(
-        self, space_id: str, message_id: str
-    ) -> ProcessingStatus | None:
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT id, extraction_state, extraction_attempts, extracted_at,
-                       last_extraction_error
-                FROM messages WHERE space_id = ? AND id = ?
-                """,
-                (space_id, message_id),
-            ).fetchone()
-            if not row:
-                return None
-            return ProcessingStatus(
-                id=row["id"],
-                state=row["extraction_state"],
-                attempts=row["extraction_attempts"],
-                extracted_at=row["extracted_at"],
-                last_error=row["last_extraction_error"],
-            )
-
     def _memory_view(
         self,
         connection: sqlite3.Connection,
@@ -708,13 +549,13 @@ class SqliteWorldStore:
                 {
                     "message_id": item["message_id"],
                     "text": item["evidence_text"],
-                    "author": item["author_raw"],
+                    "author": item["author"],
                     "occurred_at": item["occurred_at"],
                     "source_provider": item["source_provider"],
                 }
                 for item in connection.execute(
                     """
-                    SELECT ms.message_id, ms.evidence_text, m.author_raw,
+                    SELECT ms.message_id, ms.evidence_text, m.author,
                            m.occurred_at, m.source_provider
                     FROM memory_sources ms JOIN messages m ON m.id = ms.message_id
                     WHERE ms.memory_id = ?

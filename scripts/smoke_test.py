@@ -71,14 +71,9 @@ def run(args: argparse.Namespace) -> None:
             )
 
         if not args.skip_ingest:
-            receipt = memory.ingest(
+            result = memory.ingest(
                 content="Alice 跟我说，Bob 最近可能准备离职，但还没有最终决定。",
-                author={
-                    "provider": "smoke-test",
-                    "external_id": "ego",
-                    "display_name": "Me",
-                    "is_ego": True,
-                },
+                author="user",
                 source={
                     "provider": "smoke-test",
                     "conversation_key": run_id,
@@ -88,14 +83,7 @@ def run(args: argparse.Namespace) -> None:
                 idempotency_key=f"{run_id}:gossip-1",
                 extraction_policy=args.policy,
             )
-            show("ingest receipt", receipt)
-
-            status = memory.wait_for_message(
-                receipt["messages"][0],
-                timeout=args.timeout,
-                poll_interval=0.5,
-            )
-            show("extraction status", status)
+            show("ingest result", result)
 
             query = memory.query(
                 "Bob 最近的工作状态怎么样？这个消息是谁告诉我的？",

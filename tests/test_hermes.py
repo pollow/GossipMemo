@@ -38,7 +38,7 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
         assert received.wait(1)
         assert len(ingested[0]) == 2
         user_message = ingested[0][0]
-        assert user_message["author"]["is_ego"] is True
+        assert user_message["author"] == "user"
         assert user_message["source"]["conversation_key"] == "hermes-session-7"
         assert "space" not in user_message["source"]
 

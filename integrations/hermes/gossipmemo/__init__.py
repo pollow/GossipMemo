@@ -258,19 +258,13 @@ class GossipMemoMemoryProvider(MemoryProvider):
         assistant_source["metadata"] = {"role": "assistant"}
         return [
             {
-                # The user's Hermes identity is the space ego.  The session is
-                # deliberately *not* used as a person or memory scope.
-                "author": {
-                    "provider": self._source_provider,
-                    "external_id": self._user_id,
-                    "is_ego": True,
-                },
+                "author": "user",
                 "content": user_content,
                 "occurred_at": now,
                 "source": user_source,
             },
             {
-                "author": {"provider": self._source_provider, "external_id": "assistant"},
+                "author": "assistant",
                 "content": assistant_content,
                 "occurred_at": now,
                 "source": assistant_source,

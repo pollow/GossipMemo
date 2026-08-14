@@ -3,7 +3,6 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
-    ego_person_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -35,16 +34,6 @@ CREATE TABLE IF NOT EXISTS person_aliases (
     UNIQUE(person_id, normalized_value, context_key)
 );
 
-CREATE TABLE IF NOT EXISTS person_external_identities (
-    id TEXT PRIMARY KEY,
-    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-    person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,
-    provider TEXT NOT NULL,
-    external_id TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    UNIQUE(space_id, provider, external_id)
-);
-
 CREATE TABLE IF NOT EXISTS relationships (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
@@ -67,8 +56,7 @@ CREATE TABLE IF NOT EXISTS relationships (
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
-    author_person_id TEXT REFERENCES people(id),
-    author_raw TEXT NOT NULL,
+    author TEXT NOT NULL CHECK(author IN ('user', 'assistant')),
     content TEXT NOT NULL,
     occurred_at TEXT NOT NULL,
     ingested_at TEXT NOT NULL,

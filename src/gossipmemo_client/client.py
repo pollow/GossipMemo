@@ -9,9 +9,7 @@ package (for example, a Hermes plugin).
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
-import time
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
@@ -121,15 +119,6 @@ class GossipMemoError(RuntimeError):
         super().__init__(f"{prefix}{message}{status}")
 
 
-class GossipMemoProcessingError(GossipMemoError):
-    """Raised by :meth:`wait` when server-side processing fails."""
-
-    def __init__(self, status: Mapping[str, Any]) -> None:
-        self.status = dict(status)
-        message = status.get("last_error") or status.get("error") or "message processing failed"
-        super().__init__(str(message))
-
-
 class _ClientCommon:
     """Shared validation and URL/header behaviour for both clients."""
 
@@ -170,28 +159,6 @@ class _ClientCommon:
     def _space_path(self, suffix: str) -> str:
         space = quote(self.space_id, safe="")
         return f"/v1/spaces/{space}/{suffix.lstrip('/')}"
-
-    @staticmethod
-    def _id_from_receipt(message: str | Mapping[str, Any] | Any) -> str:
-        if isinstance(message, str):
-            return message
-        if isinstance(message, Mapping):
-            value = message.get("id") or message.get("message_id")
-            if value:
-                return str(value)
-        value = getattr(message, "id", None)
-        if value:
-            return str(value)
-        raise ValueError("message_id must be a string or receipt containing id")
-
-    @staticmethod
-    def _status_state(status: Mapping[str, Any]) -> str:
-        value: Any = status.get("state")
-        nested = status.get("status")
-        if value is None and isinstance(nested, Mapping):
-            value = nested.get("state")
-        return str(value or "").lower()
-
 
 class GossipMemo(_ClientCommon):
     """Synchronous GossipMemo client.
@@ -267,17 +234,8 @@ class GossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
         extraction_policy: str | None = None,
-        wait: bool = False,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
     ) -> Any:
-        """Retain one or more messages in the configured space.
-
-        The server normally returns immediately with pending receipts.  Set
-        ``wait=True`` only when the caller needs extraction to finish; the
-        response then gains a ``statuses`` list while retaining the original
-        response fields.
-        """
+        """Persist one or more messages and queue background extraction."""
 
         if messages is not None and not isinstance(messages, str) and any(
             value is not None
@@ -313,75 +271,9 @@ class GossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
                 "extraction_policy": extraction_policy,
             }
-        response = self._request(
+        return self._request(
             "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
         )
-        if not wait:
-            return response
-        receipts = response.get("messages", []) if isinstance(response, Mapping) else []
-        statuses = [
-            self.wait(self._id_from_receipt(receipt), timeout=timeout, poll_interval=poll_interval)
-            for receipt in receipts
-            if isinstance(receipt, Mapping)
-            and (receipt.get("id") or receipt.get("message_id"))
-        ]
-        if isinstance(response, dict):
-            response = dict(response)
-            response["statuses"] = statuses
-        return response
-
-    def message_status(self, message_id: str | Mapping[str, Any] | Any) -> Any:
-        """Read extraction status for a retained message."""
-
-        identifier = quote(self._id_from_receipt(message_id), safe="")
-        return self._request(
-            "GET", self._space_path(f"messages/{identifier}")
-        )
-
-    def wait(
-        self,
-        message_id: str | Mapping[str, Any] | Any,
-        *,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
-    ) -> Any:
-        """Poll until a message is completed or failed.
-
-        ``GossipMemoProcessingError`` includes the terminal status when the
-        server reports ``failed``.  A timeout is a ``GossipMemoError`` so
-        callers can distinguish it from a server-side extraction failure.
-        """
-
-        if timeout is not None and timeout < 0:
-            raise ValueError("timeout must be non-negative or None")
-        if poll_interval < 0:
-            raise ValueError("poll_interval must be non-negative")
-        identifier = self._id_from_receipt(message_id)
-        started = time.monotonic()
-        while True:
-            status = self.message_status(identifier)
-            if not isinstance(status, Mapping):
-                raise GossipMemoError("message status response must be a JSON object")
-            state = self._status_state(status)
-            if state == "completed":
-                return dict(status)
-            if state == "failed":
-                raise GossipMemoProcessingError(status)
-            if timeout is not None and time.monotonic() - started >= timeout:
-                raise GossipMemoError(f"timed out waiting for message {identifier}")
-            if poll_interval:
-                time.sleep(poll_interval)
-
-    def wait_for_message(
-        self,
-        message_id: str | Mapping[str, Any] | Any,
-        *,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
-    ) -> Any:
-        """Compatibility alias for callers that prefer an explicit name."""
-
-        return self.wait(message_id, timeout=timeout, poll_interval=poll_interval)
 
     def query(
         self,
@@ -573,9 +465,6 @@ class AsyncGossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
         extraction_policy: str | None = None,
-        wait: bool = False,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
     ) -> Any:
         if messages is not None and not isinstance(messages, str) and any(
             value is not None
@@ -611,68 +500,9 @@ class AsyncGossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
                 "extraction_policy": extraction_policy,
             }
-        response = await self._request(
+        return await self._request(
             "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
         )
-        if not wait:
-            return response
-        receipts = response.get("messages", []) if isinstance(response, Mapping) else []
-        statuses = [
-            await self.wait(
-                self._id_from_receipt(receipt), timeout=timeout, poll_interval=poll_interval
-            )
-            for receipt in receipts
-            if isinstance(receipt, Mapping)
-            and (receipt.get("id") or receipt.get("message_id"))
-        ]
-        if isinstance(response, dict):
-            response = dict(response)
-            response["statuses"] = statuses
-        return response
-
-    async def message_status(self, message_id: str | Mapping[str, Any] | Any) -> Any:
-        identifier = quote(self._id_from_receipt(message_id), safe="")
-        return await self._request(
-            "GET", self._space_path(f"messages/{identifier}")
-        )
-
-    async def wait(
-        self,
-        message_id: str | Mapping[str, Any] | Any,
-        *,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
-    ) -> Any:
-        if timeout is not None and timeout < 0:
-            raise ValueError("timeout must be non-negative or None")
-        if poll_interval < 0:
-            raise ValueError("poll_interval must be non-negative")
-        identifier = self._id_from_receipt(message_id)
-        started = time.monotonic()
-        while True:
-            status = await self.message_status(identifier)
-            if not isinstance(status, Mapping):
-                raise GossipMemoError("message status response must be a JSON object")
-            state = self._status_state(status)
-            if state == "completed":
-                return dict(status)
-            if state == "failed":
-                raise GossipMemoProcessingError(status)
-            if timeout is not None and time.monotonic() - started >= timeout:
-                raise GossipMemoError(f"timed out waiting for message {identifier}")
-            if poll_interval:
-                await asyncio.sleep(poll_interval)
-
-    async def wait_for_message(
-        self,
-        message_id: str | Mapping[str, Any] | Any,
-        *,
-        timeout: float | None = 30.0,
-        poll_interval: float = 0.2,
-    ) -> Any:
-        """Compatibility alias for callers that prefer an explicit name."""
-
-        return await self.wait(message_id, timeout=timeout, poll_interval=poll_interval)
 
     async def query(
         self,
@@ -790,5 +620,4 @@ __all__ = [
     "AsyncGossipMemo",
     "GossipMemo",
     "GossipMemoError",
-    "GossipMemoProcessingError",
 ]

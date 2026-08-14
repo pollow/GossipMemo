@@ -68,13 +68,13 @@ from gossipmemo_client import GossipMemo
 
 memory = GossipMemo("http://localhost:8765", space_id="personal")
 
-receipt = memory.ingest(
+result = memory.ingest(
     content="Alice told me Bob may be preparing to leave.",
-    author={"provider": "hermes", "external_id": "me", "is_ego": True},
+    author="user",
     source={"provider": "hermes", "conversation_key": "chat-1", "item_id": "turn-1"},
     extraction_policy="balanced",  # or conservative / comprehensive
 )
-memory.wait_for_message(receipt["messages"][0]["id"])
+print(result["message_ids"])
 
 answer = memory.query("What do I know about Bob?", people=["Bob"])
 print(answer["answer"])

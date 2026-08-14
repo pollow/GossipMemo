@@ -8,17 +8,16 @@ from datetime import datetime, timezone
 import pytest
 
 from gossipmemo.models import (
-    AuthorRef,
     ExtractionResult,
     ExtractedPerson,
     InferredMemory,
     ManualMemoryRequest,
-    MemoryCandidate,
+    ExtractedMemory,
     MessageInput,
     PersonLink,
     PersonReasoningResult,
     QueryRequest,
-    RelationshipCandidate,
+    ExtractedRelationship,
     SourceRef,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
@@ -39,7 +38,7 @@ def _message(
 ) -> MessageInput:
     return MessageInput(
         idempotency_key=idempotency_key,
-        author=AuthorRef(provider="local", external_id="me", is_ego=True),
+        author="user",
         content=content,
         occurred_at=datetime(2026, 8, 9, 12, 0, tzinfo=timezone.utc),
         source=SourceRef(
@@ -66,13 +65,10 @@ def test_record_messages_is_idempotent_by_key_and_source_identity(store):
         "personal", [_message(content="changed again", source_item_id="item-1")]
     )[0]
 
-    assert first.state == "pending"
-    assert duplicate_by_key.id == first.id
-    assert duplicate_by_key.duplicate is True
-    assert duplicate_by_source.id == first.id
-    assert duplicate_by_source.duplicate is True
+    assert duplicate_by_key == first
+    assert duplicate_by_source == first
     assert len(_rows(store, "SELECT id FROM messages")) == 1
-    assert store.load_message("personal", first.id).content == _message().content
+    assert store.load_message("personal", first).content == _message().content
 
 
 def test_record_messages_idempotency_is_atomic_across_concurrent_callers(store):
@@ -90,8 +86,7 @@ def test_record_messages_idempotency_is_atomic_across_concurrent_callers(store):
     with ThreadPoolExecutor(max_workers=8) as workers:
         receipts = list(workers.map(record, range(8)))
 
-    assert len({receipt.id for receipt in receipts}) == 1
-    assert sum(not receipt.duplicate for receipt in receipts) == 1
+    assert len({receipt for receipt in receipts}) == 1
     assert len(_rows(store, "SELECT id FROM messages")) == 1
 
 
@@ -103,9 +98,7 @@ def test_source_identity_is_atomic_when_conversation_key_is_null(store):
             "personal",
             [
                 MessageInput(
-                    author=AuthorRef(
-                        provider="local", external_id="me", is_ego=True
-                    ),
+                    author="user",
                     content=f"worker {worker}",
                     source=SourceRef(provider="import", item_id="same-item"),
                 )
@@ -115,8 +108,7 @@ def test_source_identity_is_atomic_when_conversation_key_is_null(store):
     with ThreadPoolExecutor(max_workers=8) as workers:
         receipts = list(workers.map(record, range(8)))
 
-    assert len({receipt.id for receipt in receipts}) == 1
-    assert sum(not receipt.duplicate for receipt in receipts) == 1
+    assert len({receipt for receipt in receipts}) == 1
     assert len(_rows(store, "SELECT id FROM messages")) == 1
 
 
@@ -131,24 +123,26 @@ def test_first_ingest_initializes_space_atomically_across_callers(store):
         receipts = list(workers.map(record, range(8)))
 
     assert len(receipts) == 8
-    assert all(receipt.state == "pending" for receipt in receipts)
     assert len(_rows(store, "SELECT id FROM messages WHERE space_id = 'new-space'")) == 8
-    assert len(_rows(store, "SELECT id FROM people WHERE space_id = 'new-space'")) == 1
+    assert _rows(store, "SELECT id FROM people WHERE space_id = 'new-space'") == []
 
 
 def test_zero_memory_extraction_completes_message_without_creating_memory(store):
     receipt = store.record_messages("personal", [_message()])[0]
 
     affected_people, affected_relationships = store.apply_extraction(
-        "personal", receipt.id, ExtractionResult()
+        "personal", receipt, ExtractionResult()
     )
 
     assert affected_people == set()
     assert affected_relationships == set()
-    status = store.processing_status("personal", receipt.id)
-    assert status is not None
-    assert status.state == "completed"
-    assert status.attempts == 0
+    row = _rows(
+        store,
+        "SELECT extraction_state, extraction_attempts FROM messages WHERE id = ?",
+        (receipt,),
+    )[0]
+    assert row["extraction_state"] == "completed"
+    assert row["extraction_attempts"] == 0
     assert store.pending_messages() == []
     assert _rows(store, "SELECT id FROM memories") == []
 
@@ -157,10 +151,10 @@ def test_memory_fts_triggers_track_insert_update_and_delete(store):
     receipt = store.record_messages("personal", [_message()])[0]
     store.apply_extraction(
         "personal",
-        receipt.id,
+        receipt,
         ExtractionResult(
             memories=[
-                MemoryCandidate(
+                ExtractedMemory(
                     content="Distinctive sabbatical phrase",
                     basis="observed",
                 )
@@ -235,7 +229,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     from gossipmemo.models import (
         ExtractionResult,
         ExtractedPerson,
-        MemoryCandidate,
+        ExtractedMemory,
         PersonReasoningResult,
         RelationshipReasoningResult,
     )
@@ -251,7 +245,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             return ExtractionResult(
                 people=[ExtractedPerson(ref="bob", display_name="Bob")],
                 memories=[
-                    MemoryCandidate(
+                    ExtractedMemory(
                         content="Bob prefers tea.",
                         basis="stated",
                         people=[PersonLink(ref="bob", role="subject")],
@@ -308,11 +302,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                     json={
                         "messages": [
                             {
-                                "author": {
-                                    "provider": "local",
-                                    "external_id": "me",
-                                    "is_ego": True,
-                                },
+                                "author": "user",
                                 "content": "Bob likes tea.",
                                 "source": {
                                     "provider": "test",
@@ -324,21 +314,20 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                     },
                 )
                 assert ingest.status_code == 202
-                receipt = ingest.json()["messages"][0]
-                assert receipt["state"] == "pending"
+                payload = ingest.json()
+                assert payload["status"] == "accepted"
+                message_id = payload["message_ids"][0]
 
-                status = None
                 for _ in range(100):
-                    status_response = await client.get(
-                        f"/v1/spaces/personal/messages/{receipt['id']}"
-                    )
-                    status = status_response.json()
-                    if status["state"] == "completed":
+                    row = _rows(
+                        store,
+                        "SELECT extraction_state FROM messages WHERE id = ?",
+                        (message_id,),
+                    )[0]
+                    if row["extraction_state"] == "completed":
                         break
                     await asyncio.sleep(0)
-                assert status is not None
-                assert status["state"] == "completed"
-                assert status["attempts"] == 1
+                assert row["extraction_state"] == "completed"
 
                 query = await client.post(
                     "/v1/spaces/personal/query",
@@ -364,17 +353,16 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
             ExtractedPerson(ref="bob", display_name="Bob"),
         ],
         memories=[
-            MemoryCandidate(
+            ExtractedMemory(
                 content="Bob may leave soon",
                 kind="situation",
                 basis="reported",
                 people=[
-                    PersonLink(ref="bob", role="subject"),
-                    PersonLink(ref="alice", role="asserter"),
-                    PersonLink(ref="author", role="reporter"),
+                        PersonLink(ref="bob", role="subject"),
+                        PersonLink(ref="alice", role="asserter"),
                 ],
                 relationships=[
-                    RelationshipCandidate(
+                    ExtractedRelationship(
                         person_a_ref="alice",
                         person_b_ref="bob",
                         facets=[{"kind": "coworker"}],
@@ -386,7 +374,7 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
     )
 
     affected_people, affected_relationships = store.apply_extraction(
-        "personal", receipt.id, result
+        "personal", receipt, result
     )
     context = store.read(
         "personal",
@@ -398,7 +386,7 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
         ),
     )
 
-    assert len(affected_people) == 3  # Alice, Bob, and the message author (Me).
+    assert len(affected_people) == 2  # Message authors are not graph people.
     assert len(affected_relationships) == 1
     assert len(context.memories) == 1
     memory = context.memories[0]
@@ -406,13 +394,12 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
     assert {person["role"] for person in memory.people} == {
         "subject",
         "asserter",
-        "reporter",
     }
     assert memory.evidence == [
         {
-            "message_id": receipt.id,
+            "message_id": receipt,
             "text": "Alice told me Bob may leave soon.",
-            "author": "me",
+            "author": "user",
             "occurred_at": "2026-08-09T12:00:00+00:00",
             "source_provider": "agent_chat",
         }
@@ -520,14 +507,14 @@ def test_same_display_name_references_are_not_automatically_merged(store):
     receipt = store.record_messages("personal", [_message()])[0]
     store.apply_extraction(
         "personal",
-        receipt.id,
+        receipt,
         ExtractionResult(
             people=[
                 ExtractedPerson(ref="first", display_name="Alex"),
                 ExtractedPerson(ref="second", display_name="Alex"),
             ],
             memories=[
-                MemoryCandidate(
+                ExtractedMemory(
                     content="Two people named Alex were mentioned.",
                     basis="observed",
                     people=[

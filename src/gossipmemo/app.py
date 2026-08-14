@@ -14,7 +14,6 @@ from .models import (
     IngestRequest,
     IngestResponse,
     ManualMemoryRequest,
-    ProcessingStatus,
     QueryRequest,
     QueryResponse,
     RetractRequest,
@@ -87,17 +86,6 @@ def create_app(
     )
     async def ingest(space_id: str, request: IngestRequest) -> IngestResponse:
         return await world.ingest(space_id, request)
-
-    @app.get(
-        "/v1/spaces/{space_id}/messages/{message_id}",
-        response_model=ProcessingStatus,
-        dependencies=protected,
-    )
-    async def message_status(space_id: str, message_id: str) -> ProcessingStatus:
-        result = world.message_status(space_id, message_id)
-        if not result:
-            raise HTTPException(status_code=404, detail="message not found")
-        return result
 
     @app.post(
         "/v1/spaces/{space_id}/query",

@@ -251,7 +251,7 @@ POST /v1/spaces/{space_id}/ingest
 {
   "messages": [
     {
-      "author": { "external_id": "me", "provider": "local" },
+      "author": "user",
       "content": "Alice 跟我说，Bob 最近可能准备离职。",
       "occurred_at": "2026-08-09T12:00:00Z",
       "source": {
@@ -268,17 +268,9 @@ POST /v1/spaces/{space_id}/ingest
 
 ```json
 {
-  "messages": [
-    { "id": "message_123", "state": "pending", "duplicate": false }
-  ],
-  "processing": "queued"
+  "status": "accepted",
+  "message_ids": ["message_123"]
 }
-```
-
-处理状态：
-
-```http
-GET /v1/spaces/{space_id}/messages/{message_id}
 ```
 
 ### 5.2 Query

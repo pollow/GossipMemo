@@ -41,12 +41,11 @@ Memory
 
 ## 2. spaces
 
-一个 Space 表示一份全局社交世界及其观察原点。
+一个 Space 表示一份隔离的全局社交世界。消息作者不会因此成为 Person。
 
 ```yaml
 id: space_personal
 name: My social world
-ego_person_id: person_me
 created_at: 2026-08-09T12:00:00Z
 updated_at: 2026-08-09T12:00:00Z
 ```
@@ -55,14 +54,13 @@ updated_at: 2026-08-09T12:00:00Z
 | --- | --- |
 | `id` | 稳定 Space ID |
 | `name` | 人类可读名称 |
-| `ego_person_id` | 该社交世界的观察原点，引用同一 Space 内的 Person |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
 第一版在 Space 内共享可见性。需要完全隔离的用户、Agent 或记忆世界使用不同 Space，不实现逐条 Memory ACL。
 
 ## 3. people
 
-Person 表示社交世界中的一个人。一个人不需要与 ego 有直接关系；只要身份足够明确，就可以通过其他 Person 或 Relationship 进入模型。
+Person 表示消息内容中被识别出的一个人；`user` 和 `assistant` 消息作者不会自动成为 Person。
 
 ```yaml
 id: person_bob
@@ -207,8 +205,7 @@ Message 是不可变的原始 evidence，回答“输入中实际说了什么”
 ```yaml
 id: message_123
 space_id: space_personal
-author_person_id: person_me
-author_raw: me
+author: user
 content: Alice 跟我说，Bob 最近可能准备离职。
 occurred_at: 2026-08-09T12:00:00Z
 ingested_at: 2026-08-09T12:00:05Z
@@ -228,8 +225,7 @@ last_extraction_error: null
 | --- | --- |
 | `id` | 内部稳定 Message ID |
 | `space_id` | 所属 Space |
-| `author_person_id` | 已解析的原始消息作者；无法确认时为空 |
-| `author_raw` | 来源中的原始作者标识 |
+| `author` | `user \| assistant`；仅表示消息角色，不关联 Person |
 | `content` | 原始消息内容 |
 | `occurred_at` | 消息实际发生时间 |
 | `ingested_at` | 系统接收时间 |
@@ -427,14 +423,13 @@ Projection 可以删除并从 active Memory 重建。人工编辑 projection 时
 ```
 
 ```yaml
-message.author_person_id: person_me
+message.author: user
 
 memory.content: Bob 最近可能在考虑离职
 memory.basis: reported
 memory.people:
   - { person: person_bob, role: subject }
   - { person: person_alice, role: asserter }
-  - { person: person_me, role: reporter }
 ```
 
 ### 直接导入群聊
@@ -444,7 +439,7 @@ Alice：Bob 最近可能准备离职。
 ```
 
 ```yaml
-message.author_person_id: person_alice
+message.author: user
 
 memory.content: Bob 最近可能在考虑离职
 memory.basis: stated

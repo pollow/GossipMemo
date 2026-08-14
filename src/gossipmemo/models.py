@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -16,19 +16,6 @@ MemoryKind = Literal["fact", "event", "preference", "plan", "situation", "impres
 ExtractionPolicy = Literal["conservative", "balanced", "comprehensive"]
 
 
-class AuthorRef(BaseModel):
-    provider: str = "local"
-    external_id: str | None = None
-    display_name: str | None = None
-    is_ego: bool = False
-
-    @model_validator(mode="after")
-    def require_identity(self) -> "AuthorRef":
-        if not self.external_id and not self.display_name:
-            raise ValueError("author requires external_id or display_name")
-        return self
-
-
 class SourceRef(BaseModel):
     provider: str = "agent_chat"
     conversation_key: str | None = None
@@ -38,7 +25,7 @@ class SourceRef(BaseModel):
 
 class MessageInput(BaseModel):
     idempotency_key: str | None = None
-    author: AuthorRef
+    author: Literal["user", "assistant"]
     content: str = Field(min_length=1)
     occurred_at: datetime = Field(default_factory=utc_now)
     source: SourceRef = Field(default_factory=SourceRef)
@@ -56,15 +43,9 @@ class IngestRequest(BaseModel):
     messages: list[MessageInput] = Field(min_length=1, max_length=100)
 
 
-class MessageReceipt(BaseModel):
-    id: str
-    state: Literal["pending", "completed", "failed"]
-    duplicate: bool = False
-
-
 class IngestResponse(BaseModel):
-    messages: list[MessageReceipt]
-    processing: Literal["queued"] = "queued"
+    status: Literal["accepted"] = "accepted"
+    message_ids: list[str]
 
 
 class PersonLink(BaseModel):
@@ -78,18 +59,18 @@ class ExtractedPerson(BaseModel):
     aliases: list[str] = Field(default_factory=list)
 
 
-class RelationshipCandidate(BaseModel):
+class ExtractedRelationship(BaseModel):
     person_a_ref: str
     person_b_ref: str
     facets: list[dict[str, Any]] = Field(default_factory=list)
 
 
-class MemoryCandidate(BaseModel):
+class ExtractedMemory(BaseModel):
     content: str = Field(min_length=1)
     kind: MemoryKind = "fact"
     basis: MemoryBasis
     people: list[PersonLink] = Field(default_factory=list)
-    relationships: list[RelationshipCandidate] = Field(default_factory=list)
+    relationships: list[ExtractedRelationship] = Field(default_factory=list)
     evidence_text: str | None = None
     valid_from: str | None = None
     valid_to: str | None = None
@@ -97,7 +78,7 @@ class MemoryCandidate(BaseModel):
 
 class ExtractionResult(BaseModel):
     people: list[ExtractedPerson] = Field(default_factory=list)
-    memories: list[MemoryCandidate] = Field(default_factory=list)
+    memories: list[ExtractedMemory] = Field(default_factory=list)
 
 
 class InferredMemory(BaseModel):
@@ -191,14 +172,6 @@ class SupersedeRequest(BaseModel):
     reason: str | None = None
 
 
-class ProcessingStatus(BaseModel):
-    id: str
-    state: Literal["pending", "completed", "failed"]
-    attempts: int
-    extracted_at: str | None = None
-    last_error: str | None = None
-
-
 class QueueStatus(BaseModel):
     pending: int
     running: bool
@@ -216,8 +189,7 @@ class ModelMessage(BaseModel):
 
     id: str
     space_id: str
-    author_person_id: str | None = None
-    author_raw: str
+    author: Literal["user", "assistant"]
     content: str
     occurred_at: str
     source_provider: str

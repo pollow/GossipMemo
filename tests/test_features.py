@@ -9,17 +9,16 @@ import pytest
 from pydantic import ValidationError
 
 from gossipmemo.models import (
-    AuthorRef,
     ExtractionResult,
     ExtractedPerson,
     ManualMemoryRequest,
-    MemoryCandidate,
+    ExtractedMemory,
     MessageInput,
     ModelMessage,
     PersonLink,
     PersonReasoningResult,
     QueryRequest,
-    RelationshipCandidate,
+    ExtractedRelationship,
     RelationshipReasoningResult,
     SourceRef,
     SupersedeRequest,
@@ -106,7 +105,7 @@ def test_one_hop_expansion_returns_neighbor_and_relationship_memory(tmp_path):
         "personal",
         [
             MessageInput(
-                author=AuthorRef(external_id="me", is_ego=True),
+                author="user",
                 content="Alice and Bob work together.",
                 source=SourceRef(provider="test", item_id="relationship-1"),
             )
@@ -114,18 +113,18 @@ def test_one_hop_expansion_returns_neighbor_and_relationship_memory(tmp_path):
     )[0]
     store.apply_extraction(
         "personal",
-        receipt.id,
+        receipt,
         ExtractionResult(
             people=[
                 ExtractedPerson(ref="alice", display_name="Alice"),
                 ExtractedPerson(ref="bob", display_name="Bob"),
             ],
             memories=[
-                MemoryCandidate(
+                ExtractedMemory(
                     content="Alice and Bob work together.",
                     basis="stated",
                     relationships=[
-                        RelationshipCandidate(
+                        ExtractedRelationship(
                             person_a_ref="alice",
                             person_b_ref="bob",
                             facets=[{"kind": "coworker"}],
@@ -194,7 +193,7 @@ def test_supersede_preserves_history_and_retract_reason(tmp_path):
 def test_message_time_requires_timezone():
     with pytest.raises(ValidationError, match="timezone"):
         MessageInput(
-            author=AuthorRef(external_id="me", is_ego=True),
+            author="user",
             content="A message without a timezone.",
             occurred_at=datetime(2026, 8, 9, 12, 0),
         )
@@ -208,12 +207,7 @@ def test_sync_and_async_sdk_follow_server_contract():
         if request.url.path.endswith("/ingest"):
             return httpx.Response(
                 202,
-                json={"messages": [{"id": "message_1", "state": "pending"}]},
-            )
-        if request.url.path.endswith("/messages/message_1"):
-            return httpx.Response(
-                200,
-                json={"id": "message_1", "state": "completed", "attempts": 1},
+                json={"status": "accepted", "message_ids": ["message_1"]},
             )
         if request.url.path.endswith("/query"):
             return httpx.Response(
@@ -226,11 +220,11 @@ def test_sync_and_async_sdk_follow_server_contract():
     with GossipMemo(
         "http://memory.test", api_key="secret", transport=transport
     ) as client:
-        receipt = client.ingest(
+        result = client.ingest(
             content="Bob likes tea.",
-            author={"external_id": "me", "is_ego": True},
+            author="user",
         )
-        assert client.wait(receipt["messages"][0])["state"] == "completed"
+        assert result == {"status": "accepted", "message_ids": ["message_1"]}
         assert client.query("What does Bob like?")["answer"] == "Tea"
 
     async def async_scenario() -> None:
@@ -278,7 +272,7 @@ def test_openai_compatible_adapter_validates_structured_output():
                 ModelMessage(
                     id="message_1",
                     space_id="personal",
-                    author_raw="Me",
+                    author="user",
                     content="Bob likes tea.",
                     occurred_at="2026-08-09T12:00:00+00:00",
                     source_provider="test",
