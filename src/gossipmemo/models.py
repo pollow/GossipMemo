@@ -71,7 +71,6 @@ class ExtractedMemory(BaseModel):
     basis: MemoryBasis
     people: list[PersonLink] = Field(default_factory=list)
     relationships: list[ExtractedRelationship] = Field(default_factory=list)
-    evidence_text: str | None = None
     valid_from: str | None = None
     valid_to: str | None = None
 

@@ -52,7 +52,7 @@ class LlmModel(Protocol):
     @property
     def configured(self) -> bool: ...
 
-    async def extract(self, message: ModelMessage) -> ExtractionResult: ...
+    async def extract(self, messages: Sequence[ModelMessage]) -> ExtractionResult: ...
 
     async def reason_person(
         self, person: PersonView, memories: Sequence[MemoryView]
@@ -193,10 +193,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             return self.base_url
         return self.base_url + "/chat/completions"
 
-    async def extract(self, message: ModelMessage) -> ExtractionResult:
+    async def extract(self, messages: Sequence[ModelMessage]) -> ExtractionResult:
         content = await self._structured_call(
             EXTRACTION_SYSTEM_PROMPT,
-            extraction_prompt(message),
+            extraction_prompt(list(messages)),
             ExtractionResult,
         )
         return cast(ExtractionResult, content)

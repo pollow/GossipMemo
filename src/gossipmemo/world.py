@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Coroutine
+from datetime import datetime, timezone
 from typing import Any
 
 from .llm import LLMModel
@@ -35,11 +36,16 @@ class SocialMemoryWorld:
         store: SqliteWorldStore,
         model: LLMModel,
         queue: SequentialLLMQueue | None = None,
+        extraction_batch_size: int = 6,
+        extraction_batch_timeout_seconds: float = 1800.0,
     ) -> None:
         self.store = store
         self.model = model
         self.queue = queue or SequentialLLMQueue()
+        self.extraction_batch_size = extraction_batch_size
+        self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self._tasks: set[asyncio.Task[Any]] = set()
+        self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
         self._stopping = False
 
@@ -47,8 +53,14 @@ class SocialMemoryWorld:
         self._stopping = False
         self.store.initialize()
         await self.queue.start()
-        for space_id, message_id in self.store.pending_messages():
-            self._schedule_extract(space_id, message_id)
+        unbatched_spaces: set[str] = set()
+        for space_id, batch_id, _ in self.store.pending_extractions():
+            if batch_id:
+                self._schedule_extract(space_id, batch_id)
+            else:
+                unbatched_spaces.add(space_id)
+        for space_id in unbatched_spaces:
+            self._drain_extraction_batches(space_id)
         people, relationships = self.store.stale_entities()
         for space_id, person_id in people:
             self._schedule_person_reason(space_id, person_id)
@@ -57,6 +69,12 @@ class SocialMemoryWorld:
 
     async def stop(self) -> None:
         self._stopping = True
+        flush_tasks = tuple(self._flush_tasks.values())
+        for task in flush_tasks:
+            task.cancel()
+        if flush_tasks:
+            await asyncio.gather(*flush_tasks, return_exceptions=True)
+        self._flush_tasks.clear()
         await self.queue.stop()
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
@@ -88,31 +106,74 @@ class SocialMemoryWorld:
 
     async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
         message_ids = self.store.record_messages(space_id, request.messages)
-        for message_id in message_ids:
-            self._schedule_extract(space_id, message_id)
+        self._drain_extraction_batches(space_id)
         return IngestResponse(message_ids=message_ids)
 
-    def _schedule_extract(self, space_id: str, message_id: str) -> None:
+    def _drain_extraction_batches(self, space_id: str) -> None:
+        pending = self.store.unbatched_messages(space_id)
+        while len(pending) >= self.extraction_batch_size:
+            batch_id = self.store.create_extraction_batch(
+                space_id,
+                [message_id for message_id, _ in pending[: self.extraction_batch_size]],
+            )
+            if batch_id:
+                self._schedule_extract(space_id, batch_id)
+            pending = self.store.unbatched_messages(space_id)
+        if pending:
+            self._schedule_partial_flush(space_id, pending[0][1])
+        else:
+            flush_task = self._flush_tasks.pop(space_id, None)
+            if flush_task and flush_task is not asyncio.current_task():
+                flush_task.cancel()
+
+    def _schedule_partial_flush(self, space_id: str, oldest_ingested_at: str) -> None:
+        if self._stopping or space_id in self._flush_tasks:
+            return
+        oldest = datetime.fromisoformat(oldest_ingested_at)
+        elapsed = (datetime.now(timezone.utc) - oldest).total_seconds()
+        delay = max(0.0, self.extraction_batch_timeout_seconds - elapsed)
+
+        async def flush() -> None:
+            try:
+                await asyncio.sleep(delay)
+                self._flush_tasks.pop(space_id, None)
+                pending = self.store.unbatched_messages(space_id)
+                if pending:
+                    batch_id = self.store.create_extraction_batch(
+                        space_id,
+                        [
+                            message_id
+                            for message_id, _ in pending[: self.extraction_batch_size]
+                        ],
+                    )
+                    if batch_id:
+                        self._schedule_extract(space_id, batch_id)
+                self._drain_extraction_batches(space_id)
+            finally:
+                self._flush_tasks.pop(space_id, None)
+
+        task = asyncio.create_task(flush(), name=f"gossipmemo-flush-{space_id}")
+        self._flush_tasks[space_id] = task
+
+    def _schedule_extract(self, space_id: str, batch_id: str) -> None:
         self._spawn(
-            ("extract", space_id, message_id),
-            self._extract(space_id, message_id),
+            ("extract", space_id, batch_id),
+            self._extract(space_id, batch_id),
         )
 
-    async def _extract(self, space_id: str, message_id: str) -> None:
-        message = self.store.load_message(space_id, message_id)
-        if not message:
+    async def _extract(self, space_id: str, batch_id: str) -> None:
+        messages = self.store.load_batch(space_id, batch_id)
+        if not messages:
             return
-        self.store.mark_extraction_attempt(space_id, message_id)
+        self.store.mark_extraction_attempt(space_id, batch_id)
         try:
-            result = await self.queue.submit(
-                "extract", self.model.extract, message
-            )
+            result = await self.queue.submit("extract", self.model.extract, messages)
             people, relationships = self.store.apply_extraction(
-                space_id, message_id, result
+                space_id, batch_id, result
             )
         except Exception as error:
-            self.store.fail_extraction(space_id, message_id, str(error))
-            logger.exception("extract failed for %s", message_id)
+            self.store.fail_extraction(space_id, batch_id, str(error))
+            logger.exception("extract failed for %s", batch_id)
             return
         if self._stopping:
             return

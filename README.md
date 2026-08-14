@@ -40,6 +40,11 @@ There is no default provider URL or no-LLM query fallback. Configuration is
 read once at process initialization and passed to the server modules as one
 immutable `Settings` value.
 
+Extraction batches wait for 6 messages by default. A partial batch is flushed
+when its oldest message has waited 30 minutes. These values can be changed with
+`GOSSIPMEMO_EXTRACTION_BATCH_SIZE` and
+`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`.
+
 ## Smoke test a running server
 
 After starting the server, run:

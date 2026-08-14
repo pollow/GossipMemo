@@ -419,6 +419,5 @@ POST /v1/spaces/{space_id}/reason
 1. 什么程度的 implicit signal 值得在 Extract 阶段形成 Memory？
 2. 只有 inferred evidence 时，何时自动创建 Relationship？
 3. 单条 reported Memory 可以进入 profile card 的哪些章节？
-4. 批量导入是否需要在 sequential queue 前增加可配置的 Extract batching？
-5. Profile card 的固定 JSON sections 是否需要允许应用自定义扩展字段？
-6. Query 的一跳扩展怎样排序，才能避免带入无关人物？
+4. Profile card 的固定 JSON sections 是否需要允许应用自定义扩展字段？
+5. Query 的一跳扩展怎样排序，才能避免带入无关人物？

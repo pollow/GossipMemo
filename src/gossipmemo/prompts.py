@@ -25,7 +25,7 @@ from .models import (
 )
 
 
-EXTRACTION_SYSTEM_PROMPT = """You extract a provenance-aware social memory from one message.
+EXTRACTION_SYSTEM_PROMPT = """You extract provenance-aware social memory from a batch of messages.
 Return only a JSON object matching the supplied schema. Do not add Markdown or
 explanatory prose. Keep the original meaning and uncertainty. Create people
 only when the text provides a usable reference; use person refs that can be
@@ -72,9 +72,16 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def extraction_prompt(message: ModelMessage) -> str:
+def extraction_prompt(messages: list[ModelMessage]) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
+    policies = {message.extraction_policy for message in messages}
+    if "comprehensive" in policies:
+        policy_name = "comprehensive"
+    elif "balanced" in policies:
+        policy_name = "balanced"
+    else:
+        policy_name = "conservative"
     policy = {
         "conservative": (
             "Retain only explicit, durable facts, events, preferences, plans, "
@@ -88,14 +95,15 @@ def extraction_prompt(message: ModelMessage) -> str:
             "Retain explicit information plus useful weak social signals as "
             "impression/inferred memories, preserving uncertainty and evidence."
         ),
-    }[message.extraction_policy]
+    }[policy_name]
     return (
-        f"Extraction policy: {message.extraction_policy}. {policy}\n"
-        "The author is context, not automatically the subject. `asserter` is "
+        f"Extraction policy: {policy_name}. {policy}\n"
+        "Extract the messages together as one conversational context.\n"
+        "The user/assistant author role is context and never a Person. `asserter` is "
         "the person whose claim or stance this is; `reporter` is the person "
         "relaying it. Preserve reported claims as `reported`, not facts.\n\n"
-        "Message:\n"
-        + _json(message)
+        "Messages:\n"
+        + _json(messages)
     )
 
 

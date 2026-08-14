@@ -31,6 +31,8 @@ class Settings:
     port: int = 8765
     api_key: str = ""
     llm_timeout_seconds: float = 120.0
+    extraction_batch_size: int = 6
+    extraction_batch_timeout_seconds: float = 1800.0
 
     def __post_init__(self) -> None:
         missing = [
@@ -48,6 +50,12 @@ class Settings:
             )
         if self.llm_timeout_seconds <= 0:
             raise ConfigurationError("llm_timeout_seconds must be greater than zero")
+        if self.extraction_batch_size < 1:
+            raise ConfigurationError("extraction_batch_size must be greater than zero")
+        if self.extraction_batch_timeout_seconds <= 0:
+            raise ConfigurationError(
+                "extraction_batch_timeout_seconds must be greater than zero"
+            )
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("port must be between 1 and 65535")
 
@@ -65,6 +73,12 @@ class Settings:
             api_key=_env("GOSSIPMEMO_API_KEY"),
             llm_timeout_seconds=float(
                 _env("GOSSIPMEMO_LLM_TIMEOUT_SECONDS", "120")
+            ),
+            extraction_batch_size=int(
+                _env("GOSSIPMEMO_EXTRACTION_BATCH_SIZE", "6")
+            ),
+            extraction_batch_timeout_seconds=float(
+                _env("GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS", "1800")
             ),
         )
 

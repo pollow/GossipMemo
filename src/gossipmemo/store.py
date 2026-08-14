@@ -81,10 +81,16 @@ class WorldStore(Protocol):
         self, space_id: str, messages: list[MessageInput]
     ) -> list[str]: ...
 
-    def load_message(self, space_id: str, message_id: str) -> ModelMessage | None: ...
+    def create_extraction_batch(
+        self, space_id: str, message_ids: list[str]
+    ) -> str | None: ...
+
+    def unbatched_messages(self, space_id: str) -> list[tuple[str, str]]: ...
+
+    def load_batch(self, space_id: str, batch_id: str) -> list[ModelMessage]: ...
 
     def apply_extraction(
-        self, space_id: str, message_id: str, result: ExtractionResult
+        self, space_id: str, batch_id: str, result: ExtractionResult
     ) -> tuple[set[str], set[str]]: ...
 
     def read(self, space_id: str, request: QueryRequest) -> QueryContext: ...
@@ -283,47 +289,94 @@ class SqliteWorldStore:
                 message_ids.append(message_id)
         return message_ids
 
-    def load_message(self, space_id: str, message_id: str) -> ModelMessage | None:
+    def create_extraction_batch(
+        self, space_id: str, message_ids: list[str]
+    ) -> str | None:
+        if not message_ids:
+            return None
+        placeholders = ",".join("?" for _ in message_ids)
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT * FROM messages WHERE space_id = ? AND id = ?",
-                (space_id, message_id),
-            ).fetchone()
-            if not row:
+            rows = connection.execute(
+                f"""SELECT id FROM messages
+                WHERE space_id = ? AND id IN ({placeholders})
+                  AND extraction_batch_id IS NULL
+                  AND extraction_state != 'completed'""",
+                (space_id, *message_ids),
+            ).fetchall()
+            pending_ids = [row["id"] for row in rows]
+            if not pending_ids:
                 return None
-            return ModelMessage(
-                id=row["id"],
-                space_id=row["space_id"],
-                author=row["author"],
-                content=row["content"],
-                occurred_at=row["occurred_at"],
-                source_provider=row["source_provider"],
-                source_conversation_key=row["source_conversation_key"],
-                source_item_id=row["source_item_id"],
-                source_metadata=_loads(row["source_metadata"], {}),
-                extraction_policy=row["extraction_policy"],
+            batch_id = _id("batch")
+            connection.execute(
+                "INSERT INTO extraction_batches(id, space_id, created_at) VALUES (?, ?, ?)",
+                (batch_id, space_id, _now()),
             )
+            pending_placeholders = ",".join("?" for _ in pending_ids)
+            connection.execute(
+                f"UPDATE messages SET extraction_batch_id = ? "
+                f"WHERE id IN ({pending_placeholders})",
+                (batch_id, *pending_ids),
+            )
+            return batch_id
 
-    def mark_extraction_attempt(self, space_id: str, message_id: str) -> None:
+    def unbatched_messages(self, space_id: str) -> list[tuple[str, str]]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT id, ingested_at FROM messages
+                WHERE space_id = ? AND extraction_batch_id IS NULL
+                  AND extraction_state IN ('pending', 'failed')
+                ORDER BY ingested_at, id""",
+                (space_id,),
+            ).fetchall()
+            return [(row["id"], row["ingested_at"]) for row in rows]
+
+    def load_batch(self, space_id: str, batch_id: str) -> list[ModelMessage]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT * FROM messages
+                WHERE space_id = ? AND extraction_batch_id = ?
+                  AND extraction_state != 'completed'
+                ORDER BY ingested_at""",
+                (space_id, batch_id),
+            ).fetchall()
+            return [
+                ModelMessage(
+                    id=row["id"],
+                    space_id=row["space_id"],
+                    author=row["author"],
+                    content=row["content"],
+                    occurred_at=row["occurred_at"],
+                    source_provider=row["source_provider"],
+                    source_conversation_key=row["source_conversation_key"],
+                    source_item_id=row["source_item_id"],
+                    source_metadata=_loads(row["source_metadata"], {}),
+                    extraction_policy=row["extraction_policy"],
+                )
+                for row in rows
+            ]
+
+    def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE messages
                 SET extraction_attempts = extraction_attempts + 1,
                     extraction_state = 'pending', last_extraction_error = NULL
-                WHERE space_id = ? AND id = ? AND extraction_state != 'completed'
+                WHERE space_id = ? AND extraction_batch_id = ?
+                  AND extraction_state != 'completed'
                 """,
-                (space_id, message_id),
+                (space_id, batch_id),
             )
 
-    def fail_extraction(self, space_id: str, message_id: str, error: str) -> None:
+    def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
                 """
                 UPDATE messages SET extraction_state = 'failed', last_extraction_error = ?
-                WHERE space_id = ? AND id = ? AND extraction_state != 'completed'
+                WHERE space_id = ? AND extraction_batch_id = ?
+                  AND extraction_state != 'completed'
                 """,
-                (error[:2000], space_id, message_id),
+                (error[:2000], space_id, batch_id),
             )
 
     def _ensure_relationship(
@@ -372,18 +425,24 @@ class SqliteWorldStore:
         return relationship_id
 
     def apply_extraction(
-        self, space_id: str, message_id: str, result: ExtractionResult
+        self, space_id: str, batch_id: str, result: ExtractionResult
     ) -> tuple[set[str], set[str]]:
         affected_people: set[str] = set()
         affected_relationships: set[str] = set()
         with self._connect() as connection:
-            message = connection.execute(
-                "SELECT * FROM messages WHERE space_id = ? AND id = ?",
-                (space_id, message_id),
+            batch = connection.execute(
+                "SELECT id FROM extraction_batches WHERE space_id = ? AND id = ?",
+                (space_id, batch_id),
             ).fetchone()
-            if not message:
-                raise KeyError(message_id)
-            if message["extraction_state"] == "completed":
+            if not batch:
+                raise KeyError(batch_id)
+            pending = connection.execute(
+                """SELECT 1 FROM messages
+                WHERE extraction_batch_id = ? AND extraction_state != 'completed'
+                LIMIT 1""",
+                (batch_id,),
+            ).fetchone()
+            if not pending:
                 return affected_people, affected_relationships
 
             people_by_ref: dict[str, str] = {}
@@ -423,8 +482,8 @@ class SqliteWorldStore:
                     """
                     INSERT INTO memories(
                         id, space_id, content, kind, basis, valid_from, valid_to,
-                        created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
+                        source_batch_id, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
                     """,
                     (
                         memory_id,
@@ -434,19 +493,9 @@ class SqliteWorldStore:
                         candidate.basis,
                         candidate.valid_from,
                         candidate.valid_to,
+                        batch_id,
                         now,
                         now,
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO memory_sources(memory_id, message_id, evidence_text)
-                    VALUES (?, ?, ?)
-                    """,
-                    (
-                        memory_id,
-                        message_id,
-                        candidate.evidence_text or message["content"],
                     ),
                 )
                 for link in candidate.people:
@@ -509,22 +558,34 @@ class SqliteWorldStore:
                 UPDATE messages
                 SET extraction_state = 'completed', extracted_at = ?,
                     last_extraction_error = NULL
-                WHERE id = ?
+                WHERE extraction_batch_id = ?
                 """,
-                (now, message_id),
+                (now, batch_id),
+            )
+            connection.execute(
+                "UPDATE extraction_batches SET completed_at = ? WHERE id = ?",
+                (now, batch_id),
             )
         return affected_people, affected_relationships
 
-    def pending_messages(self) -> list[tuple[str, str]]:
+    def pending_extractions(self) -> list[tuple[str, str | None, list[str]]]:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT space_id, id FROM messages
+                SELECT space_id, id, extraction_batch_id FROM messages
                 WHERE extraction_state IN ('pending', 'failed')
                 ORDER BY ingested_at
                 """
             ).fetchall()
-            return [(row["space_id"], row["id"]) for row in rows]
+        grouped: dict[tuple[str, str | None], list[str]] = {}
+        for row in rows:
+            grouped.setdefault(
+                (row["space_id"], row["extraction_batch_id"]), []
+            ).append(row["id"])
+        return [
+            (space_id, batch_id, message_ids)
+            for (space_id, batch_id), message_ids in grouped.items()
+        ]
 
     def _memory_view(
         self,
@@ -547,20 +608,23 @@ class SqliteWorldStore:
         if include_evidence:
             evidence = [
                 {
+                    "batch_id": item["batch_id"],
                     "message_id": item["message_id"],
-                    "text": item["evidence_text"],
+                    "text": item["content"],
                     "author": item["author"],
                     "occurred_at": item["occurred_at"],
                     "source_provider": item["source_provider"],
                 }
                 for item in connection.execute(
                     """
-                    SELECT ms.message_id, ms.evidence_text, m.author,
+                    SELECT m.extraction_batch_id AS batch_id, m.id AS message_id,
+                           m.content, m.author,
                            m.occurred_at, m.source_provider
-                    FROM memory_sources ms JOIN messages m ON m.id = ms.message_id
-                    WHERE ms.memory_id = ?
+                    FROM messages m
+                    WHERE m.extraction_batch_id = ?
+                    ORDER BY m.ingested_at
                     """,
-                    (row["id"],),
+                    (row["source_batch_id"],),
                 ).fetchall()
             ]
         return MemoryView(

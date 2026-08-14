@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS relationships (
     UNIQUE(space_id, person_a_id, person_b_id)
 );
 
+CREATE TABLE IF NOT EXISTS extraction_batches (
+    id TEXT PRIMARY KEY,
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    completed_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
@@ -66,6 +73,7 @@ CREATE TABLE IF NOT EXISTS messages (
     source_metadata TEXT NOT NULL DEFAULT '{}',
     idempotency_key TEXT,
     extraction_policy TEXT NOT NULL DEFAULT 'balanced',
+    extraction_batch_id TEXT REFERENCES extraction_batches(id),
     extraction_state TEXT NOT NULL DEFAULT 'pending',
     extraction_attempts INTEGER NOT NULL DEFAULT 0,
     extracted_at TEXT,
@@ -94,6 +102,7 @@ CREATE TABLE IF NOT EXISTS memories (
     supersedes_memory_id TEXT REFERENCES memories(id),
     invalidated_at TEXT,
     invalidation_reason TEXT,
+    source_batch_id TEXT REFERENCES extraction_batches(id),
     created_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
@@ -121,14 +130,6 @@ CREATE TABLE IF NOT EXISTS memory_relationships (
 
 CREATE INDEX IF NOT EXISTS memory_relationships_by_relationship
 ON memory_relationships(relationship_id, memory_id);
-
-CREATE TABLE IF NOT EXISTS memory_sources (
-    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
-    source_role TEXT NOT NULL DEFAULT 'support',
-    evidence_text TEXT,
-    PRIMARY KEY(memory_id, message_id, source_role)
-);
 
 CREATE TABLE IF NOT EXISTS memory_derivations (
     derived_memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,

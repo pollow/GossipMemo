@@ -11,6 +11,7 @@ from pydantic import ValidationError
 from gossipmemo.models import (
     ExtractionResult,
     ExtractedPerson,
+    IngestRequest,
     ManualMemoryRequest,
     ExtractedMemory,
     MessageInput,
@@ -111,9 +112,11 @@ def test_one_hop_expansion_returns_neighbor_and_relationship_memory(tmp_path):
             )
         ],
     )[0]
+    batch_id = store.create_extraction_batch("personal", [receipt])
+    assert batch_id is not None
     store.apply_extraction(
         "personal",
-        receipt,
+        batch_id,
         ExtractionResult(
             people=[
                 ExtractedPerson(ref="alice", display_name="Alice"),
@@ -199,6 +202,85 @@ def test_message_time_requires_timezone():
         )
 
 
+def test_extraction_batches_default_to_six_messages(tmp_path):
+    calls: list[int] = []
+
+    class BatchModel(FakeModel):
+        async def extract(self, messages):
+            calls.append(len(messages))
+            return ExtractionResult()
+
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        world = SocialMemoryWorld(
+            store, BatchModel(), extraction_batch_timeout_seconds=0.001
+        )
+        await world.start()
+        try:
+            await world.ingest(
+                "personal",
+                IngestRequest(
+                    messages=[
+                        MessageInput(author="user", content=f"message {index}")
+                        for index in range(13)
+                    ]
+                ),
+            )
+            for _ in range(100):
+                if len(calls) == 3:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())
+    assert calls == [6, 6, 1]
+
+
+def test_partial_extraction_batch_waits_until_full(tmp_path):
+    calls: list[int] = []
+
+    class BatchModel(FakeModel):
+        async def extract(self, messages):
+            calls.append(len(messages))
+            return ExtractionResult()
+
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        world = SocialMemoryWorld(
+            store, BatchModel(), extraction_batch_timeout_seconds=60
+        )
+        await world.start()
+        try:
+            await world.ingest(
+                "personal",
+                IngestRequest(
+                    messages=[
+                        MessageInput(author="user", content=f"message {index}")
+                        for index in range(5)
+                    ]
+                ),
+            )
+            await asyncio.sleep(0)
+            assert calls == []
+
+            await world.ingest(
+                "personal",
+                IngestRequest(
+                    messages=[MessageInput(author="assistant", content="message 5")]
+                ),
+            )
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0)
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())
+    assert calls == [6]
+
+
 def test_sync_and_async_sdk_follow_server_contract():
     requests: list[httpx.Request] = []
 
@@ -269,7 +351,7 @@ def test_openai_compatible_adapter_validates_structured_output():
                 "http://llm.test/v1", "key", "test-model", client=client
             )
             result = await adapter.extract(
-                ModelMessage(
+                [ModelMessage(
                     id="message_1",
                     space_id="personal",
                     author="user",
@@ -277,7 +359,7 @@ def test_openai_compatible_adapter_validates_structured_output():
                     occurred_at="2026-08-09T12:00:00+00:00",
                     source_provider="test",
                     extraction_policy="conservative",
-                )
+                )]
             )
             assert result.people[0].display_name == "Bob"
             assert result.memories[0].basis == "stated"

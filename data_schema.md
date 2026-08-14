@@ -336,12 +336,12 @@ role: subject
 ```text
 subject       这条认识主要关于谁
 asserter      这个说法、判断或立场归属于谁
-reporter      谁把别人的说法转述给 ego 或系统
+reporter      消息中明确提到的转述者
 witness       谁直接观察到了相关事情
 participant   谁参与了相关事件
 ```
 
-Message author 不放入这里；它保存在 Message 上。只有当 author 同时承担 asserter、reporter、witness 等语义角色时，才在 `memory_people` 中建立对应关联。
+Message author 不放入这里；`user` 和 `assistant` 只是消息角色，不是 Person。
 
 同一个人可以在同一条 Memory 中拥有多个 role。第一版不构建任意深度的转述链；无法结构化的来源细节保留在 Memory content 和 Message evidence 中。
 
@@ -354,22 +354,22 @@ relationship_id: relationship_alice_bob
 
 该关联表示 Memory 与这段关系有关。Relationship 有独立生命周期，不要求必须由某条 Memory 创建。
 
-### memory_sources
+### extraction_batches
 
 ```yaml
-memory_id: memory_bob_job_01
-message_id: message_123
-source_role: support
-evidence_text: Alice 跟我说，Bob 最近可能准备离职。
+id: batch_123
+space_id: space_personal
+messages: [message_1, message_2, message_3]
+completed_at: 2026-08-09T12:00:10Z
 ```
 
-| 字段 | 含义 |
-| --- | --- |
-| `memory_id` / `message_id` | Memory 与原始 evidence 的关联 |
-| `source_role` | `support \| contradict` |
-| `evidence_text` | 最小必要原文片段，便于人工回溯和抽取回归测试 |
+一次 LLM Extract request 对应一个 batch。队列默认等待 6 条 Message；未满时，
+从最老一条消息入库开始等待最多 30 分钟，然后提交当前 partial batch。
+进程重启后根据持久化的 `ingested_at` 恢复剩余等待时间。
+Message 通过 `extraction_batch_id` 记录处理批次，Extract 产生的 Memory 通过
+`source_batch_id` 指向同一批次。查询证据时沿 Batch 展开其中的原始 Message。
 
-一条 Message 可以产生多条 Memory；一条 inferred Memory 可以由多条 Message 和既有 Memory 共同支持。
+Relationship 由 Memory 创建或更新，因此通过 `memory_relationships` 间接继承同一来源，暂不重复保存 batch ID。
 
 ### memory_derivations
 

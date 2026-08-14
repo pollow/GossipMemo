@@ -54,6 +54,12 @@ def _rows(store: SqliteWorldStore, sql: str, params: tuple = ()) -> list[sqlite3
         return connection.execute(sql, params).fetchall()
 
 
+def _batch(store: SqliteWorldStore, *message_ids: str) -> str:
+    batch_id = store.create_extraction_batch("personal", list(message_ids))
+    assert batch_id is not None
+    return batch_id
+
+
 def test_record_messages_is_idempotent_by_key_and_source_identity(store):
     first = store.record_messages(
         "personal", [_message(idempotency_key="request-1", source_item_id="item-1")]
@@ -68,7 +74,9 @@ def test_record_messages_is_idempotent_by_key_and_source_identity(store):
     assert duplicate_by_key == first
     assert duplicate_by_source == first
     assert len(_rows(store, "SELECT id FROM messages")) == 1
-    assert store.load_message("personal", first).content == _message().content
+    assert _rows(store, "SELECT content FROM messages WHERE id = ?", (first,))[0][
+        "content"
+    ] == _message().content
 
 
 def test_record_messages_idempotency_is_atomic_across_concurrent_callers(store):
@@ -131,7 +139,7 @@ def test_zero_memory_extraction_completes_message_without_creating_memory(store)
     receipt = store.record_messages("personal", [_message()])[0]
 
     affected_people, affected_relationships = store.apply_extraction(
-        "personal", receipt, ExtractionResult()
+        "personal", _batch(store, receipt), ExtractionResult()
     )
 
     assert affected_people == set()
@@ -143,7 +151,7 @@ def test_zero_memory_extraction_completes_message_without_creating_memory(store)
     )[0]
     assert row["extraction_state"] == "completed"
     assert row["extraction_attempts"] == 0
-    assert store.pending_messages() == []
+    assert store.pending_extractions() == []
     assert _rows(store, "SELECT id FROM memories") == []
 
 
@@ -151,7 +159,7 @@ def test_memory_fts_triggers_track_insert_update_and_delete(store):
     receipt = store.record_messages("personal", [_message()])[0]
     store.apply_extraction(
         "personal",
-        receipt,
+        _batch(store, receipt),
         ExtractionResult(
             memories=[
                 ExtractedMemory(
@@ -267,7 +275,9 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             return "Bob prefers tea."
 
     async def scenario():
-        world = SocialMemoryWorld(store, FakeModel())
+        world = SocialMemoryWorld(
+            store, FakeModel(), extraction_batch_timeout_seconds=0.001
+        )
         app = create_app(
             settings=Settings(
                 database_path=store.path,
@@ -368,13 +378,12 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
                         facets=[{"kind": "coworker"}],
                     )
                 ],
-                evidence_text="Alice told me Bob may leave soon.",
             )
         ],
     )
 
     affected_people, affected_relationships = store.apply_extraction(
-        "personal", receipt, result
+        "personal", _batch(store, receipt), result
     )
     context = store.read(
         "personal",
@@ -398,7 +407,8 @@ def test_extraction_keeps_roles_evidence_and_relationship(store):
     assert memory.evidence == [
         {
             "message_id": receipt,
-            "text": "Alice told me Bob may leave soon.",
+            "batch_id": memory.evidence[0]["batch_id"],
+            "text": _message().content,
             "author": "user",
             "occurred_at": "2026-08-09T12:00:00+00:00",
             "source_provider": "agent_chat",
@@ -507,7 +517,7 @@ def test_same_display_name_references_are_not_automatically_merged(store):
     receipt = store.record_messages("personal", [_message()])[0]
     store.apply_extraction(
         "personal",
-        receipt,
+        _batch(store, receipt),
         ExtractionResult(
             people=[
                 ExtractedPerson(ref="first", display_name="Alex"),
