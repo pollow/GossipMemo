@@ -280,6 +280,72 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
     assert calls == [6]
 
 
+def test_induction_waits_for_daily_scheduler(tmp_path):
+    calls: list[str] = []
+
+    class InductionModel(FakeModel):
+        async def reason_person(self, person, memories):
+            calls.append(person.display_name)
+            return PersonReasoningResult(profile_card={"memory_count": len(memories)})
+
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        world = SocialMemoryWorld(
+            store,
+            InductionModel(),
+            induction_interval_seconds=0.01,
+        )
+        await world.start()
+        try:
+            world.add_memory(
+                "personal",
+                ManualMemoryRequest(content="Bob likes tea.", people=["Bob"]),
+            )
+            await asyncio.sleep(0)
+            assert calls == []
+
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())
+    assert calls == ["Bob"]
+
+
+def test_startup_catches_up_stale_profiles(tmp_path):
+    calls: list[str] = []
+
+    class InductionModel(FakeModel):
+        async def reason_person(self, person, memories):
+            calls.append(person.display_name)
+            return PersonReasoningResult(profile_card={"memory_count": len(memories)})
+
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        store.add_manual_memory(
+            "personal", ManualMemoryRequest(content="Bob likes tea.", people=["Bob"])
+        )
+        world = SocialMemoryWorld(
+            store,
+            InductionModel(),
+            induction_interval_seconds=60,
+        )
+        await world.start()
+        try:
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0)
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())
+    assert calls == ["Bob"]
+
+
 def test_sync_and_async_sdk_follow_server_contract():
     requests: list[httpx.Request] = []
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Coroutine
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .llm import LLMModel
@@ -38,16 +38,19 @@ class SocialMemoryWorld:
         queue: SequentialLLMQueue | None = None,
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
+        induction_interval_seconds: float | None = None,
     ) -> None:
         self.store = store
         self.model = model
         self.queue = queue or SequentialLLMQueue()
         self.extraction_batch_size = extraction_batch_size
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
+        self.induction_interval_seconds = induction_interval_seconds
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
         self._stopping = False
+        self._induction_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
         self._stopping = False
@@ -61,14 +64,17 @@ class SocialMemoryWorld:
                 unbatched_spaces.add(space_id)
         for space_id in unbatched_spaces:
             self._drain_extraction_batches(space_id)
-        people, relationships = self.store.stale_entities()
-        for space_id, person_id in people:
-            self._schedule_person_reason(space_id, person_id)
-        for space_id, relationship_id in relationships:
-            self._schedule_relationship_reason(space_id, relationship_id)
+        self._schedule_all_stale()
+        self._induction_task = asyncio.create_task(
+            self._induction_loop(), name="gossipmemo-daily-induction"
+        )
 
     async def stop(self) -> None:
         self._stopping = True
+        if self._induction_task:
+            self._induction_task.cancel()
+            await asyncio.gather(self._induction_task, return_exceptions=True)
+            self._induction_task = None
         flush_tasks = tuple(self._flush_tasks.values())
         for task in flush_tasks:
             task.cancel()
@@ -168,7 +174,7 @@ class SocialMemoryWorld:
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
             result = await self.queue.submit("extract", self.model.extract, messages)
-            people, relationships = self.store.apply_extraction(
+            self.store.apply_extraction(
                 space_id, batch_id, result
             )
         except Exception as error:
@@ -177,10 +183,21 @@ class SocialMemoryWorld:
             return
         if self._stopping:
             return
-        for person_id in people:
-            self._schedule_person_reason(space_id, person_id)
-        for relationship_id in relationships:
-            self._schedule_relationship_reason(space_id, relationship_id)
+
+    def _next_induction_delay(self) -> float:
+        if self.induction_interval_seconds is not None:
+            return self.induction_interval_seconds
+        now = datetime.now().astimezone()
+        tomorrow = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        return max(0.0, (tomorrow - now).total_seconds())
+
+    async def _induction_loop(self) -> None:
+        while not self._stopping:
+            await asyncio.sleep(self._next_induction_delay())
+            if not self._stopping:
+                self._schedule_all_stale()
 
     def _schedule_person_reason(self, space_id: str, person_id: str) -> None:
         self._spawn(
@@ -251,23 +268,18 @@ class SocialMemoryWorld:
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
         memory_id = self.store.add_manual_memory(space_id, request)
-        self._schedule_all_stale()
         return memory_id
 
     def retract_memory(
         self, space_id: str, memory_id: str, reason: str | None = None
     ) -> bool:
         changed = self.store.retract_memory(space_id, memory_id, reason)
-        if changed:
-            self._schedule_all_stale()
         return changed
 
     def supersede_memory(
         self, space_id: str, memory_id: str, request: SupersedeRequest
     ) -> str | None:
         replacement_id = self.store.supersede_memory(space_id, memory_id, request)
-        if replacement_id:
-            self._schedule_all_stale()
         return replacement_id
 
     def _schedule_all_stale(self) -> None:

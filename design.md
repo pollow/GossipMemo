@@ -74,6 +74,7 @@ Memory candidates + person references
 stable Person / Relationship references
   ↓ reconcile
 active Memory changes
+  ↓ mark stale; daily local-midnight induction
   ↓ reason (async, entity-scoped)
 inferred Memory + refreshed profile cards
 ```
@@ -166,7 +167,7 @@ Reason：active Memories → inferred Memory + current projections
 
 ### 4.2 Reason 什么时候触发
 
-Reason 不在每条 Message 写入时同步执行，而是在 Reconcile 改变某个实体的有效 Memory 集合后进入同一个本地 sequential queue。
+Reason 不在每条 Message 写入时同步执行。应用每天在本地午夜运行一次 induction，扫描 stale 实体后进入同一个本地 sequential queue；启动时先执行一次 stale catch-up。
 
 触发条件：
 
@@ -333,7 +334,7 @@ POST /v1/spaces/{space_id}/memories
 - `retract` 标记原认识不再采用。
 - 直接创建 Memory 用于人工补充或确认认识。
 
-这些操作完成后自动安排受影响实体的 Reason。
+这些操作完成后只会使相关实体变为 stale；下一次每日 induction 会安排其 Reason。
 
 ### 5.5 后续管理接口
 
@@ -349,7 +350,7 @@ POST /v1/spaces/{space_id}/reason
 }
 ```
 
-该 endpoint 用于人工刷新、模型升级后的重建和调试。首个可运行版本不暴露它：正常 ingest、manual memory、supersede 和 retract 都会自动安排 Reason；进程启动也会扫描 stale projection。Person merge 同样留到有真实同名样例后实现，避免过早固定合并语义。
+该 endpoint 用于人工刷新、模型升级后的重建和调试。首个可运行版本不暴露它：正常 ingest、manual memory、supersede 和 retract 都会使 projection 变 stale，由每日 induction 处理；进程启动也会扫描 stale projection。Person merge 同样留到有真实同名样例后实现，避免过早固定合并语义。
 
 ## 6. 第一版功能
 

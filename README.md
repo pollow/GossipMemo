@@ -45,6 +45,9 @@ when its oldest message has waited 30 minutes. These values can be changed with
 `GOSSIPMEMO_EXTRACTION_BATCH_SIZE` and
 `GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`.
 
+Profile induction runs once per day at local midnight. Startup performs one
+stale-profile catch-up before waiting for the next induction run.
+
 ## Smoke test a running server
 
 After starting the server, run:
