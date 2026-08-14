@@ -190,13 +190,13 @@ class SocialMemoryWorld:
 
     async def _reason_person(self, space_id: str, person_id: str) -> None:
         # If Extract updates the same Person while an LLM call is in flight,
-        # the optimistic revision check fails and this loop recomputes from the
+        # the optimistic watermark check fails and this loop recomputes from the
         # latest snapshot without taking a lock.
         while not self._stopping:
             context = self.store.person_context(space_id, person_id)
             if not context:
                 return
-            person, memories = context
+            person, memories, watermark = context
             if not person.stale:
                 return
             result = await self.queue.submit(
@@ -205,7 +205,7 @@ class SocialMemoryWorld:
             if self.store.apply_person_reasoning(
                 space_id,
                 person_id,
-                person.memory_revision,
+                watermark,
                 result,
             ):
                 return
@@ -225,7 +225,7 @@ class SocialMemoryWorld:
             context = self.store.relationship_context(space_id, relationship_id)
             if not context:
                 return
-            relationship, memories = context
+            relationship, memories, watermark = context
             if not relationship.stale:
                 return
             result = await self.queue.submit(
@@ -237,7 +237,7 @@ class SocialMemoryWorld:
             if self.store.apply_relationship_reasoning(
                 space_id,
                 relationship_id,
-                relationship.memory_revision,
+                watermark,
                 result,
             ):
                 return

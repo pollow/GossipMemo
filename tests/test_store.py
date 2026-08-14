@@ -495,21 +495,36 @@ def test_manual_memory_retract_updates_memory_people_once(
     bob = store.read(
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
-    assert bob.memory_revision == 1
+    assert bob.profile_source_updated_at is None
     assert bob.stale is True
+    _, _, watermark = store.person_context("personal", bob.id)
+    assert watermark is not None
+    assert store.apply_person_reasoning(
+        "personal",
+        bob.id,
+        expected_watermark=watermark,
+        result=PersonReasoningResult(profile_card={"summary": "on sabbatical"}),
+    )
+
+    before_retract = _rows(
+        store, "SELECT updated_at FROM memories WHERE id = ?", (memory_id,)
+    )[0]["updated_at"]
 
     assert store.retract_memory("personal", memory_id) is True
 
     bob_after = store.read(
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
-    assert bob_after.memory_revision == 2
+    assert bob_after.stale is True
+    assert _rows(
+        store, "SELECT updated_at FROM memories WHERE id = ?", (memory_id,)
+    )[0]["updated_at"] >= before_retract
     assert _rows(
         store, "SELECT status FROM memories WHERE id = ?", (memory_id,)
     )[0]["status"] == "retracted"
 
 
-def test_person_reasoning_uses_revision_as_compare_and_swap(store):
+def test_person_reasoning_uses_timestamp_as_compare_and_swap(store):
     memory_id = store.add_manual_memory(
         "personal",
         ManualMemoryRequest(
@@ -521,13 +536,14 @@ def test_person_reasoning_uses_revision_as_compare_and_swap(store):
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
 
-    assert bob.memory_revision == 1
-    assert bob.profile_memory_revision == 0
+    assert bob.profile_source_updated_at is None
+    _, _, watermark = store.person_context("personal", bob.id)
+    assert watermark is not None
     assert (
         store.apply_person_reasoning(
             "personal",
             bob.id,
-            expected_revision=0,
+            expected_watermark="1970-01-01T00:00:00+00:00",
             result=PersonReasoningResult(profile_card={"summary": "stale"}),
         )
         is False
@@ -535,7 +551,7 @@ def test_person_reasoning_uses_revision_as_compare_and_swap(store):
     assert store.apply_person_reasoning(
         "personal",
         bob.id,
-        expected_revision=1,
+        expected_watermark=watermark,
         result=PersonReasoningResult(
             profile_card={"summary": "likes tea"},
             inferred_memories=[
@@ -550,8 +566,8 @@ def test_person_reasoning_uses_revision_as_compare_and_swap(store):
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
     assert updated_with_inference.profile_card == {"summary": "likes tea"}
-    assert updated_with_inference.memory_revision == 2
-    assert updated_with_inference.profile_memory_revision == 2
+    assert updated_with_inference.profile_source_updated_at is not None
+    assert updated_with_inference.stale is False
     assert _rows(
         store,
         "SELECT source_memory_id FROM memory_derivations WHERE derived_memory_id IN "
@@ -562,7 +578,7 @@ def test_person_reasoning_uses_revision_as_compare_and_swap(store):
         store.apply_person_reasoning(
             "personal",
             bob.id,
-            expected_revision=1,
+            expected_watermark=watermark,
             result=PersonReasoningResult(profile_card={"summary": "stale"}),
         )
         is False
@@ -606,7 +622,7 @@ def test_same_display_name_references_are_not_automatically_merged(store):
         )
 
 
-def test_person_reasoning_revision_compare_and_swap_is_atomic(store):
+def test_person_reasoning_timestamp_compare_and_swap_is_atomic(store):
     source_id = store.add_manual_memory(
         "personal",
         ManualMemoryRequest(
@@ -617,12 +633,14 @@ def test_person_reasoning_revision_compare_and_swap_is_atomic(store):
     bob = store.read(
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
+    _, _, watermark = store.person_context("personal", bob.id)
+    assert watermark is not None
 
     def apply(worker: int) -> bool:
         return store.apply_person_reasoning(
             "personal",
             bob.id,
-            expected_revision=1,
+            expected_watermark=watermark,
             result=PersonReasoningResult(
                 profile_card={"worker": worker},
                 inferred_memories=[
@@ -641,7 +659,8 @@ def test_person_reasoning_revision_compare_and_swap_is_atomic(store):
     current = store.read(
         "personal", QueryRequest(question="bob", people=["Bob"])
     ).people[0]
-    assert current.memory_revision == 2
+    assert current.profile_source_updated_at is not None
+    assert current.stale is False
     assert len(
         _rows(
             store,

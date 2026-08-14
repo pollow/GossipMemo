@@ -80,8 +80,7 @@ profile_card:
   interaction_notes:
     - 询问工作变化时不宜把传闻当作已确认事实
 
-memory_revision: 12
-profile_memory_revision: 12
+profile_source_updated_at: 2026-08-09T12:20:00Z
 profile_updated_at: 2026-08-09T12:30:00Z
 created_at: 2026-08-01T09:00:00Z
 updated_at: 2026-08-09T12:30:00Z
@@ -95,12 +94,11 @@ updated_at: 2026-08-09T12:30:00Z
 | `status` | `active \| merged \| deleted` |
 | `merged_into_person_id` | 合并后的目标 Person |
 | `profile_card` | 当前人物画像 JSON；属于可重建 projection |
-| `memory_revision` | 与此人关联的有效 Memory 集合版本（当前实现） |
-| `profile_memory_revision` | 当前 profile card 已处理到的 Memory 版本（当前实现） |
+| `profile_source_updated_at` | 生成当前 profile 时，相关 Memories 的最新 `updated_at` |
 | `profile_updated_at` | 当前 profile card 的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 
-当前实现以 `profile_memory_revision < memory_revision` 判断 stale。我们正在评估改为时间戳或 induction change log，但尚未实施。
+当任何相关 Memory 的 `updated_at` 与 `profile_source_updated_at` 不一致时，profile 处于 stale 状态。这同时覆盖新增、retract 和 supersede。
 
 ### person_aliases
 
@@ -172,8 +170,7 @@ summary: >
   但双方仍愿意继续配合。
 status: active
 
-memory_revision: 8
-profile_memory_revision: 8
+profile_source_updated_at: 2026-08-09T12:20:00Z
 profile_updated_at: 2026-08-09T12:30:00Z
 created_at: 2026-08-01T09:00:00Z
 updated_at: 2026-08-09T12:30:00Z
@@ -189,8 +186,7 @@ updated_at: 2026-08-09T12:30:00Z
 | `tone` | 可选的当前氛围，如 `positive \| mixed \| tense` |
 | `summary` | 当前关系画像；属于可重建 projection |
 | `status` | `active \| ended \| unknown` |
-| `memory_revision` | 与此关系关联的有效 Memory 集合版本（当前实现） |
-| `profile_memory_revision` | 当前关系画像已处理到的 Memory 版本（当前实现） |
+| `profile_source_updated_at` | 生成当前关系画像时，相关 Memories 的最新 `updated_at` |
 | `profile_updated_at` | 当前关系画像的生成时间 |
 | `created_at` / `updated_at` | 创建和更新时间 |
 

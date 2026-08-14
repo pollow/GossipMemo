@@ -125,7 +125,7 @@ def create_app(
         context = world.store.relationship_context(space_id, relationship_id)
         if not context:
             raise HTTPException(status_code=404, detail="relationship not found")
-        relationship, memories = context
+        relationship, memories, _watermark = context
         return {
             "relationship": relationship.model_dump(),
             "memories": [memory.model_dump() for memory in memories],

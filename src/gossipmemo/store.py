@@ -532,23 +532,6 @@ class SqliteWorldStore:
                     )
                     affected_relationships.add(relationship_id)
 
-            for person_id in affected_people:
-                connection.execute(
-                    """
-                    UPDATE people SET memory_revision = memory_revision + 1, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, person_id),
-                )
-            for relationship_id in affected_relationships:
-                connection.execute(
-                    """
-                    UPDATE relationships
-                    SET memory_revision = memory_revision + 1, updated_at = ?
-                    WHERE id = ?
-                    """,
-                    (now, relationship_id),
-                )
             connection.execute(
                 """
                 UPDATE messages
@@ -634,17 +617,40 @@ class SqliteWorldStore:
             created_at=row["created_at"],
         )
 
-    def _person_view(self, row: sqlite3.Row) -> PersonView:
+    def _person_watermark(self, connection: sqlite3.Connection, space_id: str, person_id: str) -> str | None:
+        row = connection.execute(
+            """SELECT MAX(m.updated_at) AS watermark FROM memories m
+               JOIN memory_people mp ON mp.memory_id = m.id
+               WHERE m.space_id = ? AND mp.person_id = ?""",
+            (space_id, person_id),
+        ).fetchone()
+        return row["watermark"] if row else None
+
+    def _relationship_watermark(self, connection: sqlite3.Connection, space_id: str, relationship_id: str) -> str | None:
+        row = connection.execute(
+            """SELECT MAX(m.updated_at) AS watermark FROM memories m
+               JOIN relationships r ON r.id = ? AND r.space_id = m.space_id
+               WHERE m.space_id = ? AND (
+                 m.id IN (SELECT memory_id FROM memory_relationships WHERE relationship_id = r.id)
+                 OR m.id IN (SELECT a.memory_id FROM memory_people a JOIN memory_people b ON b.memory_id = a.memory_id
+                             WHERE a.person_id = r.person_a_id AND b.person_id = r.person_b_id))""",
+            (relationship_id, space_id),
+        ).fetchone()
+        return row["watermark"] if row else None
+
+    def _person_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> PersonView:
+        watermark = self._person_watermark(connection, row["space_id"], row["id"])
         return PersonView(
             id=row["id"],
             display_name=row["display_name"],
             profile_card=_loads(row["profile_card"], {}),
-            memory_revision=row["memory_revision"],
-            profile_memory_revision=row["profile_memory_revision"],
-            stale=row["profile_memory_revision"] < row["memory_revision"],
+            profile_source_updated_at=row["profile_source_updated_at"],
+            profile_updated_at=row["profile_updated_at"],
+            stale=watermark is not None and row["profile_source_updated_at"] != watermark,
         )
 
-    def _relationship_view(self, row: sqlite3.Row) -> RelationshipView:
+    def _relationship_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> RelationshipView:
+        watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
         return RelationshipView(
             id=row["id"],
             person_a_id=row["person_a_id"],
@@ -654,7 +660,9 @@ class SqliteWorldStore:
             tone=row["tone"],
             status=row["status"],
             summary=row["summary"],
-            stale=row["profile_memory_revision"] < row["memory_revision"],
+            profile_source_updated_at=row["profile_source_updated_at"],
+            profile_updated_at=row["profile_updated_at"],
+            stale=watermark is not None and row["profile_source_updated_at"] != watermark,
         )
 
     def read(self, space_id: str, request: QueryRequest) -> QueryContext:
@@ -665,7 +673,7 @@ class SqliteWorldStore:
                 row = self._find_person(connection, space_id, reference)
                 if row and row["id"] not in person_ids:
                     person_ids.append(row["id"])
-                    people.append(self._person_view(row))
+                    people.append(self._person_view(connection, row))
 
             relationships: list[RelationshipView] = []
             relationship_ids: list[str] = []
@@ -687,7 +695,7 @@ class SqliteWorldStore:
                     """
                     params = [space_id, *person_ids, *person_ids]
                 rows = connection.execute(sql, params).fetchall()
-                relationships = [self._relationship_view(row) for row in rows]
+                relationships = [self._relationship_view(connection, row) for row in rows]
                 relationship_ids = [row["id"] for row in rows]
                 if request.expand_relationships:
                     expanded_ids = {
@@ -702,7 +710,7 @@ class SqliteWorldStore:
                             f"SELECT * FROM people WHERE space_id = ? AND id IN ({placeholders})",
                             [space_id, *new_ids],
                         ).fetchall()
-                        people.extend(self._person_view(row) for row in expanded_rows)
+                        people.extend(self._person_view(connection, row) for row in expanded_rows)
                         person_ids.extend(row["id"] for row in expanded_rows)
 
             if request.people and not person_ids:
@@ -776,7 +784,9 @@ class SqliteWorldStore:
         context = self.read(space_id, request)
         if not context.people:
             return None
-        return context.people[0], context.memories
+        with self._connect() as connection:
+            watermark = self._person_watermark(connection, space_id, person_id)
+        return context.people[0], context.memories, watermark
 
     def relationship_context(
         self, space_id: str, relationship_id: str
@@ -807,8 +817,9 @@ class SqliteWorldStore:
                 ),
             ).fetchall()
             return (
-                self._relationship_view(relationship),
+                self._relationship_view(connection, relationship),
                 [self._memory_view(connection, row, True) for row in rows],
+                self._relationship_watermark(connection, space_id, relationship_id),
             )
 
     def _insert_inferred_memories(
@@ -877,26 +888,24 @@ class SqliteWorldStore:
         self,
         space_id: str,
         person_id: str,
-        expected_revision: int,
+        expected_watermark: str | None,
         result: PersonReasoningResult,
     ) -> bool:
         with self._connect() as connection:
             claimed = connection.execute(
-                """
-                UPDATE people SET profile_card = ?, profile_memory_revision = ?,
+                """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
                     profile_updated_at = ?, updated_at = ?
-                WHERE space_id = ? AND id = ? AND memory_revision = ?
-                  AND profile_memory_revision < ?
-                """,
+                WHERE space_id = ? AND id = ?
+                  AND ? IS (SELECT MAX(m.updated_at) FROM memories m
+                            JOIN memory_people mp ON mp.memory_id = m.id
+                            WHERE m.space_id = ? AND mp.person_id = ?)
+                  AND (profile_source_updated_at IS NULL OR profile_source_updated_at < ?)""",
                 (
                     _json(result.profile_card),
-                    expected_revision,
-                    _now(),
-                    _now(),
+                    expected_watermark, _now(), _now(),
                     space_id,
                     person_id,
-                    expected_revision,
-                    expected_revision,
+                    expected_watermark, space_id, person_id, expected_watermark,
                 ),
             )
             if claimed.rowcount != 1:
@@ -904,19 +913,13 @@ class SqliteWorldStore:
             inserted = self._insert_inferred_memories(
                 connection, space_id, result.inferred_memories, person_id=person_id
             )
-            final_revision = expected_revision + (1 if inserted else 0)
+            final_watermark = self._person_watermark(connection, space_id, person_id)
             connection.execute(
-                """
-                UPDATE people SET profile_card = ?, memory_revision = ?,
-                    profile_memory_revision = ?, profile_updated_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
+                """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
+                    profile_updated_at = ?, updated_at = ? WHERE id = ?""",
                 (
                     _json(result.profile_card),
-                    final_revision,
-                    final_revision,
-                    _now(),
-                    _now(),
+                    final_watermark, _now(), _now(),
                     person_id,
                 ),
             )
@@ -926,31 +929,26 @@ class SqliteWorldStore:
         self,
         space_id: str,
         relationship_id: str,
-        expected_revision: int,
+        expected_watermark: str | None,
         result: RelationshipReasoningResult,
     ) -> bool:
         with self._connect() as connection:
+            if self._relationship_watermark(connection, space_id, relationship_id) != expected_watermark:
+                return False
             claimed = connection.execute(
-                """
-                UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
-                    status = ?, summary = ?, profile_memory_revision = ?,
+                """UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
+                    status = ?, summary = ?, profile_source_updated_at = ?,
                     profile_updated_at = ?, updated_at = ?
-                WHERE space_id = ? AND id = ? AND memory_revision = ?
-                  AND profile_memory_revision < ?
-                """,
+                WHERE space_id = ? AND id = ?""",
                 (
                     _json(result.facets),
                     result.closeness,
                     result.tone,
                     result.status,
                     result.summary,
-                    expected_revision,
-                    _now(),
-                    _now(),
+                    expected_watermark, _now(), _now(),
                     space_id,
                     relationship_id,
-                    expected_revision,
-                    expected_revision,
                 ),
             )
             if claimed.rowcount != 1:
@@ -961,23 +959,19 @@ class SqliteWorldStore:
                 result.inferred_memories,
                 relationship_id=relationship_id,
             )
-            final_revision = expected_revision + (1 if inserted else 0)
+            final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
             now = _now()
             connection.execute(
-                """
-                UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
-                    status = ?, summary = ?, memory_revision = ?,
-                    profile_memory_revision = ?, profile_updated_at = ?, updated_at = ?
-                WHERE id = ?
-                """,
+                """UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
+                    status = ?, summary = ?, profile_source_updated_at = ?,
+                    profile_updated_at = ?, updated_at = ? WHERE id = ?""",
                 (
                     _json(result.facets),
                     result.closeness,
                     result.tone,
                     result.status,
                     result.summary,
-                    final_revision,
-                    final_revision,
+                    final_watermark,
                     now,
                     now,
                     relationship_id,
@@ -990,21 +984,20 @@ class SqliteWorldStore:
             people = [
                 (row["space_id"], row["id"])
                 for row in connection.execute(
-                    """
-                    SELECT space_id, id FROM people
-                    WHERE status = 'active' AND profile_memory_revision < memory_revision
-                    """
+                    """SELECT p.space_id, p.id FROM people p
+                    WHERE p.status = 'active' AND (
+                      p.profile_source_updated_at IS NULL OR p.profile_source_updated_at <
+                      (SELECT MAX(m.updated_at) FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                       WHERE m.space_id = p.space_id AND mp.person_id = p.id)
+                    ) AND EXISTS (SELECT 1 FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                       WHERE m.space_id = p.space_id AND mp.person_id = p.id)"""
                 ).fetchall()
             ]
-            relationships = [
-                (row["space_id"], row["id"])
-                for row in connection.execute(
-                    """
-                    SELECT space_id, id FROM relationships
-                    WHERE profile_memory_revision < memory_revision
-                    """
-                ).fetchall()
-            ]
+            relationships = []
+            for row in connection.execute("SELECT * FROM relationships").fetchall():
+                watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
+                if watermark is not None and row["profile_source_updated_at"] != watermark:
+                    relationships.append((row["space_id"], row["id"]))
             return people, relationships
 
     def add_manual_memory(
@@ -1044,11 +1037,6 @@ class SqliteWorldStore:
                     (memory_id, person_id),
                 )
                 affected.add(person_id)
-            for person_id in affected:
-                connection.execute(
-                    "UPDATE people SET memory_revision = memory_revision + 1 WHERE id = ?",
-                    (person_id,),
-                )
             return memory_id
 
     def supersede_memory(
@@ -1107,26 +1095,6 @@ class SqliteWorldStore:
                 """,
                 (now, request.reason, now, memory_id),
             )
-            connection.execute(
-                """
-                UPDATE people SET memory_revision = memory_revision + 1, updated_at = ?
-                WHERE id IN (
-                    SELECT DISTINCT person_id FROM memory_people WHERE memory_id = ?
-                )
-                """,
-                (now, replacement_id),
-            )
-            connection.execute(
-                """
-                UPDATE relationships
-                SET memory_revision = memory_revision + 1, updated_at = ?
-                WHERE id IN (
-                    SELECT DISTINCT relationship_id FROM memory_relationships
-                    WHERE memory_id = ?
-                )
-                """,
-                (now, replacement_id),
-            )
             return replacement_id
 
     def retract_memory(
@@ -1160,16 +1128,5 @@ class SqliteWorldStore:
                 WHERE id = ?
                 """,
                 (now, reason, now, memory_id),
-            )
-            connection.executemany(
-                "UPDATE people SET memory_revision = memory_revision + 1 WHERE id = ?",
-                [(item["person_id"],) for item in people],
-            )
-            connection.executemany(
-                """
-                UPDATE relationships SET memory_revision = memory_revision + 1
-                WHERE id = ?
-                """,
-                [(item["relationship_id"],) for item in relationships],
             )
             return True

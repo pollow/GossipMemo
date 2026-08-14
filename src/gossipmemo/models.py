@@ -118,8 +118,8 @@ class PersonView(BaseModel):
     id: str
     display_name: str
     profile_card: dict[str, Any] = Field(default_factory=dict)
-    memory_revision: int = 0
-    profile_memory_revision: int = 0
+    profile_source_updated_at: str | None = None
+    profile_updated_at: str | None = None
     stale: bool = False
 
 
@@ -132,6 +132,8 @@ class RelationshipView(BaseModel):
     tone: str | None = None
     status: str
     summary: str
+    profile_source_updated_at: str | None = None
+    profile_updated_at: str | None = None
     stale: bool = False
 
 

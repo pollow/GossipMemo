@@ -57,7 +57,7 @@ Canonical store 通过内部 `WorldStore` seam 隔离数据库差异，第一版
 
 - 只有一个 worker，不设置 priority 或并发参数；
 - queue 不持久化，不使用数据库任务表、lease 或显式 lock；
-- Message 的 extraction state 和 projection revision gap 用于进程重启后恢复工作；
+- Message 的 extraction state 和 projection timestamp gap 用于进程重启后恢复工作；
 - 一个 SQLite 文件只由一个 GossipMemo server 进程打开。
 
 ## 3. 处理阶段
@@ -129,7 +129,7 @@ Extract 可以理解语言中的隐含语义，但不做跨历史的长期归纳
 - 执行 `create / merge / ignore / supersede / retract`。
 - 维护 source Message 和人物关联；人物在事实中的语义角色保留在 Memory content 和 evidence 中，不单独结构化。
 - 计算受影响的 Person 与 Relationship。
-- 增加对应实体的 `memory_revision`。
+- Memory 自身的 `updated_at` 作为对应 Person/Relationship projection 的 freshness 水位。
 
 `ingest` 在 Message 幂等落库并安排 Extract 后返回 `202 queued`。Memory 在后台处理完成后可查询；调用方可以轮询 Message processing state，但不需要理解 queue implementation。
 
@@ -176,11 +176,9 @@ Reason 不在每条 Message 写入时同步执行，而是在 Reconcile 改变�
 - 人工要求重新生成指定 Person/Relationship。
 - reasoning prompt 或模型版本升级后进行重建。
 
-进程内调度以 Person/Relationship 为 key 避免同时安排重复任务。例如连续导入 20 条关于 Bob 的消息，会在当前 Reason 完成后通过 revision 检查决定是否需要基于最新状态重算。LLM queue 本身只保证 FIFO，不实现 priority。
+进程内调度以 Person/Relationship 为 key 避免同时安排重复任务。例如连续导入 20 条关于 Bob 的消息，会在当前 Reason 完成后检查相关 Memory 的最新 `updated_at` 决定是否重算。LLM queue 本身只保证 FIFO，不实现 priority。
 
-Reason 在调用模型前读取 `memory_revision`，模型返回后用 optimistic revision check 写入。如果期间 Memory 已变化，旧结果不写入，直接读取新 revision 重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。
-
-`memory_revision` 是当前实现。是否改为时间戳或独立 induction change log 尚未决定。
+Reason 在调用模型前记录相关 Memories 的最新 `updated_at`，模型返回后用同一水位做 optimistic check。如果期间 Memory 已变化，旧结果不写入，直接读取新状态重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。
 
 ### 4.3 Reason 做什么
 
@@ -190,14 +188,14 @@ Reason 在调用模型前读取 `memory_revision`，模型返回后用 optimisti
 2. 判断是否出现可长期复用的新认识。
 3. 必要时创建或 supersede `basis: inferred` 的 Memory。
 4. 根据最新 active Memories 重建 profile card。
-5. 将 `profile_memory_revision` 更新到当前 `memory_revision`。
+5. 将 `profile_source_updated_at` 更新为当前相关 Memories 的最新 `updated_at`。
 
 对受影响的 Relationship：
 
 1. 读取 relationship-linked Memory、同时涉及双方的 Memory 和当前关系画像。
 2. 更新 facets、closeness、tone、status 和 summary。
 3. 必要时创建可独立引用的 inferred Memory。
-4. 更新 Relationship 的 projection revision。
+4. 更新 Relationship 的 projection freshness 水位。
 
 ### 4.4 什么应该成为 inferred Memory
 
