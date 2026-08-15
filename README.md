@@ -21,6 +21,25 @@ The server listens on `http://localhost:8765`. Its health endpoint is
 `GET /healthz`; interactive OpenAPI documentation is available at `/docs`.
 SQLite data is stored in the `gossipmemo-data` Docker volume.
 
+Useful container commands:
+
+```bash
+docker compose up -d --build       # start the single server process
+docker compose ps                  # show health status
+docker compose logs -f gossipmemo  # follow JSON application logs
+curl -fsS http://127.0.0.1:8765/healthz
+docker compose run --rm \
+  -v "$PWD/export.jsonl:/imports/export.jsonl:ro" \
+  gossipmemo gossipmemo import --space personal --chat /imports/export.jsonl
+```
+
+The import bind mount is read-only by design; make sure the host file is
+readable by the container's non-root user. The named database volume is owned
+by the fixed `gossipmemo` user (UID 10001). For a host directory bind mount at
+`/data`, create it first and grant it to UID 10001, for example:
+`mkdir -p ./gossipmemo-data && sudo chown 10001:10001 ./gossipmemo-data`, then
+replace the named volume with `./gossipmemo-data:/data`.
+
 Only one server process should open a GossipMemo SQLite file. Do not add
 multiple Uvicorn workers: the local LLM queue is deliberately process-local and
 sequential.

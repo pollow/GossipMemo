@@ -1,6 +1,8 @@
 services:
   gossipmemo:
-    build: .
+    build:
+      context: .
+    init: true
     ports:
       - "127.0.0.1:8765:8765"
     env_file:
@@ -10,6 +12,24 @@ services:
       GOSSIPMEMO_DATABASE_PATH: /data/gossipmemo.db
     volumes:
       - gossipmemo-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/healthz', timeout=3).status == 200 else 1)
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
 
 volumes:

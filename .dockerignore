@@ -1,9 +1,27 @@
-.git
-.venv
+# Never send credentials, VCS metadata, local environments, or runtime data.
 .env
-.pytest_cache
+.env.*
+!.env.example
+.git
+.gitignore
+.venv
 __pycache__
-*.pyc
-data
-dist
-build
+*.py[cod]
+.pytest_cache
+*.sqlite*
+data/
+
+# Tests, development-only integrations, and agent-local material are not part
+# of the production image or its build context.
+tests/
+integrations/
+scripts/
+.agents/
+.codex/
+dist/
+*.egg-info/
+AGENTS.md
+gossipmemo.md
+data_schema.md
+design.md
+glossary.md
