@@ -9,17 +9,18 @@ from typing import Any
 from .llm import LLMModel
 from .logging import elapsed_ms
 from .models import (
+    ContextBundle,
     HealthResponse,
     IngestRequest,
     IngestResponse,
     ManualMemoryRequest,
+    MergePersonResponse,
     MessageInput,
     QueryRequest,
     QueryResponse,
     SupersedeRequest,
     TurnRequest,
     TurnResponse,
-    ContextBundle,
 )
 from .queue import SequentialLLMQueue
 from .store import SqliteWorldStore
@@ -140,6 +141,13 @@ class SocialMemoryWorld:
             self._schedule_continuity_reason(space_id)
         logger.info("ingest_completed", extra={"space_id": space_id, "message_count": len(message_ids), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return IngestResponse(message_ids=message_ids)
+
+    def merge_person(
+        self, space_id: str, source_person_id: str, target_person_id: str
+    ) -> MergePersonResponse:
+        return MergePersonResponse.model_validate(
+            self.store.merge_person(space_id, source_person_id, target_person_id)
+        )
 
     async def import_messages(
         self, space_id: str, messages: list[MessageInput]

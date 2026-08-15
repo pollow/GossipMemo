@@ -437,6 +437,16 @@ class GossipMemo(_ClientCommon):
         return self._request(
             "GET", self._space_path(f"people/{quote(person_id, safe='')}"))
 
+    def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
+        """Merge a confirmed source person into the canonical target person."""
+        if not str(source_person_id).strip() or not str(target_person_id).strip():
+            raise ValueError("source_person_id and target_person_id are required")
+        return self._request(
+            "POST",
+            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
+            {"target_person_id": str(target_person_id)},
+        )
+
     def relationship_dossier(self, relationship_id: str) -> Any:
         """Read a relationship projection without synthesis."""
 
@@ -677,6 +687,16 @@ class AsyncGossipMemo(_ClientCommon):
             raise ValueError("person_id is required")
         return await self._request(
             "GET", self._space_path(f"people/{quote(person_id, safe='')}"))
+
+    async def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
+        """Merge a confirmed source person into the canonical target person."""
+        if not str(source_person_id).strip() or not str(target_person_id).strip():
+            raise ValueError("source_person_id and target_person_id are required")
+        return await self._request(
+            "POST",
+            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
+            {"target_person_id": str(target_person_id)},
+        )
 
     async def relationship_dossier(self, relationship_id: str) -> Any:
         if not relationship_id:

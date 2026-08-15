@@ -546,6 +546,23 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 },
                 ("memory_id",),
             ),
+            _schema(
+                "gossipmemo_merge_people",
+                "Merge two confirmed Person records. Only call after the user "
+                "has confirmed that both records are the same person and which "
+                "record should remain canonical.",
+                {
+                    "source_person_id": {
+                        "type": "string",
+                        "description": "The duplicate person record to merge away.",
+                    },
+                    "target_person_id": {
+                        "type": "string",
+                        "description": "The canonical person record to keep.",
+                    },
+                },
+                ("source_person_id", "target_person_id"),
+            ),
         ]
 
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
@@ -625,6 +642,16 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 if not memory_id:
                     return _json_result({"error": "memory_id is required"})
                 return _json_result(client.retract(memory_id, reason=args.get("reason")))
+            if tool_name == "gossipmemo_merge_people":
+                source_person_id = str(args.get("source_person_id", "")).strip()
+                target_person_id = str(args.get("target_person_id", "")).strip()
+                if not source_person_id or not target_person_id:
+                    return _json_result(
+                        {"error": "source_person_id and target_person_id are required"}
+                    )
+                return _json_result(
+                    client.merge_person(source_person_id, target_person_id)
+                )
             return _json_result({"error": f"unknown tool: {tool_name}"})
         except GossipMemoError as exc:
             return _json_result({"error": str(exc), "status_code": exc.status_code})

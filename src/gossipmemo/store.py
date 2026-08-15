@@ -137,11 +137,23 @@ class WorldStore(Protocol):
 
     def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None: ...
 
+    def merge_person(
+        self, space_id: str, source_person_id: str, target_person_id: str
+    ) -> dict[str, Any]: ...
+
 
 class AmbiguousPersonError(ValueError):
     def __init__(self, reference: str) -> None:
         super().__init__(f"person reference is ambiguous: {reference}")
         self.reference = reference
+
+
+class PersonMergeError(ValueError):
+    """Raised when an explicit person merge cannot be applied safely."""
+
+    def __init__(self, message: str, *, conflict: bool = False) -> None:
+        super().__init__(message)
+        self.conflict = conflict
 
 
 class SqliteWorldStore:
@@ -1299,6 +1311,172 @@ class SqliteWorldStore:
                     people.append(self._person_view(connection, rows_by_id[person_id]))
                     seen.add(person_id)
             return people
+
+    def merge_person(
+        self, space_id: str, source_person_id: str, target_person_id: str
+    ) -> dict[str, Any]:
+        """Atomically merge ``source_person_id`` into ``target_person_id``.
+
+        This is deliberately a domain operation, not an LLM operation.  The
+        caller is responsible for obtaining user confirmation before invoking
+        it.  Raw messages and memory text remain immutable.
+        """
+        if source_person_id == target_person_id:
+            raise PersonMergeError("source and target person must differ", conflict=True)
+        with self._connect() as connection:
+            source = connection.execute(
+                "SELECT * FROM people WHERE space_id = ? AND id = ?",
+                (space_id, source_person_id),
+            ).fetchone()
+            target = connection.execute(
+                "SELECT * FROM people WHERE space_id = ? AND id = ?",
+                (space_id, target_person_id),
+            ).fetchone()
+            if source is None or target is None:
+                raise PersonMergeError("source or target person not found")
+            if source["status"] == "merged":
+                if source["merged_into_person_id"] == target_person_id:
+                    return {
+                        "source_person_id": source_person_id,
+                        "target_person_id": target_person_id,
+                        "status": "merged",
+                        "affected_relationship_ids": [],
+                    }
+                raise PersonMergeError(
+                    "source person was already merged into another person",
+                    conflict=True,
+                )
+            if source["status"] != "active" or target["status"] != "active":
+                raise PersonMergeError("source and target persons must be active", conflict=True)
+
+            now = _now()
+            aliases = connection.execute(
+                "SELECT value, normalized_value FROM person_aliases WHERE person_id = ?",
+                (source_person_id,),
+            ).fetchall()
+            for alias in aliases:
+                connection.execute(
+                    "INSERT OR IGNORE INTO person_aliases("
+                    "id, space_id, person_id, value, normalized_value"
+                    ") VALUES (?, ?, ?, ?, ?)",
+                    (
+                        _id("alias"),
+                        space_id,
+                        target_person_id,
+                        alias["value"],
+                        alias["normalized_value"],
+                    ),
+                )
+            connection.execute(
+                "DELETE FROM person_aliases WHERE person_id = ?",
+                (source_person_id,),
+            )
+
+            connection.execute(
+                "INSERT OR IGNORE INTO memory_people(memory_id, person_id) "
+                "SELECT memory_id, ? FROM memory_people WHERE person_id = ?",
+                (target_person_id, source_person_id),
+            )
+            connection.execute(
+                "DELETE FROM memory_people WHERE person_id = ?", (source_person_id,)
+            )
+
+            affected_relationships: set[str] = set()
+            relationships = connection.execute(
+                "SELECT * FROM relationships "
+                "WHERE space_id = ? AND (person_a_id = ? OR person_b_id = ?)",
+                (space_id, source_person_id, source_person_id),
+            ).fetchall()
+            for relationship in relationships:
+                other_id = (
+                    relationship["person_b_id"]
+                    if relationship["person_a_id"] == source_person_id
+                    else relationship["person_a_id"]
+                )
+                if other_id == target_person_id:
+                    connection.execute(
+                        "DELETE FROM memory_relationships WHERE relationship_id = ?",
+                        (relationship["id"],),
+                    )
+                    connection.execute(
+                        "DELETE FROM relationships WHERE id = ?",
+                        (relationship["id"],),
+                    )
+                    continue
+                a_id, b_id = sorted((target_person_id, other_id))
+                existing = connection.execute(
+                    "SELECT id FROM relationships "
+                    "WHERE space_id = ? AND person_a_id = ? AND person_b_id = ?",
+                    (space_id, a_id, b_id),
+                ).fetchone()
+                if existing:
+                    affected_relationships.add(existing["id"])
+                    connection.execute(
+                        "INSERT OR IGNORE INTO memory_relationships("
+                        "memory_id, relationship_id, role"
+                        ") SELECT memory_id, ?, role FROM memory_relationships "
+                        "WHERE relationship_id = ?",
+                        (existing["id"], relationship["id"]),
+                    )
+                    connection.execute(
+                        "DELETE FROM memory_relationships WHERE relationship_id = ?",
+                        (relationship["id"],),
+                    )
+                    connection.execute(
+                        "DELETE FROM relationships WHERE id = ?",
+                        (relationship["id"],),
+                    )
+                else:
+                    connection.execute(
+                        "UPDATE relationships SET person_a_id = ?, person_b_id = ?, "
+                        "facets = '[]', closeness = NULL, tone = NULL, "
+                        "status = 'unknown', summary = '', "
+                        "profile_source_updated_at = NULL, profile_updated_at = NULL, "
+                        "updated_at = ? WHERE id = ?",
+                        (a_id, b_id, now, relationship["id"]),
+                    )
+                    affected_relationships.add(relationship["id"])
+            for relationship_id in affected_relationships:
+                connection.execute(
+                    "UPDATE relationships SET facets = '[]', closeness = NULL, "
+                    "tone = NULL, status = 'unknown', summary = '', "
+                    "profile_source_updated_at = NULL, profile_updated_at = NULL, "
+                    "updated_at = ? WHERE id = ?",
+                    (now, relationship_id),
+                )
+
+            continuity = connection.execute(
+                "SELECT related_person_ids FROM continuities WHERE space_id = ?", (space_id,)
+            ).fetchone()
+            if continuity:
+                ids = _loads(continuity["related_person_ids"], [])
+                rewritten = list(
+                    dict.fromkeys(
+                        target_person_id if item == source_person_id else item
+                        for item in ids
+                    )
+                )
+                connection.execute(
+                    "UPDATE continuities SET related_person_ids = ?, updated_at = ? "
+                    "WHERE space_id = ?",
+                    (_json(rewritten), now, space_id),
+                )
+            connection.execute(
+                "UPDATE people SET status = 'merged', merged_into_person_id = ?, "
+                "updated_at = ? WHERE id = ?",
+                (target_person_id, now, source_person_id),
+            )
+            connection.execute(
+                "UPDATE people SET profile_source_updated_at = NULL, "
+                "profile_updated_at = NULL, updated_at = ? WHERE id = ?",
+                (now, target_person_id),
+            )
+            return {
+                "source_person_id": source_person_id,
+                "target_person_id": target_person_id,
+                "status": "merged",
+                "affected_relationship_ids": sorted(affected_relationships),
+            }
 
     def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]:
         query = _fts_query(text)

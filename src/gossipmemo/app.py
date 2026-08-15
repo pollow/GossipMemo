@@ -18,6 +18,8 @@ from .models import (
     IngestRequest,
     IngestResponse,
     ManualMemoryRequest,
+    MergePersonRequest,
+    MergePersonResponse,
     QueryRequest,
     QueryResponse,
     RetractRequest,
@@ -25,7 +27,7 @@ from .models import (
     TurnRequest,
     TurnResponse,
 )
-from .store import AmbiguousPersonError, SqliteWorldStore
+from .store import AmbiguousPersonError, PersonMergeError, SqliteWorldStore
 from .world import SocialMemoryWorld
 
 
@@ -109,6 +111,13 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(error)})
 
+    @app.exception_handler(PersonMergeError)
+    async def person_merge_error(_: Request, error: PersonMergeError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409 if error.conflict else 404,
+            content={"detail": str(error)},
+        )
+
     async def authorize(
         authorization: Annotated[str | None, Header()] = None,
     ) -> None:
@@ -177,6 +186,16 @@ def create_app(
         if not context.people:
             raise HTTPException(status_code=404, detail="person not found or ambiguous")
         return context.model_dump()
+
+    @app.post(
+        "/v1/spaces/{space_id}/people/{source_person_id}/merge",
+        response_model=MergePersonResponse,
+        dependencies=protected,
+    )
+    async def merge_person(
+        space_id: str, source_person_id: str, request: MergePersonRequest
+    ) -> MergePersonResponse:
+        return world.merge_person(space_id, source_person_id, request.target_person_id)
 
     @app.get(
         "/v1/spaces/{space_id}/relationships/{relationship_id}",

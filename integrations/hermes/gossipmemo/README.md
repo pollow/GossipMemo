@@ -27,7 +27,7 @@ errors and do not crash the agent.
 
 ## Tools
 
-The provider exposes four OpenAI-style tools:
+The provider exposes five OpenAI-style tools:
 
 - `gossipmemo_search` searches people, relationships, memories, and optional
   evidence.
@@ -36,6 +36,8 @@ The provider exposes four OpenAI-style tools:
 - `gossipmemo_dossier` reads a person or relationship projection without an
   open-ended synthesis query.
 - `gossipmemo_retract` retracts a memory while preserving its provenance.
+- `gossipmemo_merge_people` merges two confirmed Person records after the user
+  has confirmed that they represent the same person.
 
 Completed user/assistant turns are queued to a daemon writer, so
 `sync_turn()` does not wait for HTTP or server-side extraction. Writes from

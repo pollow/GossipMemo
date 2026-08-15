@@ -69,6 +69,17 @@ class TurnResponse(BaseModel):
     context_status: Literal["available", "unavailable"] = "available"
 
 
+class MergePersonRequest(BaseModel):
+    target_person_id: str = Field(min_length=1)
+
+
+class MergePersonResponse(BaseModel):
+    source_person_id: str
+    target_person_id: str
+    status: Literal["merged"] = "merged"
+    affected_relationship_ids: list[str] = Field(default_factory=list)
+
+
 class ExtractedPerson(BaseModel):
     ref: str
     display_name: str
