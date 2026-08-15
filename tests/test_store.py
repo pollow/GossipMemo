@@ -1364,6 +1364,22 @@ def test_coverage_cursor_handles_equal_timestamps_and_prunes_retracted_evidence(
     assert ids[-1] not in updated.criteria["M6"]["evidence_memory_ids"]
 
 
+def test_coverage_context_can_delegate_all_batching_to_reasoner(store):
+    ids = [
+        store.add_manual_memory(
+            "personal", ManualMemoryRequest(content=f"scene {index}", about_user=True)
+        )
+        for index in range(30)
+    ]
+    _, bounded, _, pending = store.coverage_context("personal")
+    assert len(bounded) == 24
+    assert pending is True
+
+    _, complete, _, pending = store.coverage_context("personal", limit=None)
+    assert {memory.id for memory in complete} == set(ids)
+    assert pending is False
+
+
 def test_goal_planning_uses_coverage_revision_cas(store):
     store.ensure_space("personal")
     coverage, _, _, _ = store.coverage_context("personal")

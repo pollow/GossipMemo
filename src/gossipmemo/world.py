@@ -294,7 +294,7 @@ class SocialMemoryWorld:
             # historical bounded seam only for minimal deterministic fakes
             # that cannot expose a ContextBudget.
             if hasattr(self.model, "context_budget"):
-                context = self.store.continuity_context(space_id)
+                context = self.store.continuity_context(space_id, limit=None)
             else:
                 context = self.store.continuity_context(
                     space_id, max_message_chars=8000, max_total_chars=48000,
@@ -481,7 +481,13 @@ class SocialMemoryWorld:
     async def _reason_coverage(self, space_id: str) -> None:
         """Audit all bounded chunks before a single goal-planning pass."""
         while not self._stopping:
-            context = self.store.coverage_context(space_id)
+            # Production adapters receive the complete pending delta and own
+            # all request-aware chunking. Minimal fakes retain the store's
+            # small fixed batch for deterministic tests.
+            if hasattr(self.model, "context_budget"):
+                context = self.store.coverage_context(space_id, limit=None)
+            else:
+                context = self.store.coverage_context(space_id)
             if not context:
                 return
             coverage, memories, hypotheses, pending = context

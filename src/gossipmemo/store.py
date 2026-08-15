@@ -165,7 +165,7 @@ class WorldStore(Protocol):
         result: UserModelReasoningResult,
     ) -> bool: ...
 
-    def coverage_context(self, space_id: str, limit: int = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None: ...
+    def coverage_context(self, space_id: str, limit: int | None = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None: ...
 
     def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch, evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool: ...
 
@@ -185,7 +185,10 @@ class WorldStore(Protocol):
         actions: HypothesisActions,
     ) -> None: ...
 
-    def continuity_context(self, space_id: str) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
+    def continuity_context(
+        self, space_id: str, limit: int | None = 32,
+        max_message_chars: int | None = None, max_total_chars: int | None = None,
+    ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
 
     def pending_continuities(self, threshold: int = 20) -> list[str]: ...
 
@@ -1693,21 +1696,26 @@ class SqliteWorldStore:
         ).fetchall()
         return HypothesisView(id=row["id"], space_id=row["space_id"], owner_kind=row["owner_kind"], owner_id=row["owner_id"], content=row["content"], kind=row["kind"], confidence=row["confidence"], status=row["status"], promoted_memory_id=row["promoted_memory_id"], evidence=[HypothesisEvidence(memory_id=item["memory_id"], role=item["role"]) for item in evidence], created_at=row["created_at"], updated_at=row["updated_at"])
 
-    def coverage_context(self, space_id: str, limit: int = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None:
-        """Return a bounded changed-evidence chunk and whether more remains."""
+    def coverage_context(self, space_id: str, limit: int | None = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None:
+        """Return changed evidence, optionally bounded for simple adapters."""
         with self._connect() as connection:
             row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
             if not row:
                 return None
             coverage = self._coverage_view(row)
             watermark, cursor_id = coverage.source_watermark or "", coverage.source_cursor_id or ""
-            changed = connection.execute(
-                """SELECT * FROM memories WHERE space_id = ? AND basis <> 'inferred'
-                   AND (updated_at > ? OR (updated_at = ? AND id > ?))
-                   ORDER BY updated_at, id LIMIT ?""",
-                (space_id, watermark, watermark, cursor_id, limit + 1),
-            ).fetchall()
-            chunk, pending = changed[:limit], len(changed) > limit
+            query = """SELECT * FROM memories WHERE space_id = ? AND basis <> 'inferred'
+                       AND (updated_at > ? OR (updated_at = ? AND id > ?))
+                       ORDER BY updated_at, id"""
+            params: tuple[Any, ...] = (space_id, watermark, watermark, cursor_id)
+            if limit is not None:
+                query += " LIMIT ?"
+                params += (limit + 1,)
+            changed = connection.execute(query, params).fetchall()
+            if limit is None:
+                chunk, pending = changed, False
+            else:
+                chunk, pending = changed[:limit], len(changed) > limit
             hypotheses = connection.execute(
                 "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)
             ).fetchall()
@@ -1799,7 +1807,7 @@ class SqliteWorldStore:
             return True
 
     def continuity_context(
-        self, space_id: str, limit: int = 32,
+        self, space_id: str, limit: int | None = 32,
         max_message_chars: int | None = None, max_total_chars: int | None = None,
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None:
         with self._connect() as connection:
@@ -1817,10 +1825,12 @@ class SqliteWorldStore:
                 after = 0
             else:
                 after = row["through_message_rowid"]
-            rows = connection.execute(
-                "SELECT * FROM messages WHERE space_id = ? AND rowid > ? "
-                "ORDER BY rowid LIMIT ?", (space_id, after, limit)
-            ).fetchall()
+            query = "SELECT * FROM messages WHERE space_id = ? AND rowid > ? ORDER BY rowid"
+            params: tuple[Any, ...] = (space_id, after)
+            if limit is not None:
+                query += " LIMIT ?"
+                params += (limit,)
+            rows = connection.execute(query, params).fetchall()
             messages: list[ModelMessage] = []
             total_chars = 0
             for item in rows:

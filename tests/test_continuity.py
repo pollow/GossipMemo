@@ -138,6 +138,19 @@ def test_continuity_backfill_is_bounded_and_reaches_last_message(tmp_path: Path)
     asyncio.run(scenario())
 
 
+def test_continuity_context_can_delegate_all_batching_to_reasoner(tmp_path: Path):
+    store = SqliteWorldStore(tmp_path / "reasoner-batching.db")
+    store.initialize()
+    ids = store.record_messages(
+        "space", [MessageInput(author="user", content=f"m{i}") for i in range(40)]
+    )
+    _, bounded = store.continuity_context("space")
+    assert len(bounded) == 32
+
+    _, complete = store.continuity_context("space", limit=None)
+    assert [message.id for message in complete] == ids
+
+
 def test_continuity_truncates_oversized_messages_without_stalling(tmp_path: Path):
     async def scenario():
         store = SqliteWorldStore(tmp_path / "oversized.db")
