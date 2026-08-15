@@ -12,6 +12,7 @@ import logging
 import os
 import queue
 import threading
+import uuid
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
@@ -113,7 +114,9 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._writer: threading.Thread | None = None
         self._stop_requested = False
         self._prefetch_lock = threading.Lock()
-        self._prefetch_cache: dict[str, str] = {}
+        self._prefetch_cache: dict[str, dict[str, Any]] = {}
+        self._context_cache: dict[str, dict[str, Any]] = {}
+        self._pending_turns: dict[str, list[dict[str, str]]] = {}
         self._prefetch_threads: list[threading.Thread] = []
 
     @property
@@ -209,6 +212,9 @@ class GossipMemoMemoryProvider(MemoryProvider):
         context = str(kwargs.get("agent_context", "primary") or "primary")
         self._write_enabled = context in {"", "primary"}
         self._stop_requested = False
+        self._prefetch_cache.clear()
+        self._context_cache.clear()
+        self._pending_turns.clear()
         try:
             self._client = self._client_factory(
                 base_url=base_url,
@@ -306,7 +312,77 @@ class GossipMemoMemoryProvider(MemoryProvider):
         # first-version bridge stores the user/assistant turn itself, while the
         # optional argument keeps the ABC signature forward-compatible.
         del messages
-        self._queue.put(self._turn_messages(user_content, assistant_content, session_id))
+        conversation = session_id or self._session_id or "default"
+        with self._prefetch_lock:
+            pending = self._pending_turns.get(conversation, [])
+            idem = ""
+            for index, item in enumerate(pending):
+                if item.get("content") == user_content:
+                    idem = item.get("idempotency_key", "")
+                    del pending[index]
+                    break
+        if not idem:
+            idem = uuid.uuid4().hex
+        messages = self._turn_messages(user_content, assistant_content, session_id)
+        messages[0]["idempotency_key"] = idem
+        # The same stable key is used by the turn façade and this asynchronous
+        # assistant write, so a slow prefetch cannot create a duplicate user row.
+        self._queue.put(messages)
+
+    def _turn_context(self, query: str, key: str) -> tuple[str, str]:
+        client = self._client
+        if client is None:
+            return "", ""
+        with self._prefetch_lock:
+            cached = dict(self._context_cache.get(key, {}))
+            pending = self._pending_turns.setdefault(key, [])
+            entry = next((item for item in pending if item.get("content") == query), None)
+            if entry is None:
+                entry = {"content": query, "idempotency_key": uuid.uuid4().hex, "started": False}
+                pending.append(entry)
+            idem = entry["idempotency_key"]
+            event = entry.setdefault("event", threading.Event())
+            if entry.get("started"):
+                started = False
+            else:
+                entry["started"] = True
+                started = True
+        if not started:
+            event.wait(timeout=0.35)
+            with self._prefetch_lock:
+                return str(entry.get("formatted", "")), idem
+        try:
+            result = client.turn(
+                query,
+                context_version=cached.get("version"),
+                memory_limit=5,
+                idempotency_key=idem,
+                source={"provider": self._source_provider, "conversation_key": key},
+            )
+        except Exception:
+            with self._prefetch_lock:
+                entry["event"].set()
+            raise
+        if not isinstance(result, Mapping):
+            with self._prefetch_lock:
+                entry["event"].set()
+            return "", idem
+        update = result.get("context_update")
+        with self._prefetch_lock:
+            if isinstance(update, Mapping):
+                self._context_cache[key] = dict(update)
+            elif cached:
+                update = cached
+        merged = {
+            "bundle": update or cached,
+            "known_people": result.get("known_people", []),
+            "memory_recall": result.get("memory_recall", []),
+        }
+        formatted = self._format_context(merged)
+        with self._prefetch_lock:
+            entry["formatted"] = formatted
+            entry["event"].set()
+        return formatted, idem
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         """Warm a small query result for the next turn in a daemon thread."""
@@ -319,13 +395,12 @@ class GossipMemoMemoryProvider(MemoryProvider):
         def _prefetch() -> None:
             try:
                 try:
-                    result = client.query(query, limit=20, include_evidence=True)
-                except TypeError:
-                    result = client.query(query)
-                formatted = self._format_context(result)
+                    formatted, _ = self._turn_context(query, key)
+                except AttributeError:
+                    return
                 if formatted:
                     with self._prefetch_lock:
-                        self._prefetch_cache[key] = formatted
+                        self._prefetch_cache[key] = {"formatted": formatted}
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
                 logger.debug("GossipMemo prefetch failed: %s", exc)
 
@@ -337,7 +412,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         key = session_id or self._session_id or "default"
         with self._prefetch_lock:
-            cached = self._prefetch_cache.pop(key, "")
+            cached_entry = self._prefetch_cache.pop(key, {})
+        cached = cached_entry.get("formatted", "") if isinstance(cached_entry, Mapping) else ""
         if cached or not query.strip() or not self._client:
             return cached
 
@@ -350,14 +426,13 @@ class GossipMemoMemoryProvider(MemoryProvider):
         def _first_fetch() -> None:
             try:
                 try:
-                    response = self._client.query(query, limit=20, include_evidence=True)
-                except TypeError:
-                    response = self._client.query(query)
-                formatted = self._format_context(response)
+                    formatted, _ = self._turn_context(query, key)
+                except AttributeError:
+                    return
                 if formatted:
                     result.append(formatted)
                     with self._prefetch_lock:
-                        self._prefetch_cache[key] = formatted
+                        self._prefetch_cache[key] = {"formatted": formatted}
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
                 logger.debug("GossipMemo first-turn prefetch failed: %s", exc)
 
@@ -374,28 +449,45 @@ class GossipMemoMemoryProvider(MemoryProvider):
     def _format_context(result: Any) -> str:
         if not isinstance(result, Mapping):
             return ""
-        lines: list[str] = ["[GossipMemo relevant context]"]
-        answer = _compact(result.get("answer"))
-        if answer:
-            lines.append(f"Answer: {answer}")
-        people = result.get("people")
+        lines: list[str] = ["[GossipMemo context]"]
+        bundle = result.get("bundle") if isinstance(result.get("bundle"), Mapping) else result
+        user_model = bundle.get("user_model") if isinstance(bundle, Mapping) else None
+        if user_model:
+            card = user_model.get("profile_card") if isinstance(user_model, Mapping) else user_model
+            if card: lines.append(f"User model: {_compact(card, 900)}")
+        continuity = bundle.get("continuity") if isinstance(bundle, Mapping) else None
+        if continuity:
+            text = continuity.get("text") if isinstance(continuity, Mapping) else continuity
+            if _compact(text): lines.append(f"Continuity: {_compact(text, 900)}")
+        people = bundle.get("people", []) if isinstance(bundle, Mapping) else []
+        people = list(people) + list(result.get("known_people", []))
+        seen_people: set[str] = set()
         if isinstance(people, list):
-            for person in people[:12]:
+            for person in people:
                 if not isinstance(person, Mapping):
                     continue
                 name = _compact(person.get("display_name") or person.get("id"), 160)
+                stable_id = str(person.get("id") or name)
+                if not name or stable_id in seen_people: continue
+                seen_people.add(stable_id)
                 profile = _compact(person.get("profile_card"), 700)
                 if name:
                     lines.append(f"Person: {name}" + (f" — {profile}" if profile else ""))
-        memories = result.get("memories")
+                if len(seen_people) >= 12: break
+        memories = list(bundle.get("memories", [])) if isinstance(bundle, Mapping) else []
+        memories += list(result.get("memory_recall", []))
+        seen_memories: set[str] = set()
         if isinstance(memories, list):
-            for memory in memories[:20]:
+            for memory in memories:
                 if not isinstance(memory, Mapping):
                     continue
                 content = _compact(memory.get("content"), 700)
+                if not content or content in seen_memories: continue
+                seen_memories.add(content)
                 basis = _compact(memory.get("basis"), 60)
                 if content:
                     lines.append(f"Memory ({basis or 'unknown'}): {content}")
+                if len(seen_memories) >= 20: break
         relationships = result.get("relationships")
         if isinstance(relationships, list):
             for relationship in relationships[:12]:
@@ -423,23 +515,15 @@ class GossipMemoMemoryProvider(MemoryProvider):
             ),
             _schema(
                 "gossipmemo_store",
-                "Store an explicit durable memory with people and provenance roles.",
+                "Store an explicit durable memory with person reference strings.",
                 {
                     "content": {"type": "string"},
                     "kind": {"type": "string", "enum": ["fact", "event", "preference", "plan", "situation", "impression"]},
                     "people": {
-                        "type": "array",
-                        "description": "Person refs and roles, for example {ref: 'Bob', role: 'subject'}.",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "ref": {"type": "string"},
-                                "role": {"type": "string", "enum": ["subject", "asserter", "reporter", "witness", "participant"]},
-                            },
-                            "required": ["ref", "role"],
-                            "additionalProperties": False,
-                        },
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Person reference strings mentioned by the memory.",
                     },
+                    "about_user": {"type": "boolean", "description": "Whether this memory is about the current user."},
                     "valid_from": {"type": "string"},
                     "valid_to": {"type": "string"},
                 },
@@ -495,6 +579,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     people=args.get("people") or [],
                     valid_from=args.get("valid_from"),
                     valid_to=args.get("valid_to"),
+                    about_user=bool(args.get("about_user", False)),
                 )
                 return _json_result(result)
             if tool_name == "gossipmemo_dossier":

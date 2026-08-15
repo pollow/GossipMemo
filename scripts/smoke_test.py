@@ -104,7 +104,7 @@ def run(args: argparse.Namespace) -> None:
         manual = memory.add_memory(
             f"Smoke Test Person prefers coffee. Test run: {run_id}",
             kind="preference",
-            people=[{"ref": "Smoke Test Person", "role": "subject"}],
+            people=["Smoke Test Person"],
         )
         show("manual memory", manual)
 

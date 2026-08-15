@@ -106,6 +106,14 @@ in the plugin README.
 Hermes sessions are retained only as Message source coordinates. They do not
 partition GossipMemo's long-term memory.
 
+For turn continuity the provider uses the SDK's `turn()` façade: it persists
+the user message and returns recall plus a context bundle without invoking the
+LLM query synthesizer. The latest bundle/version is cached per session; slow or
+failed preparation falls back to the prior cache (or an empty block), so it
+never blocks a chat turn. After completion Hermes asynchronously ingests the
+assistant reply, reusing the user's idempotency key to avoid duplicate user
+messages.
+
 ## Architecture
 
 The external `SocialMemoryWorld` interface has three behaviors:

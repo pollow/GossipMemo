@@ -10,6 +10,7 @@ package (for example, a Hermes plugin).
 from __future__ import annotations
 
 import dataclasses
+import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
@@ -69,6 +70,40 @@ def _normalise_messages(messages: Any) -> list[Json]:
         result.append(dict(value))
     if not result:
         raise ValueError("messages must contain at least one message")
+    return result
+
+
+def _normalise_turn_message(
+    message: Any,
+    *,
+    source: Any = None,
+    idempotency_key: str | None = None,
+) -> Json:
+    """Normalize the deliberately narrow user message accepted by ``turn``."""
+    if isinstance(message, str):
+        value: Any = {"content": message}
+    else:
+        value = _jsonable(message)
+    if not isinstance(value, Mapping):
+        raise TypeError("message must be a string, mapping, or model")
+    result = dict(value)
+    if result.get("author") not in (None, "user"):
+        raise ValueError("turn message author must be user")
+    result["author"] = "user"
+    content = result.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("message content is required")
+    result["content"] = content.strip()
+    if source is not None:
+        result["source"] = _jsonable(source)
+    elif result.get("source") is None:
+        result.pop("source", None)
+    if result.get("source") is not None and not isinstance(result["source"], Mapping):
+        raise TypeError("source must be a mapping or model")
+    key = idempotency_key if idempotency_key is not None else result.get("idempotency_key")
+    if key is None or not str(key).strip():
+        key = uuid.uuid4().hex
+    result["idempotency_key"] = str(key).strip()
     return result
 
 
@@ -223,6 +258,34 @@ class GossipMemo(_ClientCommon):
         """Return the server health document."""
 
         return self._request("GET", "/health")
+
+    def context(self) -> Any:
+        """Read the latest context bundle without synthesizing an answer."""
+        return self._request("GET", self._space_path("context"))
+
+    def prepare_turn(
+        self,
+        message: Any,
+        *,
+        context_version: str | None = None,
+        memory_limit: int = 5,
+        source: Any = None,
+        idempotency_key: str | None = None,
+    ) -> Json:
+        """Build a validated turn payload; useful to inspect or queue it."""
+        if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
+            raise ValueError("memory_limit must be between 1 and 10")
+        if context_version is not None and not str(context_version).strip():
+            raise ValueError("context_version must be non-empty when provided")
+        return {
+            "message": _normalise_turn_message(message, source=source, idempotency_key=idempotency_key),
+            "context_version": context_version,
+            "memory_limit": memory_limit,
+        }
+
+    def turn(self, message: Any, **kwargs: Any) -> Any:
+        """Persist one user turn and return context/recall metadata."""
+        return self._request("POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
 
     def ingest(
         self,
@@ -454,6 +517,32 @@ class AsyncGossipMemo(_ClientCommon):
 
     async def health(self) -> Any:
         return await self._request("GET", "/health")
+
+    async def context(self) -> Any:
+        """Read the latest context bundle without synthesizing an answer."""
+        return await self._request("GET", self._space_path("context"))
+
+    def prepare_turn(
+        self,
+        message: Any,
+        *,
+        context_version: str | None = None,
+        memory_limit: int = 5,
+        source: Any = None,
+        idempotency_key: str | None = None,
+    ) -> Json:
+        if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
+            raise ValueError("memory_limit must be between 1 and 10")
+        if context_version is not None and not str(context_version).strip():
+            raise ValueError("context_version must be non-empty when provided")
+        return {
+            "message": _normalise_turn_message(message, source=source, idempotency_key=idempotency_key),
+            "context_version": context_version,
+            "memory_limit": memory_limit,
+        }
+
+    async def turn(self, message: Any, **kwargs: Any) -> Any:
+        return await self._request("POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
 
     async def ingest(
         self,
