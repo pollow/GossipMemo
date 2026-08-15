@@ -27,6 +27,7 @@ class Settings:
     llm_base_url: str
     llm_api_key: str
     llm_model: str
+    user_name: str = "CurrentUser"
     database_path: Path = Path("data/gossipmemo.db")
     host: str = "127.0.0.1"
     port: int = 8765
@@ -54,6 +55,8 @@ class Settings:
             raise ConfigurationError(
                 "required settings are empty: " + ", ".join(missing)
             )
+        if not self.user_name.strip():
+            raise ConfigurationError("user_name must not be empty")
         if self.llm_timeout_seconds <= 0:
             raise ConfigurationError("llm_timeout_seconds must be greater than zero")
         if self.extraction_batch_size < 1:
@@ -91,6 +94,7 @@ class Settings:
             llm_base_url=_required_env("GOSSIPMEMO_LLM_BASE_URL").rstrip("/"),
             llm_api_key=_required_env("GOSSIPMEMO_LLM_API_KEY"),
             llm_model=_required_env("GOSSIPMEMO_LLM_MODEL"),
+            user_name=_env("GOSSIPMEMO_USER_NAME", "CurrentUser"),
             database_path=Path(
                 _env("GOSSIPMEMO_DATABASE_PATH", "data/gossipmemo.db")
             ),

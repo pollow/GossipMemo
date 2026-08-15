@@ -59,6 +59,9 @@ There is no default provider URL or no-LLM query fallback. Configuration is
 read once at process initialization and passed to the server modules as one
 immutable `Settings` value.
 
+`GOSSIPMEMO_USER_NAME` names the fixed current user in LLM prompts (default:
+`CurrentUser`). The current user is not stored as a `Person`.
+
 Extraction batches wait for 6 messages by default. A partial batch is flushed
 when its oldest message has waited 30 minutes. These values can be changed with
 `GOSSIPMEMO_EXTRACTION_BATCH_SIZE` and

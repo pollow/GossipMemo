@@ -109,6 +109,7 @@ def extraction_prompt(
     policy: str = "balanced",
     context: list[ModelMessage] | tuple[ModelMessage, ...] = (),
     known_people: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+    user_name: str = "CurrentUser",
 ) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
@@ -128,18 +129,26 @@ def extraction_prompt(
     }
     if policy not in policy_text:
         raise ValueError(f"unknown extraction policy: {policy}")
+    evidence_messages = [message for message in messages if message.author == "user"]
+    assistant_messages = [
+        message for message in messages if message.author == "assistant"
+    ]
     return (
         f"Use the server's {policy} extraction policy for the whole batch.\n"
         f"{policy_text[policy]}\n"
-        "Extract the messages together as one conversational context. Recent "
-        "context is provided only to resolve references and conversational meaning; "
-        "it is not evidence and must not produce memories. Only the New messages may "
-        "produce memories.\n"
-        "The user/assistant author role is context and never a Person. List every "
+        f"The fixed current user is named {user_name!r}. Use that name when referring "
+        "to the current user; the current user is not a Person. User-authored "
+        "messages in the current batch are the only evidence allowed to create "
+        "memories. Assistant-authored messages in the batch and recent context are "
+        "context only: use them to resolve references and conversational meaning, "
+        "but never save their restatements, summaries, analyses, or advice as new "
+        "memories. Assistant content may supply a proposition only when a current "
+        "user evidence message explicitly confirms, adopts, or corrects it.\n"
+        "The current user/assistant author role is context and never a Person. List every "
         "Person referenced by a memory in its `people` refs; express who said or "
         "did what in the memory content itself. Preserve reported claims as "
-        "`reported`, not facts. Set `about_user` for a claim or event about the "
-        "current user; the current user is not a Person and must never appear in "
+        "`reported`, not facts. Set `about_user` for a claim or event about "
+        f"{user_name}; {user_name} must never appear in "
         "`people`. "
         "Record valid_from/valid_to when the message gives a time bound.\n\n"
         "Recent context (context only):\n"
@@ -151,8 +160,10 @@ def extraction_prompt(
         "it in that person's `aliases` field. Omit a known person unless a new "
         "memory references them or the messages explicitly add an alias. Do not "
         "echo the known-people list.\n"
-        + "\n\nNew messages (the only evidence allowed to produce memories):\n"
-        + _json(messages)
+        + "\n\nCurrent batch evidence (user-authored; the only messages allowed to produce memories):\n"
+        + _json(evidence_messages)
+        + "\n\nCurrent batch context (assistant-authored; context only):\n"
+        + _json(assistant_messages)
     )
 
 
@@ -187,9 +198,11 @@ def relationship_reasoning_prompt(
     )
 
 
-def user_model_reasoning_prompt(memories: list[MemoryView]) -> str:
+def user_model_reasoning_prompt(
+    memories: list[MemoryView], user_name: str = "CurrentUser"
+) -> str:
     return (
-        "Rebuild the compact profile card for the current user from these active "
+        f"Rebuild the compact profile card for {user_name} from these active "
         "memories only. Keep it bounded and useful for interaction.\n\nActive "
         "about-user memories:\n" + _json(memories)
     )

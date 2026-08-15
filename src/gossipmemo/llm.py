@@ -174,6 +174,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         max_tokens: int | None = None,
         headers: Mapping[str, str] | None = None,
         extraction_policy: str = "balanced",
+        user_name: str = "CurrentUser",
     ) -> None:
         normalized_base = base_url.strip().rstrip("/")
         if not normalized_base:
@@ -190,6 +191,8 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             raise ValueError(
                 "extraction_policy must be conservative, balanced, or comprehensive"
             )
+        if not user_name.strip():
+            raise ValueError("LLM user_name must not be empty")
 
         self.base_url = normalized_base
         self.api_key = api_key.strip()
@@ -198,6 +201,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.extraction_policy = extraction_policy
+        self.user_name = user_name.strip()
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -212,6 +216,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             model=settings.llm_model,
             timeout=settings.llm_timeout_seconds,
             extraction_policy=settings.extraction_policy,
+            user_name=settings.user_name,
         )
 
     @property
@@ -233,7 +238,11 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         content = await self._structured_call(
             EXTRACTION_SYSTEM_PROMPT,
             extraction_prompt(
-                list(messages), self.extraction_policy, list(context), list(known_people)
+                list(messages),
+                self.extraction_policy,
+                list(context),
+                list(known_people),
+                self.user_name,
             ),
             ExtractionResult,
         )
@@ -264,7 +273,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     ) -> UserModelReasoningResult:
         content = await self._structured_call(
             USER_MODEL_REASONING_SYSTEM_PROMPT,
-            user_model_reasoning_prompt(list(memories)),
+            user_model_reasoning_prompt(list(memories), self.user_name),
             UserModelReasoningResult,
         )
         return cast(UserModelReasoningResult, content)
