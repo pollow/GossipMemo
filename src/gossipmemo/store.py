@@ -1177,14 +1177,17 @@ class SqliteWorldStore:
 
     def person_context(
         self, space_id: str, person_id: str
-    ) -> tuple[PersonView, list[MemoryView]] | None:
-        request = QueryRequest(question="reason", people=[person_id], limit=100)
-        context = self.read(space_id, request)
-        if not context.people:
-            return None
+    ) -> tuple[PersonView, list[MemoryView], str | None] | None:
         with self._connect() as connection:
+            person = connection.execute("SELECT * FROM people WHERE space_id = ? AND id = ?", (space_id, person_id)).fetchone()
+            if not person:
+                return None
+            rows = connection.execute("""SELECT DISTINCT m.* FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND mp.person_id = ?
+                ORDER BY m.created_at DESC, m.id DESC""", (space_id, person_id)).fetchall()
             watermark = self._person_watermark(connection, space_id, person_id)
-        return context.people[0], [m for m in context.memories if m.basis != "inferred"], watermark
+            view = self._person_view(connection, person)
+            return view, [self._memory_view(connection, row, True) for row in rows], watermark
 
     def owner_review_context(self, space_id: str, owner_kind: str, owner_id: str | None) -> tuple[list[MemoryView], list[HypothesisView]]:
         """Comparison-only state captured with an owner reasoning snapshot."""
@@ -1218,7 +1221,7 @@ class SqliteWorldStore:
                 WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND (
                     mr.relationship_id = ? OR
                     (a.person_id = ? AND b.person_id = ?)
-                ) ORDER BY m.created_at DESC LIMIT 100
+                ) ORDER BY m.created_at DESC, m.id DESC
                 """,
                 (
                     space_id,
@@ -1499,7 +1502,7 @@ class SqliteWorldStore:
         rows = connection.execute(
             """SELECT DISTINCT m.id FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
-                 AND mp.person_id = ? ORDER BY m.created_at DESC LIMIT 100""",
+                 AND mp.person_id = ? ORDER BY m.created_at DESC, m.id DESC""",
             (space_id, person_id),
         ).fetchall()
         return {row["id"] for row in rows}
@@ -1521,7 +1524,7 @@ class SqliteWorldStore:
                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
                  AND (mr.relationship_id = ? OR
                       (a.person_id = ? AND b.person_id = ?))
-               ORDER BY m.created_at DESC LIMIT 100""",
+               ORDER BY m.created_at DESC, m.id DESC""",
             (space_id, relationship_id, relationship["person_a_id"], relationship["person_b_id"]),
         ).fetchall()
         return {row["id"] for row in rows}
@@ -1642,7 +1645,7 @@ class SqliteWorldStore:
                 return None
             memories = connection.execute(
                 """SELECT * FROM memories WHERE space_id = ? AND status = 'active'
-                   AND about_user = 1 ORDER BY created_at DESC LIMIT 100""",
+                   AND about_user = 1 ORDER BY created_at DESC, id DESC""",
                 (space_id,),
             ).fetchall()
             watermark = self._user_model_watermark(connection, space_id)

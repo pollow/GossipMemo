@@ -39,6 +39,8 @@ from .models import (
     RelationshipView,
     UserModelReasoningResult,
     UserModelView,
+    ExtractedOwnerEvidenceDigest,
+    OwnerEvidenceDigestView,
     ContinuityReasoningResult,
     ContinuityView,
     CoverageAuditPatch,
@@ -55,6 +57,7 @@ from .prompts import (
     extraction_prompt,
     person_reasoning_prompt,
     owner_reasoning_prefix,
+    owner_evidence_digest_prompt,
     projection_stage_prompt,
     actions_stage_prompt,
     query_synthesis_prompt,
@@ -314,7 +317,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> PersonReasoningResult:
         projection, actions = await self._owner_reasoning(
-            PERSON_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(person, list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), PersonProjectionResult,
+            PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories, hypotheses, PersonProjectionResult,
         )
         return PersonReasoningResult(profile_card=projection.profile_card, **actions.model_dump(exclude_none=True))
 
@@ -323,7 +326,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> RelationshipReasoningResult:
         projection, actions = await self._owner_reasoning(
-            RELATIONSHIP_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(relationship, list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), RelationshipProjectionResult,
+            RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories, inferred_memories, hypotheses, RelationshipProjectionResult,
         )
         return RelationshipReasoningResult(**projection.model_dump(), **actions.model_dump(exclude_none=True))
 
@@ -332,17 +335,233 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> UserModelReasoningResult:
         projection, actions = await self._owner_reasoning(
-            USER_MODEL_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(UserModelView(space_id="current"), list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), PersonProjectionResult, UserReasoningActionsResult,
+            USER_MODEL_REASONING_SYSTEM_PROMPT, UserModelView(space_id="current"), memories, inferred_memories, hypotheses, PersonProjectionResult, UserReasoningActionsResult,
         )
         return UserModelReasoningResult(profile_card=projection.profile_card, hypothesis_actions=actions.hypothesis_actions)
 
-    async def _owner_reasoning(self, system_prompt: str, prefix: str, projection_type: type[BaseModel], actions_type: type[BaseModel] = ReasoningActionsResult) -> tuple[BaseModel, BaseModel]:
+    async def _owner_reasoning(self, system_prompt: str, target: BaseModel, memories: Sequence[MemoryView], inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView], projection_type: type[BaseModel], actions_type: type[BaseModel] = ReasoningActionsResult) -> tuple[BaseModel, BaseModel]:
+        bounded_inferred, bounded_hypotheses = self._bounded_owner_comparisons(
+            system_prompt, target, inferred_memories, hypotheses,
+            projection_type, actions_type,
+        )
+        prefix = owner_reasoning_prefix(target, list(memories), bounded_inferred, bounded_hypotheses, user_name=self.user_name)
         common = [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=prefix)]
         first_messages = common + [ChatMessage(role="user", content=projection_stage_prompt() + "\n" + schema_instruction(projection_type))]
+        if not self._owner_stage2_fits(first_messages, actions_type):
+            digest = await self._digest_owner_evidence(
+                target, memories, bounded_inferred, bounded_hypotheses,
+                system_prompt, projection_type, actions_type,
+            )
+            prefix = owner_reasoning_prefix(target, digest, bounded_inferred, bounded_hypotheses, user_name=self.user_name)
+            common = [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=prefix)]
+            first_messages = common + [ChatMessage(role="user", content=projection_stage_prompt() + "\n" + schema_instruction(projection_type))]
+            if not self._owner_stage2_fits(first_messages, actions_type):
+                raise ValueError("owner evidence digest did not fit context budget")
         first = await self._chat_messages(first_messages, structured=True)
         projection = _parse_model_output(first, projection_type)
         second = await self._chat_messages(first_messages + [ChatMessage(role="assistant", content=first), ChatMessage(role="user", content=actions_stage_prompt() + "\n" + schema_instruction(actions_type))], structured=True)
         return projection, _parse_model_output(second, actions_type)
+
+    def _owner_first_messages(
+        self, system_prompt: str, target: BaseModel, evidence: Sequence[Any],
+        inferred: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
+        projection_type: type[BaseModel],
+    ) -> list[ChatMessage]:
+        prefix = owner_reasoning_prefix(
+            target, list(evidence), list(inferred), list(hypotheses),
+            user_name=self.user_name,
+        )
+        return [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=prefix),
+            ChatMessage(
+                role="user",
+                content=projection_stage_prompt() + "\n" + schema_instruction(projection_type),
+            ),
+        ]
+
+    def _owner_stage2_estimate(
+        self, first_messages: list[ChatMessage], actions_type: type[BaseModel],
+    ) -> int:
+        request = ChatCompletionRequest(
+            model=self.model,
+            messages=first_messages + [
+                ChatMessage(role="assistant", content=""),
+                ChatMessage(
+                    role="user",
+                    content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+                ),
+            ],
+            temperature=self.temperature,
+            response_format={"type": "json_object"},
+            max_tokens=self.max_tokens,
+        )
+        # The second request contains the first completion as an assistant
+        # message. Reserve its configured maximum in addition to the normal
+        # output reserve already excluded by ContextBudget.
+        return (
+            self.context_budget.estimate_request(request)
+            + self.context_budget.output_reserve_tokens
+        )
+
+    def _owner_stage2_fits(self, first_messages: list[ChatMessage], actions_type: type[BaseModel]) -> bool:
+        return self.context_budget.report(
+            self._owner_stage2_estimate(first_messages, actions_type)
+        ).fits
+
+    def _bounded_owner_comparisons(
+        self, system_prompt: str, target: BaseModel,
+        inferred: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
+        projection_type: type[BaseModel], actions_type: type[BaseModel],
+    ) -> tuple[list[MemoryView], list[HypothesisView]]:
+        """Bound comparison-only state without turning it into evidence.
+
+        IDs are retained before prose. If even every ID skeleton cannot fit,
+        the oldest tail is omitted; omission remains a no-op by contract.
+        Comparison state gets at most one third of the usable input budget so
+        evidence always has room to be represented or digested.
+        """
+        empty_first = self._owner_first_messages(
+            system_prompt, target, [], [], [], projection_type,
+        )
+        base = self._owner_stage2_estimate(empty_first, actions_type)
+        ceiling = min(
+            self.context_budget.usable_input_tokens,
+            base + self.context_budget.usable_input_tokens // 3,
+        )
+        if base > ceiling:
+            raise ValueError("owner prompt scaffolding exceeds context budget")
+
+        chosen_inferred: list[MemoryView] = []
+        chosen_hypotheses: list[HypothesisView] = []
+
+        def fits(
+            candidate_inferred: Sequence[MemoryView],
+            candidate_hypotheses: Sequence[HypothesisView],
+        ) -> bool:
+            first = self._owner_first_messages(
+                system_prompt, target, [], candidate_inferred,
+                candidate_hypotheses, projection_type,
+            )
+            return self._owner_stage2_estimate(first, actions_type) <= ceiling
+
+        # Preserve actionable IDs first with empty prose, in the stable store
+        # order (newest first). Then spend remaining budget on bounded prose.
+        for item in inferred:
+            skeleton = item.model_copy(update={"content": ""})
+            if fits([*chosen_inferred, skeleton], chosen_hypotheses):
+                chosen_inferred.append(skeleton)
+        for item in hypotheses:
+            skeleton = item.model_copy(update={"content": ""})
+            if fits(chosen_inferred, [*chosen_hypotheses, skeleton]):
+                chosen_hypotheses.append(skeleton)
+
+        inferred_by_id = {item.id: item for item in inferred}
+        for index, skeleton in enumerate(tuple(chosen_inferred)):
+            original = inferred_by_id[skeleton.id]
+            expanded = original.model_copy(update={"content": original.content[:1200]})
+            candidate = [*chosen_inferred]
+            candidate[index] = expanded
+            if fits(candidate, chosen_hypotheses):
+                chosen_inferred = candidate
+
+        hypotheses_by_id = {item.id: item for item in hypotheses}
+        for index, skeleton in enumerate(tuple(chosen_hypotheses)):
+            original = hypotheses_by_id[skeleton.id]
+            expanded = original.model_copy(update={"content": original.content[:1200]})
+            candidate = [*chosen_hypotheses]
+            candidate[index] = expanded
+            if fits(chosen_inferred, candidate):
+                chosen_hypotheses = candidate
+        return chosen_inferred, chosen_hypotheses
+
+    def _digest_request(self, chunk: list[Any]) -> ChatCompletionRequest:
+        return ChatCompletionRequest(model=self.model, messages=[ChatMessage(role="system", content="Compress evidence only; do not infer people or actions.\n\n" + schema_instruction(ExtractedOwnerEvidenceDigest)), ChatMessage(role="user", content=owner_evidence_digest_prompt(chunk, self.user_name))], temperature=self.temperature, response_format={"type":"json_object"}, max_tokens=self.max_tokens)
+
+    async def _digest_owner_evidence(self, target: BaseModel, memories: Sequence[MemoryView], inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView], system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel]) -> list[OwnerEvidenceDigestView]:
+        source: list[MemoryView | OwnerEvidenceDigestView] = list(memories)
+        original_ids = {memory.id for memory in source}
+        previous_size: int | None = None
+        for _ in range(3):
+            chunks: list[list[MemoryView | OwnerEvidenceDigestView]] = []
+            current: list[MemoryView | OwnerEvidenceDigestView] = []
+            for memory in source:
+                # Segment oversized content so every digest request is valid.
+                pieces = [memory]
+                if isinstance(memory, MemoryView) and not self.context_budget.report(self.context_budget.estimate_request(self._digest_request([memory]))).fits:
+                    lo, hi = 1, len(memory.content)
+                    while lo < hi:
+                        mid = (lo + hi + 1) // 2
+                        if self.context_budget.report(self.context_budget.estimate_request(self._digest_request([memory.model_copy(update={"content": memory.content[:mid]})]))).fits: lo = mid
+                        else: hi = mid - 1
+                    width = lo
+                    if width < 1:
+                        raise ValueError(
+                            f"single owner evidence segment exceeds context budget: {memory.id}"
+                        )
+                    pieces = [memory.model_copy(update={"content": memory.content[i:i + width]}) for i in range(0, len(memory.content), width)]
+                for piece in pieces:
+                    candidate = current + [piece]
+                    candidate_ids = set().union(
+                        *(self._owner_evidence_source_ids(item) for item in candidate)
+                    )
+                    candidate_fits = self.context_budget.report(
+                        self.context_budget.estimate_request(self._digest_request(candidate))
+                    ).fits and len(candidate_ids) <= 512
+                    if current and not candidate_fits:
+                        chunks.append(current)
+                        current = []
+                    current.append(piece)
+                    if not self.context_budget.report(self.context_budget.estimate_request(self._digest_request(current))).fits:
+                        identifier = getattr(memory, "id", "digest")
+                        raise ValueError(
+                            f"single owner evidence segment exceeds context budget: {identifier}"
+                        )
+            if current:
+                chunks.append(current)
+            output: list[OwnerEvidenceDigestView] = []
+            for chunk in chunks:
+                request = self._digest_request(chunk)
+                self.context_budget.check(self.context_budget.estimate_request(request))
+                raw = await self._chat_messages(request.messages, structured=True)
+                result = _parse_model_output(raw, ExtractedOwnerEvidenceDigest)
+                allowed = set().union(
+                    *(self._owner_evidence_source_ids(item) for item in chunk)
+                )
+                accepted = [
+                    OwnerEvidenceDigestView.model_validate(item.model_dump(mode="json"))
+                    for item in result.items
+                    if item.source_memory_ids
+                    and set(item.source_memory_ids) <= allowed
+                ]
+                covered = set().union(
+                    *(set(item.source_memory_ids) for item in accepted), set()
+                )
+                if covered != allowed:
+                    raise LLMOutputError(
+                        "owner evidence digest omitted or invented source Memory IDs"
+                    )
+                output.extend(accepted)
+            if not output:
+                raise ValueError("owner evidence digest made no progress")
+            final_prefix = owner_reasoning_prefix(target, output, list(inferred_memories), list(hypotheses), user_name=self.user_name)
+            first = [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=final_prefix), ChatMessage(role="user", content=projection_stage_prompt() + "\n" + schema_instruction(projection_type))]
+            if self._owner_stage2_fits(first, actions_type):
+                return output
+            size = self.context_budget.estimate_text(final_prefix)
+            if previous_size is not None and size >= previous_size:
+                raise ValueError("owner evidence digest reduction made no progress")
+            previous_size = size
+            source = output
+        raise ValueError("owner evidence digest reduction made no progress within 3 rounds")
+
+    @staticmethod
+    def _owner_evidence_source_ids(
+        item: MemoryView | OwnerEvidenceDigestView,
+    ) -> set[str]:
+        if isinstance(item, MemoryView):
+            return {item.id}
+        return set(item.source_memory_ids)
 
     async def reason_continuity(
         self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
