@@ -442,7 +442,7 @@ def test_openai_compatible_adapter_validates_structured_output():
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert payload["response_format"] == {"type": "json_object"}
-        assert "Extraction policy: conservative" in payload["messages"][1]["content"]
+        assert "Message message_1 (conservative)" in payload["messages"][1]["content"]
         return httpx.Response(
             200,
             json={

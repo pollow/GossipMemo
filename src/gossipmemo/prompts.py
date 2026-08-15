@@ -27,48 +27,65 @@ from .models import (
 )
 
 
-EXTRACTION_SYSTEM_PROMPT = """You extract provenance-aware social memory from a batch of messages.
-Return only a JSON object matching the supplied schema. Do not add Markdown or
-explanatory prose. Keep the original meaning and uncertainty. Create people
-only when the text provides a usable reference; use person refs that can be
-resolved from display names or aliases. A memory basis must reflect how the
-message supports the claim (stated, observed, reported, inferred, or manual).
-Do not treat a mere co-occurrence of two people as a relationship.
+EXTRACTION_SYSTEM_PROMPT = """Extract useful, provenance-aware memories from the messages.
+Return only the supplied JSON schema. Keep the original meaning, speaker, and
+uncertainty. Extract explicit facts, events, preferences, plans, and situations;
+do not make broad personality inferences from one conversation. Leave recurring
+patterns to reasoning passes. Use stated, observed, or reported basis; never use
+an inferred basis for extraction. Resolve relative dates using each message's
+occurred_at. A reported claim must remain attributed. The user is not a Person;
+two people appearing
+together do not by themselves establish a relationship. Use the language that
+best matches supplied messages; keep IDs and enum values unchanged.
 """
 
-PERSON_REASONING_SYSTEM_PROMPT = """You maintain a person's durable profile from
-active, provenance-bearing memories. Return only a JSON object matching the
-supplied schema. Profile-card text must distinguish direct, reported, and
-inferred information and should not invent evidence. Inferred memories are
-optional; each one must cite one or more supplied source memory IDs and must
-not use a profile card as evidence.
+PERSON_REASONING_SYSTEM_PROMPT = """Rebuild a useful, compact person profile from active
+memories. Return only the supplied JSON schema. Actively identify supported
+patterns in behavior, preferences, communication, decision-making,
+sensitivities, and helpful ways to interact. Make reasonable social inferences
+when supported, with uncertainty proportional to evidence; a narrow impression
+from one highly informative event is allowed. Do not use the old profile as
+evidence. Inferred memories are optional and must cite supplied source memory
+IDs. Distinguish current conditions from historical events using valid_from and
+valid_to. Use the language that best matches supplied memories; keep IDs and
+enum values unchanged.
 """
 
-RELATIONSHIP_REASONING_SYSTEM_PROMPT = """You maintain a relationship projection
-from active, provenance-bearing memories. Return only a JSON object matching
-the supplied schema. Preserve uncertainty and do not infer a relationship
-from people merely appearing in the same message. Inferred memories are
-optional; each one must cite one or more supplied source memory IDs.
+RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Rebuild a useful relationship projection from
+active memories. Return only the supplied JSON schema. Look for recurring
+interaction patterns, cooperation, friction, trust, initiative, and meaningful
+changes in closeness, tone, or status. Make supported social inferences with
+calibrated uncertainty; people merely appearing together are not relationship
+evidence. Inferred memories are optional and must cite supplied source memory
+IDs. Use valid_from and valid_to to distinguish current conditions from
+historical events. Use the language that best matches supplied memories; keep
+IDs and enum values unchanged.
 """
 
-CONTINUITY_SYSTEM_PROMPT = """You rebuild a compact cross-session conversation continuity.
-Return only JSON matching the supplied schema. Preserve unfinished threads and
-recent decisions, and retain useful continuity across sessions. Do not copy
-long person profiles; refer to people only by the supplied stable IDs. The
-current user is not a Person.
+CONTINUITY_SYSTEM_PROMPT = """Rebuild compact cross-session continuity.
+Return only the supplied JSON schema. Keep ongoing threads, recent decisions,
+pending actions, and context useful for the next conversation. Do not make
+long-term personality inferences or copy person/user profiles; the current user
+is not a Person. Use the language that best matches supplied messages and prior
+continuity; keep IDs and enum values unchanged.
 """
 
-USER_MODEL_REASONING_SYSTEM_PROMPT = """You maintain a compact, bounded profile
-of the current user from active memories explicitly marked about_user. Rebuild
-the profile from the supplied memories; do not append, invent, or include a
-Person identity. Return only a JSON object matching the supplied schema.
+USER_MODEL_REASONING_SYSTEM_PROMPT = """Rebuild a compact, bounded profile of the current
+user from active memories marked about_user. Return only the supplied JSON
+schema. Capture preferences, communication preferences, goals, current
+situations, and practical interaction guidance. Generalize recurring patterns
+when supported, but do not turn a one-off event into a stable trait or include
+another person's identity. Use valid_from and valid_to to separate current
+conditions from historical events. Use the language that best matches supplied
+memories; keep IDs and enum values unchanged.
 """
 
-QUERY_SYNTHESIS_SYSTEM_PROMPT = """You answer a read-only question using the supplied
-social-memory context. Return concise plain text only (no JSON wrapper and no
-Markdown code fence). Distinguish evidence from inference, mention relevant
-uncertainty, and do not claim facts absent from the context. The context is
-read-only: do not suggest that your answer has been saved.
+QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the supplied
+social-memory context. Return concise plain text only (no JSON wrapper or code
+fence). Use facts and supported inferences in the context to give a direct,
+useful answer; distinguish uncertainty and current conditions from historical
+events. Do not invent facts or claim that anything was saved. Answer in the
+language of the question.
 """
 
 
@@ -90,36 +107,38 @@ def _json(value: Any) -> str:
 def extraction_prompt(messages: list[ModelMessage]) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
-    policies = {message.extraction_policy for message in messages}
-    if "comprehensive" in policies:
-        policy_name = "comprehensive"
-    elif "balanced" in policies:
-        policy_name = "balanced"
-    else:
-        policy_name = "conservative"
-    policy = {
+    policy_text = {
         "conservative": (
-            "Retain only explicit, durable facts, events, preferences, plans, "
-            "and situations. Skip weak implications and conversational filler."
+            "Keep only explicit, durable facts and meaningful events; skip "
+            "isolated transient details such as 'today I had coffee'."
         ),
         "balanced": (
-            "Retain explicit durable information and carefully supported social "
-            "signals; skip transient filler and speculative personality labels."
+            "Keep explicit durable information and a transient detail only when "
+            "it affects an ongoing situation or helps reveal a recurring pattern."
         ),
         "comprehensive": (
-            "Retain explicit information plus useful weak social signals as "
-            "impression/inferred memories, preserving uncertainty and evidence."
+            "Keep explicit information plus relevant short-lived events as dated "
+            "evidence, including isolated details that may reveal a later pattern."
         ),
-    }[policy_name]
+    }
+    policy_lines = "\n".join(
+        f"- Message {message.id} ({message.extraction_policy}): "
+        f"{policy_text[message.extraction_policy]}"
+        for message in messages
+    )
     return (
-        f"Extraction policy: {policy_name}. {policy}\n"
+        "Apply each message's extraction policy independently; do not promote "
+        "the whole batch to the most permissive policy.\n"
+        + policy_lines
+        + "\n"
         "Extract the messages together as one conversational context.\n"
         "The user/assistant author role is context and never a Person. List every "
         "Person referenced by a memory in its `people` refs; express who said or "
         "did what in the memory content itself. Preserve reported claims as "
-        "`reported`, not facts. Set `about_user` only when the memory is a durable "
-        "fact, preference, plan, situation, or other claim about the current user; "
-        "the current user is not a Person and must never appear in `people`.\n\n"
+        "`reported`, not facts. Set `about_user` for a claim or event about the "
+        "current user; the current user is not a Person and must never appear in "
+        "`people`. "
+        "Record valid_from/valid_to when the message gives a time bound.\n\n"
         "Messages:\n"
         + _json(messages)
     )
@@ -132,7 +151,8 @@ def person_reasoning_prompt(
 
     return (
         "Rebuild the profile card for this person from the active memories. "
-        "Use only the supplied context.\n\nPerson:\n"
+        "Use only the supplied context; prefer concise traits, preferences, "
+        "current_state, and interaction_notes that help the user socialize.\n\nPerson:\n"
         + _json(person)
         + "\n\nActive memories:\n"
         + _json(list(memories))
@@ -147,7 +167,8 @@ def relationship_reasoning_prompt(
 
     return (
         "Rebuild the relationship projection from the active memories. "
-        "Use only the supplied context.\n\nRelationship:\n"
+        "Use only the supplied context; summarize the relationship itself, not "
+        "the two people separately.\n\nRelationship:\n"
         + _json(relationship)
         + "\n\nRelevant memories:\n"
         + _json(list(memories))
@@ -157,7 +178,8 @@ def relationship_reasoning_prompt(
 def user_model_reasoning_prompt(memories: list[MemoryView]) -> str:
     return (
         "Rebuild the compact profile card for the current user from these active "
-        "memories only.\n\nActive about-user memories:\n" + _json(memories)
+        "memories only. Keep it bounded and useful for interaction.\n\nActive "
+        "about-user memories:\n" + _json(memories)
     )
 
 
