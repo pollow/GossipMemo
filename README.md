@@ -55,6 +55,22 @@ preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
 counts, status, and durations—not message bodies, bearer tokens, or LLM API
 keys.
 
+## Import existing chats
+
+The CLI imports a JSON array, a `{ "messages": [...] }` export, or JSONL. Run
+it with repeated `--chat` options; `--user-md` explicitly replaces the initial
+UserModel card with the Markdown contents. Imports are idempotent, drain all
+message extraction before exiting, and print a compact JSON summary:
+
+```bash
+uv run --env-file .env gossipmemo import --space personal \
+  --chat export.jsonl --user-md USER.md
+```
+
+Each chat record needs `author` (or `role`), `content`, and a timezone-aware
+`occurred_at` sender timestamp. Extraction options are optional. Records from
+multiple input files are persisted in sender-time order.
+
 ## Smoke test a running server
 
 After starting the server, run:

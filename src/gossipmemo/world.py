@@ -13,6 +13,7 @@ from .models import (
     IngestRequest,
     IngestResponse,
     ManualMemoryRequest,
+    MessageInput,
     QueryRequest,
     QueryResponse,
     SupersedeRequest,
@@ -139,6 +140,64 @@ class SocialMemoryWorld:
             self._schedule_continuity_reason(space_id)
         logger.info("ingest_completed", extra={"space_id": space_id, "message_count": len(message_ids), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return IngestResponse(message_ids=message_ids)
+
+    async def import_messages(
+        self, space_id: str, messages: list[MessageInput]
+    ) -> dict[str, int]:
+        """Durably import and synchronously drain extraction for CLI imports."""
+        self.store.initialize()
+        message_ids = self.store.record_messages(space_id, messages)
+        # Imports must not leave a partial six-message batch waiting for the timer.
+        while True:
+            pending = self.store.unbatched_messages(space_id)
+            if not pending:
+                break
+            batch_id = self.store.create_extraction_batch(
+                space_id,
+                [
+                    message_id
+                    for message_id, _ in pending[: self.extraction_batch_size]
+                ],
+            )
+            if batch_id:
+                self._schedule_extract(space_id, batch_id)
+            else:
+                break
+        while True:
+            extraction_running = any(
+                key[0] == "extract" and key[1] == space_id
+                for key in self._scheduled
+            )
+            if not extraction_running:
+                break
+            tasks = tuple(self._tasks)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                break
+        states = self.store.extraction_states(space_id, message_ids)
+        if "failed" in states:
+            raise RuntimeError("one or more imported messages failed extraction")
+        if any(state != "completed" for state in states):
+            raise RuntimeError("imported message extraction did not complete")
+        self._schedule_all_stale()
+        if space_id in self.store.pending_continuities(self.continuity_threshold):
+            self._schedule_continuity_reason(space_id)
+        # Wait for induction spawned by the imported Memories as well.
+        while any(
+            key[1] == space_id
+            and key[0] in {"continuity", "person", "relationship", "user-model"}
+            for key in self._scheduled
+        ):
+            tasks = tuple(self._tasks)
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            else:
+                await asyncio.sleep(0)
+        return {
+            "messages": len(message_ids),
+            "extracted": len(message_ids),
+        }
 
     async def turn(self, space_id: str, request: TurnRequest) -> TurnResponse:
         """Persist this turn first; all enrichment is best-effort and local."""

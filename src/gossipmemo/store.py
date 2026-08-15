@@ -127,6 +127,8 @@ class WorldStore(Protocol):
         self,
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
 
+    def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None: ...
+
 
 class AmbiguousPersonError(ValueError):
     def __init__(self, reference: str) -> None:
@@ -605,6 +607,22 @@ class SqliteWorldStore:
             (space_id, batch_id, message_ids)
             for (space_id, batch_id), message_ids in grouped.items()
         ]
+
+    def extraction_states(self, space_id: str, message_ids: list[str]) -> list[str]:
+        if not message_ids:
+            return []
+        states: list[str] = []
+        for offset in range(0, len(message_ids), 500):
+            chunk = message_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            with self._connect() as connection:
+                rows = connection.execute(
+                    f"SELECT extraction_state FROM messages "
+                    f"WHERE space_id = ? AND id IN ({placeholders})",
+                    (space_id, *chunk),
+                ).fetchall()
+            states.extend(row["extraction_state"] for row in rows)
+        return states
 
     def _memory_view(
         self,
@@ -1214,6 +1232,18 @@ class SqliteWorldStore:
                  expected_watermark),
             )
             return updated.rowcount == 1
+
+    def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None:
+        """Explicitly replace the rebuildable card (used by USER.md import)."""
+        self.ensure_space(space_id)
+        with self._connect() as connection:
+            watermark = self._user_model_watermark(connection, space_id)
+            connection.execute(
+                """UPDATE user_models SET profile_card = ?,
+                   profile_source_updated_at = ?, profile_updated_at = ?
+                   WHERE space_id = ?""",
+                (_json(profile_card), watermark, _now(), space_id),
+            )
 
     def stale_entities(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]:
         with self._connect() as connection:
