@@ -218,3 +218,35 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         assert [row[0] for row in states] == ["completed"]
 
     asyncio.run(scenario())
+
+
+def test_import_reports_background_reasoning_failure(tmp_path):
+    class FailingModel:
+        configured = True
+
+        async def reason_person(self, person, memories, inferred=(), hypotheses=()):
+            del person, memories, inferred, hypotheses
+            raise RuntimeError("reasoning failed")
+
+        async def aclose(self):
+            return None
+
+    async def scenario() -> None:
+        store = SqliteWorldStore(tmp_path / "failed-reasoning.db")
+        store.initialize()
+        store.add_manual_memory(
+            "personal",
+            ManualMemoryRequest(content="Bob keeps notes.", people=["Bob"]),
+        )
+        world = SocialMemoryWorld(store, FailingModel())
+        await world.start()
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="background import operation reasoning-pipeline failed",
+            ):
+                await world.import_messages("personal", [])
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())

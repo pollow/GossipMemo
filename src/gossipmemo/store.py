@@ -1407,94 +1407,107 @@ class SqliteWorldStore:
         if (owner_kind == "user") != (owner_id is None):
             raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
         with self._connect() as connection:
-            for item in actions.upserts:
-                if item.hypothesis_id and item.hypothesis_id not in context_hypothesis_ids:
-                    continue
-                evidence = [
-                    row for row in connection.execute(
-                        f"""SELECT m.id FROM memories m WHERE m.space_id = ? AND m.status = 'active'
-                            AND m.basis <> 'inferred' AND m.id IN ({','.join('?' for _ in item.evidence)})""",
-                        [space_id, *(e.memory_id for e in item.evidence)],
-                    ).fetchall()
-                    if row["id"] in source_memory_ids
-                ]
-                evidence_ids = {row["id"] for row in evidence}
-                if not evidence_ids:
-                    continue
-                hypothesis_id = item.hypothesis_id
-                if hypothesis_id:
-                    existing = connection.execute(
-                        """SELECT id FROM hypotheses WHERE id = ? AND space_id = ?
-                           AND owner_kind = ? AND owner_id IS ? AND status = 'open'""",
-                        (hypothesis_id, space_id, owner_kind, owner_id),
-                    ).fetchone()
-                    if not existing and connection.execute(
-                        "SELECT 1 FROM hypotheses WHERE id = ?", (hypothesis_id,)
-                    ).fetchone():
-                        continue
-                else:
-                    existing = connection.execute(
-                        """SELECT id FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ?
-                           AND status = 'open' AND kind = ? AND content = ?""",
-                        (space_id, owner_kind, owner_id, item.kind, item.content),
-                    ).fetchone()
-                now = _now()
-                if existing:
-                    hypothesis_id = existing["id"]
-                    connection.execute(
-                        "UPDATE hypotheses SET content = ?, kind = ?, confidence = ?, updated_at = ? WHERE id = ?",
-                        (item.content, item.kind, item.confidence, now, hypothesis_id),
-                    )
-                else:
-                    hypothesis_id = hypothesis_id or _id("hypothesis")
-                    connection.execute(
-                        """INSERT INTO hypotheses(
-                            id, space_id, owner_kind, owner_id, content, kind, confidence,
-                            created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (hypothesis_id, space_id, owner_kind, owner_id, item.content, item.kind,
-                         item.confidence, now, now),
-                    )
-                connection.executemany(
-                    "INSERT OR IGNORE INTO hypothesis_evidence(hypothesis_id, memory_id, role) VALUES (?, ?, ?)",
-                    [(hypothesis_id, e.memory_id, e.role) for e in item.evidence if e.memory_id in evidence_ids],
-                )
-            for transition in actions.transitions:
-                if transition.hypothesis_id not in context_hypothesis_ids:
-                    continue
-                row = connection.execute(
+            self._apply_hypothesis_actions(
+                connection, space_id, owner_kind, owner_id,
+                source_memory_ids, context_hypothesis_ids, actions,
+            )
+
+    def _apply_hypothesis_actions(
+        self, connection: sqlite3.Connection, space_id: str, owner_kind: str,
+        owner_id: str | None, source_memory_ids: set[str],
+        context_hypothesis_ids: set[str], actions: HypothesisActions,
+    ) -> None:
+        """Apply hypothesis actions inside an existing atomic reasoning write."""
+        for item in actions.upserts:
+            if item.hypothesis_id and item.hypothesis_id not in context_hypothesis_ids:
+                continue
+            evidence = [
+                row for row in connection.execute(
+                    f"""SELECT m.id FROM memories m WHERE m.space_id = ? AND m.status = 'active'
+                        AND m.basis <> 'inferred' AND m.id IN ({','.join('?' for _ in item.evidence)})""",
+                    [space_id, *(e.memory_id for e in item.evidence)],
+                ).fetchall()
+                if row["id"] in source_memory_ids
+            ]
+            evidence_ids = {row["id"] for row in evidence}
+            if not evidence_ids:
+                continue
+            hypothesis_id = item.hypothesis_id
+            if hypothesis_id:
+                existing = connection.execute(
                     """SELECT id FROM hypotheses WHERE id = ? AND space_id = ?
                        AND owner_kind = ? AND owner_id IS ? AND status = 'open'""",
-                    (transition.hypothesis_id, space_id, owner_kind, owner_id),
+                    (hypothesis_id, space_id, owner_kind, owner_id),
                 ).fetchone()
-                if not row:
+                if not existing and connection.execute(
+                    "SELECT 1 FROM hypotheses WHERE id = ?", (hypothesis_id,)
+                ).fetchone():
                     continue
-                if transition.status == "promoted" and not transition.promoted_memory_id:
-                    continue
-                if transition.status != "promoted" and transition.promoted_memory_id:
-                    continue
-                if transition.promoted_memory_id:
-                    if owner_kind == "person":
-                        owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
-                        owner_params: list[Any] = [owner_id]
-                    elif owner_kind == "relationship":
-                        owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
-                        owner_params = [owner_id]
-                    else:
-                        owner_clause = "m.about_user = 1"
-                        owner_params = []
-                    memory = connection.execute(
-                        f"SELECT m.id FROM memories m WHERE m.id = ? AND m.space_id = ? AND m.status = 'active' AND {owner_clause}",
-                        [transition.promoted_memory_id, space_id, *owner_params],
-                    ).fetchone()
-                    if not memory:
-                        continue
-                now = _now()
+            else:
+                existing = connection.execute(
+                    """SELECT id FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ?
+                       AND status = 'open' AND kind = ? AND content = ?""",
+                    (space_id, owner_kind, owner_id, item.kind, item.content),
+                ).fetchone()
+            now = _now()
+            if existing:
+                hypothesis_id = existing["id"]
                 connection.execute(
-                    """UPDATE hypotheses SET status = ?, status_reason = ?, promoted_memory_id = ?,
-                       updated_at = ? WHERE id = ?""",
-                    (transition.status, transition.reason, transition.promoted_memory_id, now, row["id"]),
+                    "UPDATE hypotheses SET content = ?, kind = ?, confidence = ?, updated_at = ? WHERE id = ?",
+                    (item.content, item.kind, item.confidence, now, hypothesis_id),
                 )
+            else:
+                hypothesis_id = hypothesis_id or _id("hypothesis")
+                connection.execute(
+                    """INSERT INTO hypotheses(
+                        id, space_id, owner_kind, owner_id, content, kind, confidence,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (hypothesis_id, space_id, owner_kind, owner_id, item.content, item.kind,
+                     item.confidence, now, now),
+                )
+            connection.executemany(
+                "INSERT OR IGNORE INTO hypothesis_evidence(hypothesis_id, memory_id, role) VALUES (?, ?, ?)",
+                [(hypothesis_id, evidence.memory_id, evidence.role)
+                 for evidence in item.evidence if evidence.memory_id in evidence_ids],
+            )
+        for transition in actions.transitions:
+            if transition.hypothesis_id not in context_hypothesis_ids:
+                continue
+            row = connection.execute(
+                """SELECT id FROM hypotheses WHERE id = ? AND space_id = ?
+                   AND owner_kind = ? AND owner_id IS ? AND status = 'open'""",
+                (transition.hypothesis_id, space_id, owner_kind, owner_id),
+            ).fetchone()
+            if not row:
+                continue
+            if transition.status == "promoted" and not transition.promoted_memory_id:
+                continue
+            if transition.status != "promoted" and transition.promoted_memory_id:
+                continue
+            if transition.promoted_memory_id:
+                if owner_kind == "person":
+                    owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
+                    owner_params: list[Any] = [owner_id]
+                elif owner_kind == "relationship":
+                    owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
+                    owner_params = [owner_id]
+                else:
+                    owner_clause = "m.about_user = 1"
+                    owner_params = []
+                memory = connection.execute(
+                    f"SELECT m.id FROM memories m WHERE m.id = ? AND m.space_id = ? AND m.status = 'active' AND {owner_clause}",
+                    [transition.promoted_memory_id, space_id, *owner_params],
+                ).fetchone()
+                if not memory:
+                    continue
+            now = _now()
+            connection.execute(
+                """UPDATE hypotheses SET status = ?, status_reason = ?, promoted_memory_id = ?,
+                   updated_at = ? WHERE id = ?""",
+                (transition.status, transition.reason,
+                 transition.promoted_memory_id, now, row["id"]),
+            )
 
     def _person_reasoning_source_ids(
         self, connection: sqlite3.Connection, space_id: str, person_id: str

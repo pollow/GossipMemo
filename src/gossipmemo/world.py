@@ -71,6 +71,7 @@ class SocialMemoryWorld:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
+        self._background_errors: dict[tuple[str, str, str], Exception] = {}
         self._stopping = False
         self._induction_task: asyncio.Task[None] | None = None
 
@@ -78,6 +79,7 @@ class SocialMemoryWorld:
         logger.info("world_start_begin")
         started = asyncio.get_running_loop().time()
         self._stopping = False
+        self._background_errors.clear()
         self.store.initialize()
         await self.queue.start()
         unbatched_spaces: set[str] = set()
@@ -138,7 +140,8 @@ class SocialMemoryWorld:
         async def run() -> None:
             try:
                 await operation
-            except Exception:
+            except Exception as error:
+                self._background_errors[key] = error
                 logger.exception("background memory operation failed: %s", key)
             finally:
                 self._scheduled.discard(key)
@@ -216,6 +219,18 @@ class SocialMemoryWorld:
                 await asyncio.gather(*tasks, return_exceptions=True)
             else:
                 await asyncio.sleep(0)
+        failures = [
+            (key, error)
+            for key, error in self._background_errors.items()
+            if key[1] == space_id
+        ]
+        for key, _ in failures:
+            self._background_errors.pop(key, None)
+        if failures:
+            key, error = failures[0]
+            raise RuntimeError(
+                f"background import operation {key[0]} failed: {error}"
+            ) from error
         return {
             "messages": len(message_ids),
             "extracted": len(message_ids),

@@ -1126,6 +1126,28 @@ def test_inferred_memory_is_not_a_hypothesis(store):
     assert _rows(store, "SELECT status FROM memories WHERE id = ?", (inferred_id,))[0]["status"] == "active"
 
 
+def test_person_reasoning_applies_hypothesis_actions_in_same_transaction(store):
+    source_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+    )
+    bob = store.read(
+        "personal", QueryRequest(question="bob", people=["Bob"])
+    ).people[0]
+    _, _, watermark = store.person_context("personal", bob.id)
+    result = PersonReasoningResult(
+        profile_card={"summary": "Bob keeps notes."},
+        hypothesis_actions=HypothesisActions(upserts=[HypothesisUpsert(
+            content="Bob may use notes to prepare for decisions.",
+            confidence="low",
+            evidence=[HypothesisEvidence(memory_id=source_id)],
+        )]),
+    )
+
+    assert store.apply_person_reasoning("personal", bob.id, watermark, result)
+    hypothesis = _rows(store, "SELECT owner_kind, owner_id FROM hypotheses")[0]
+    assert (hypothesis["owner_kind"], hypothesis["owner_id"]) == ("person", bob.id)
+
+
 def test_hypothesis_actions_require_active_context_evidence_and_scoped_transition(store):
     source_id = store.add_manual_memory(
         "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
