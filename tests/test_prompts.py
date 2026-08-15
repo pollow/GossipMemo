@@ -1,4 +1,4 @@
-from gossipmemo.models import ModelMessage
+from gossipmemo.models import MemoryView, ModelMessage, PersonView, RelationshipView
 from gossipmemo.prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
@@ -7,6 +7,8 @@ from gossipmemo.prompts import (
     USER_MODEL_REASONING_SYSTEM_PROMPT,
     CONTINUITY_SYSTEM_PROMPT,
     extraction_prompt,
+    person_reasoning_prompt,
+    relationship_reasoning_prompt,
 )
 
 
@@ -82,6 +84,41 @@ def test_reasoning_prompts_allow_useful_social_inference():
     assert "social inferences" in PERSON_REASONING_SYSTEM_PROMPT
     assert "friction" in RELATIONSHIP_REASONING_SYSTEM_PROMPT
     assert "Generalize recurring patterns" in USER_MODEL_REASONING_SYSTEM_PROMPT
+
+
+def test_person_reasoning_separates_relevance_from_semantic_subject():
+    person = PersonView(id="person-a", display_name="Person_A")
+    memory = MemoryView(
+        id="memory-1",
+        content="Deus wants to ask Person_A about his girlfriend.",
+        kind="event",
+        basis="stated",
+        status="active",
+        people=[{"id": "person-a", "display_name": "Person_A"}],
+        created_at="2026-08-14T12:00:00+00:00",
+        about_user=True,
+    )
+    prompt = person_reasoning_prompt(person, [memory], user_name="Deus")
+    assert "target Person" in prompt
+    assert "Linked memories indicate relevance, not semantic subject" in prompt
+    assert "Do not transfer" in PERSON_REASONING_SYSTEM_PROMPT
+    assert "Deus" in prompt
+
+
+def test_relationship_reasoning_requires_endpoint_interactions():
+    relationship = RelationshipView(
+        id="relationship-1",
+        person_a_id="person-a",
+        person_b_id="person-b",
+        status="unknown",
+        summary="",
+    )
+    prompt = relationship_reasoning_prompt(relationship, [], user_name="Deus")
+    assert "relationship between the two endpoint People" in prompt
+    assert "not relationship evidence" in prompt
+    assert "Mere co-occurrence is not relationship evidence" in (
+        RELATIONSHIP_REASONING_SYSTEM_PROMPT
+    )
 
 
 def test_all_prompt_contracts_keep_i18n_rule_compact():

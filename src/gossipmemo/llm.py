@@ -253,7 +253,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     ) -> PersonReasoningResult:
         content = await self._structured_call(
             PERSON_REASONING_SYSTEM_PROMPT,
-            person_reasoning_prompt(person, list(memories)),
+            person_reasoning_prompt(person, list(memories), self.user_name),
             PersonReasoningResult,
         )
         return cast(PersonReasoningResult, content)
@@ -263,7 +263,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     ) -> RelationshipReasoningResult:
         content = await self._structured_call(
             RELATIONSHIP_REASONING_SYSTEM_PROMPT,
-            relationship_reasoning_prompt(relationship, list(memories)),
+            relationship_reasoning_prompt(
+                relationship, list(memories), self.user_name
+            ),
             RelationshipReasoningResult,
         )
         return cast(RelationshipReasoningResult, content)

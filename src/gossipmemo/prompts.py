@@ -40,26 +40,39 @@ best matches supplied messages; keep IDs and enum values unchanged.
 """
 
 PERSON_REASONING_SYSTEM_PROMPT = """Rebuild a useful, compact person profile from active
-memories. Return only the supplied JSON schema. Actively identify supported
-patterns in behavior, preferences, communication, decision-making,
-sensitivities, and helpful ways to interact. Make reasonable social inferences
-when supported, with uncertainty proportional to evidence; a narrow impression
-from one highly informative event is allowed. Do not use the old profile as
-evidence. Inferred memories are optional and must cite supplied source memory
-IDs. Distinguish current conditions from historical events using valid_from and
-valid_to. Use the language that best matches supplied memories; keep IDs and
-enum values unchanged.
+memories. The target is the named Person in the input; the profile and every
+optional inferred memory must describe only that Person. Linked memories indicate
+relevance to the target, not that the target is the semantic subject of every
+memory. Do not transfer the current user's or any co-occurring person's traits,
+preferences, intentions, or actions onto the target. Recurring patterns require
+multiple distinct source memories; a narrow impression from one highly diagnostic
+event is allowed when calibrated to that evidence. Return only the supplied JSON
+schema. Actively identify supported patterns in behavior, preferences,
+communication, decision-making, sensitivities, and helpful ways to interact.
+Make reasonable social inferences when supported, with uncertainty proportional
+to evidence.
+Do not use the old profile as evidence. Inferred memories are optional and must
+cite supplied non-inferred source memory IDs. Distinguish current conditions from
+historical events using valid_from and valid_to. Use the language that best matches
+supplied memories; keep IDs and enum values unchanged.
 """
 
+
 RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Rebuild a useful relationship projection from
-active memories. Return only the supplied JSON schema. Look for recurring
-interaction patterns, cooperation, friction, trust, initiative, and meaningful
-changes in closeness, tone, or status. Make supported social inferences with
-calibrated uncertainty; people merely appearing together are not relationship
-evidence. Inferred memories are optional and must cite supplied source memory
-IDs. Use valid_from and valid_to to distinguish current conditions from
-historical events. Use the language that best matches supplied memories; keep
-IDs and enum values unchanged.
+active memories. The target is the relationship between the two endpoint
+People in the input; the projection and every optional inferred memory must
+describe only that relationship. Linked memories indicate relevance to the
+endpoints, not relationship evidence by themselves. Do not transfer the current
+user's or either endpoint's standalone traits, preferences, intentions, or actions
+into a relationship claim. Mere co-occurrence is not relationship evidence. Look
+for recurring interaction patterns, cooperation, friction, trust, initiative, and
+meaningful changes in closeness, tone, or status. Recurring patterns require
+multiple distinct source memories; a narrow inference from one highly diagnostic
+interaction is allowed when calibrated to that evidence. Inferred memories are
+optional and must cite supplied non-inferred source memory IDs. Use valid_from and
+valid_to to distinguish current conditions from historical events. Use the
+language that best matches supplied memories; keep IDs and enum values unchanged.
+Return only the supplied JSON schema.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """Rebuild compact cross-session continuity.
@@ -168,14 +181,20 @@ def extraction_prompt(
 
 
 def person_reasoning_prompt(
-    person: PersonView, memories: list[MemoryView] | tuple[MemoryView, ...]
+    person: PersonView,
+    memories: list[MemoryView] | tuple[MemoryView, ...],
+    user_name: str = "CurrentUser",
 ) -> str:
     """Build the user prompt for a person projection refresh."""
 
     return (
-        "Rebuild the profile card for this person from the active memories. "
-        "Use only the supplied context; prefer concise traits, preferences, "
-        "current_state, and interaction_notes that help the user socialize.\n\nPerson:\n"
+        f"The fixed current user is named {user_name!r}; the current user is not "
+        "the target Person. Rebuild the profile card for the target Person from "
+        "the active memories. Linked memories indicate relevance, not semantic "
+        "subject. Attribute traits, preferences, and actions to the target only "
+        "when the memory supports that attribution. Use only the supplied context; "
+        "prefer concise traits, preferences, current_state, and interaction_notes "
+        f"that help {user_name} socialize.\n\nTarget Person:\n"
         + _json(person)
         + "\n\nActive memories:\n"
         + _json(list(memories))
@@ -185,13 +204,17 @@ def person_reasoning_prompt(
 def relationship_reasoning_prompt(
     relationship: RelationshipView,
     memories: list[MemoryView] | tuple[MemoryView, ...],
+    user_name: str = "CurrentUser",
 ) -> str:
     """Build the user prompt for a relationship projection refresh."""
 
     return (
-        "Rebuild the relationship projection from the active memories. "
-        "Use only the supplied context; summarize the relationship itself, not "
-        "the two people separately.\n\nRelationship:\n"
+        f"The fixed current user is named {user_name!r}; the current user is not "
+        "an endpoint Person. Rebuild the projection for the relationship between "
+        "the two endpoint People in the input. Linked memories indicate relevance, "
+        "not relationship evidence; summarize only interactions between the endpoints. "
+        "Use only the supplied context; do not transfer standalone traits, preferences, "
+        "or actions into a relationship claim.\n\nTarget relationship:\n"
         + _json(relationship)
         + "\n\nRelevant memories:\n"
         + _json(list(memories))
