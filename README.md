@@ -195,3 +195,8 @@ Memory entity.
 See [data_schema.md](data_schema.md) and [design.md](design.md) for the model and
 processing decisions. See [glossary.md](glossary.md) for the canonical domain
 and design vocabulary.
+
+## License
+
+GossipMemo is licensed under the GNU General Public License v3.0 only.
+See [LICENSE](LICENSE).
