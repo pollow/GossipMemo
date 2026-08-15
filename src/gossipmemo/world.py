@@ -25,6 +25,7 @@ from .models import (
     TurnResponse,
 )
 from .queue import SequentialLLMQueue
+from .reasoning import DEFAULT_REASONING_PIPELINE, FunctionStage, ReasoningPipeline
 from .store import SqliteWorldStore
 
 
@@ -48,6 +49,7 @@ class SocialMemoryWorld:
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
         continuity_threshold: int = 20,
+        reasoning_pipeline_order: tuple[str, ...] = DEFAULT_REASONING_PIPELINE,
     ) -> None:
         self.store = store
         self.model = model
@@ -56,6 +58,16 @@ class SocialMemoryWorld:
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self.induction_interval_seconds = induction_interval_seconds
         self.continuity_threshold = continuity_threshold
+        runners = {
+            "person": self._run_person_stage,
+            "relationship": self._run_relationship_stage,
+            "user_model": self._run_user_model_stage,
+            "coverage": self._run_coverage_stage,
+            "learning_goals": self._run_learning_goals_stage,
+        }
+        self.reasoning_pipeline = ReasoningPipeline(
+            [FunctionStage(name, runners[name]) for name in reasoning_pipeline_order]
+        )
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
@@ -196,7 +208,7 @@ class SocialMemoryWorld:
         # Wait for induction spawned by the imported Memories as well.
         while any(
             key[1] == space_id
-            and key[0] in {"continuity", "person", "relationship", "user-model", "coverage", "goal-planning"}
+            and key[0] in {"continuity", "reasoning-pipeline"}
             for key in self._scheduled
         ):
             tasks = tuple(self._tasks)
@@ -346,18 +358,10 @@ class SocialMemoryWorld:
                 "extract", self.model.extract, messages, context, known_people,
                 comparisons,
             )
-            people, relationships = self.store.apply_extraction(
+            self.store.apply_extraction(
                 space_id, batch_id, result,
                 {memory.id for memory in comparisons},
             )
-            # _spawn deduplicates by owner key; this is a minimal debounce for
-            # online extraction without coupling extraction to induction timing.
-            for person_id in people:
-                self._schedule_person_reason(space_id, person_id)
-            for relationship_id in relationships:
-                self._schedule_relationship_reason(space_id, relationship_id)
-            self._schedule_user_model_reason(space_id)
-            self._schedule_coverage_reason(space_id)
             logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         except Exception as error:
             self.store.fail_extraction(space_id, batch_id, str(error))
@@ -381,11 +385,43 @@ class SocialMemoryWorld:
             if not self._stopping:
                 self._schedule_all_stale()
 
-    def _schedule_person_reason(self, space_id: str, person_id: str) -> None:
+    def _schedule_reasoning_pipeline(self, space_id: str) -> None:
         self._spawn(
-            ("person", space_id, person_id),
-            self._reason_person(space_id, person_id),
+            ("reasoning-pipeline", space_id, space_id),
+            self.reasoning_pipeline.run_until_caught_up(space_id),
         )
+
+    async def _run_person_stage(self, space_id: str) -> None:
+        while not self._stopping:
+            people, _, _ = self.store.stale_entities()
+            targets = [(sid, pid) for sid, pid in people if sid == space_id]
+            if not targets:
+                return
+            for _, person_id in targets:
+                await self._reason_person(space_id, person_id)
+
+    async def _run_relationship_stage(self, space_id: str) -> None:
+        while not self._stopping:
+            _, relationships, _ = self.store.stale_entities()
+            targets = [(sid, rid) for sid, rid in relationships if sid == space_id]
+            if not targets:
+                return
+            for _, relationship_id in targets:
+                await self._reason_relationship(space_id, relationship_id)
+
+    async def _run_user_model_stage(self, space_id: str) -> None:
+        while not self._stopping:
+            _, _, user_models = self.store.stale_entities()
+            if space_id not in user_models:
+                return
+            await self._reason_user_model(space_id)
+
+    async def _run_coverage_stage(self, space_id: str) -> None:
+        if not self._stopping and space_id in self.store.stale_coverage_spaces():
+            await self._reason_coverage(space_id)
+
+    async def _run_learning_goals_stage(self, space_id: str) -> None:
+        await self._plan_learning_goals(space_id)
 
     def _owner_reason_args(self, method: object, modern: tuple[object, ...], legacy_count: int) -> tuple[object, ...]:
         """Keep pre-two-stage deterministic fakes usable during the seam transition."""
@@ -419,26 +455,6 @@ class SocialMemoryWorld:
             ):
                 return
 
-    def _schedule_relationship_reason(
-        self, space_id: str, relationship_id: str
-    ) -> None:
-        self._spawn(
-            ("relationship", space_id, relationship_id),
-            self._reason_relationship(space_id, relationship_id),
-        )
-
-    def _schedule_user_model_reason(self, space_id: str) -> None:
-        self._spawn(
-            ("user-model", space_id, space_id),
-            self._reason_user_model(space_id),
-        )
-
-    def _schedule_coverage_reason(self, space_id: str) -> None:
-        self._spawn(
-            ("coverage", space_id, space_id),
-            self._reason_coverage(space_id),
-        )
-
     async def _reason_coverage(self, space_id: str) -> None:
         """Audit all bounded chunks before a single goal-planning pass."""
         while not self._stopping:
@@ -447,8 +463,6 @@ class SocialMemoryWorld:
                 return
             coverage, memories, hypotheses, pending = context
             if not memories:
-                if not pending:
-                    await self._plan_learning_goals(space_id)
                 return
             audit = getattr(self.model, "audit_coverage", None)
             if audit is None:
@@ -464,7 +478,6 @@ class SocialMemoryWorld:
                 continue
             if pending:
                 continue
-            await self._plan_learning_goals(space_id)
             return
 
     async def _plan_learning_goals(self, space_id: str) -> None:
@@ -530,24 +543,18 @@ class SocialMemoryWorld:
         return QueryResponse(answer=answer, **context.model_dump())
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
-        memory_id = self.store.add_manual_memory(space_id, request)
-        self._schedule_coverage_reason(space_id)
-        return memory_id
+        return self.store.add_manual_memory(space_id, request)
 
     def retract_memory(
         self, space_id: str, memory_id: str, reason: str | None = None
     ) -> bool:
         changed = self.store.retract_memory(space_id, memory_id, reason)
-        if changed:
-            self._schedule_coverage_reason(space_id)
         return changed
 
     def supersede_memory(
         self, space_id: str, memory_id: str, request: SupersedeRequest
     ) -> str | None:
         replacement_id = self.store.supersede_memory(space_id, memory_id, request)
-        if replacement_id:
-            self._schedule_coverage_reason(space_id)
         return replacement_id
 
     def _schedule_all_stale(self) -> None:
@@ -562,18 +569,14 @@ class SocialMemoryWorld:
                 "user_models": len(user_models),
             },
         )
-        for space_id, person_id in people:
-            self._schedule_person_reason(space_id, person_id)
-        for space_id, relationship_id in relationships:
-            self._schedule_relationship_reason(space_id, relationship_id)
-        for space_id in user_models:
-            self._schedule_user_model_reason(space_id)
+        stale_spaces = {space_id for space_id, _ in people}
+        stale_spaces.update(space_id for space_id, _ in relationships)
+        stale_spaces.update(user_models)
         # Coverage has an independent source watermark, including spaces whose
         # UserModel card is already current.
-        for space_id in {space_id for space_id, _ in people} | {space_id for space_id, _ in relationships} | set(user_models):
-            self._schedule_coverage_reason(space_id)
-        for space_id in self.store.stale_coverage_spaces():
-            self._schedule_coverage_reason(space_id)
+        stale_spaces.update(self.store.stale_coverage_spaces())
+        for space_id in stale_spaces:
+            self._schedule_reasoning_pipeline(space_id)
 
     def health(self) -> HealthResponse:
         return HealthResponse(

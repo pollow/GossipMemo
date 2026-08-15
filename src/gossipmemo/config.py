@@ -36,6 +36,7 @@ class Settings:
     llm_max_retries: int = 5
     llm_retry_base_seconds: float = 1.0
     llm_retry_max_seconds: float = 30.0
+    llm_max_tokens: int | None = None
     extraction_batch_size: int = 6
     extraction_batch_timeout_seconds: float = 1800.0
     extraction_policy: Literal[
@@ -43,6 +44,9 @@ class Settings:
     ] = "balanced"
     logging_level: str = "INFO"
     logging_format: str = "json"
+    llm_context_window_tokens: int = 65536
+    llm_output_reserve_tokens: int = 8192
+    llm_context_safety_tokens: int = 4096
 
     def __post_init__(self) -> None:
         missing = [
@@ -72,6 +76,8 @@ class Settings:
             raise ConfigurationError(
                 "llm_retry_max_seconds must be at least llm_retry_base_seconds"
             )
+        if self.llm_max_tokens is not None and self.llm_max_tokens < 1:
+            raise ConfigurationError("llm_max_tokens must be greater than zero")
         if self.extraction_batch_size < 1:
             raise ConfigurationError("extraction_batch_size must be greater than zero")
         if self.extraction_batch_timeout_seconds <= 0:
@@ -100,6 +106,12 @@ class Settings:
             )
         if self.logging_format.lower() not in {"json", "text"}:
             raise ConfigurationError("logging_format must be json or text")
+        if self.llm_context_window_tokens - self.llm_output_reserve_tokens - self.llm_context_safety_tokens <= 0:
+            raise ConfigurationError("LLM context usable input tokens must be greater than zero")
+        if self.llm_output_reserve_tokens < 0 or self.llm_context_safety_tokens < 0:
+            raise ConfigurationError("LLM output reserve and context safety tokens must not be negative")
+        if self.llm_max_tokens is not None and self.llm_output_reserve_tokens < self.llm_max_tokens:
+            raise ConfigurationError("llm_output_reserve_tokens must be at least llm_max_tokens")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -124,6 +136,7 @@ class Settings:
             llm_retry_max_seconds=float(
                 _env("GOSSIPMEMO_LLM_RETRY_MAX_SECONDS", "30")
             ),
+            llm_max_tokens=(int(value) if (value := _env("GOSSIPMEMO_LLM_MAX_TOKENS")) else None),
             extraction_batch_size=int(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_SIZE", "6")
             ),
@@ -133,6 +146,9 @@ class Settings:
             extraction_policy=_env("GOSSIPMEMO_EXTRACTION_POLICY", "balanced"),
             logging_level=_env("GOSSIPMEMO_LOG_LEVEL", "INFO").upper(),
             logging_format=_env("GOSSIPMEMO_LOG_FORMAT", "json").lower(),
+            llm_context_window_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_WINDOW_TOKENS", "65536")),
+            llm_output_reserve_tokens=int(_env("GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS", "8192")),
+            llm_context_safety_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS", "4096")),
         )
 
 

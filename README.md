@@ -76,6 +76,13 @@ and delay cap with `GOSSIPMEMO_LLM_MAX_RETRIES`,
 `GOSSIPMEMO_LLM_RETRY_BASE_SECONDS`, and
 `GOSSIPMEMO_LLM_RETRY_MAX_SECONDS`; defaults are 5, 1 second, and 30 seconds.
 
+LLM requests use a conservative context budget: the default 65,536-token window
+reserves 8,192 output tokens and 4,096 safety tokens. Configure these with
+`GOSSIPMEMO_LLM_CONTEXT_WINDOW_TOKENS`, `GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS`,
+and `GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS`. Requests that exceed the usable
+input budget fail before any provider HTTP call. Reasoning catch-up runs through
+the internal ordered pipeline, keeping each stage's implementation independent.
+
 Profile induction runs once per day at local midnight. Startup performs one
 stale-profile catch-up before waiting for the next induction run.
 

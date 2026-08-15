@@ -90,7 +90,7 @@ def test_settings_reject_invalid_extraction_policy():
         )
 
 
-def test_settings_reject_invalid_llm_retry_policy():
+def test_settings_reject_negative_max_retries():
     with pytest.raises(ConfigurationError, match="llm_max_retries"):
         Settings(
             llm_base_url="http://model.test/v1",
@@ -98,6 +98,19 @@ def test_settings_reject_invalid_llm_retry_policy():
             llm_model="model-a",
             llm_max_retries=-1,
         )
+
+
+def test_output_reserve_must_cover_configured_max_tokens():
+    with pytest.raises(ConfigurationError, match="output_reserve_tokens"):
+        Settings(
+            llm_base_url="http://model.test/v1",
+            llm_api_key="secret",
+            llm_model="model-a",
+            llm_max_tokens=9000,
+        )
+
+
+def test_settings_reject_retry_max_below_base():
     with pytest.raises(ConfigurationError, match="llm_retry_max_seconds"):
         Settings(
             llm_base_url="http://model.test/v1",

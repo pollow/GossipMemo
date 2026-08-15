@@ -22,6 +22,7 @@ import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import Settings
+from .context_budget import ContextBudget
 from .models import (
     ExtractionResult,
     MemoryView,
@@ -211,6 +212,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         max_retries: int = 5,
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 30.0,
+        context_budget: ContextBudget | None = None,
     ) -> None:
         normalized_base = base_url.strip().rstrip("/")
         if not normalized_base:
@@ -249,6 +251,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
+        self.context_budget = context_budget or ContextBudget()
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -261,12 +264,18 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
             model=settings.llm_model,
+            max_tokens=settings.llm_max_tokens,
             timeout=settings.llm_timeout_seconds,
             extraction_policy=settings.extraction_policy,
             user_name=settings.user_name,
             max_retries=settings.llm_max_retries,
             retry_base_seconds=settings.llm_retry_base_seconds,
             retry_max_seconds=settings.llm_retry_max_seconds,
+            context_budget=ContextBudget(
+                settings.llm_context_window_tokens,
+                settings.llm_output_reserve_tokens,
+                settings.llm_context_safety_tokens,
+            ),
         )
 
     @property
@@ -409,6 +418,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             response_format={"type": "json_object"} if structured else None,
             max_tokens=self.max_tokens,
         )
+        # Check the exact serialized request before acquiring/sending HTTP.
+        # This includes system/messages and response schema JSON.
+        self.context_budget.check(self.context_budget.estimate_request(request))
         client = await self._get_client()
         headers = {"Accept": "application/json", **self._headers}
         if self.api_key:
