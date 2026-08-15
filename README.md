@@ -2,7 +2,7 @@
 
 GossipMemo is a local-first social memory server for agents. It keeps raw
 messages, durable memories, people, and relationships separate so an agent can
-remember who said what about whom without treating gossip as confirmed fact.
+remember who said what about whom without treating gossip as objectively true.
 
 The first version runs as one FastAPI process with a SQLite volume and a single
 FIFO queue for all LLM calls. Hermes connects over HTTP through the included
@@ -152,4 +152,5 @@ with structured Person/Relationship filters; embeddings are intentionally
 deferred. Retrieval indexes are regenerable projections, not part of the
 Memory entity.
 See [data_schema.md](data_schema.md) and [design.md](design.md) for the model and
-processing decisions.
+processing decisions. See [glossary.md](glossary.md) for the canonical domain
+and design vocabulary.

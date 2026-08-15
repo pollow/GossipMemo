@@ -2,7 +2,7 @@
 
 > Status: first-version draft
 
-本文定义第一版的处理流程、reasoning 时机、模块 interface、HTTP endpoints 和功能范围。持久数据结构见 [data_schema.md](data_schema.md)。
+本文定义第一版的处理流程、reasoning 时机、模块 interface、HTTP endpoints 和功能范围。持久数据结构见 [data_schema.md](data_schema.md)；术语边界见 [glossary.md](glossary.md)。
 
 ## 1. 产品中心
 
@@ -42,7 +42,7 @@ query(request)    从人物和关系出发检索、扩展和综合
 apply(change)     纠正 Memory、合并 Person 或人工补充认识
 ```
 
-调用方不需要理解 extract、resolve、reconcile、reason、projection refresh 或索引维护。这些都是 module implementation。
+调用方不需要理解 extraction、resolve、reconcile、reasoning、projection refresh 或索引维护。这些都是 module implementation。
 
 外部 LLM 是 module implementation 的依赖，放在内部 seam 后：
 
@@ -66,17 +66,12 @@ Canonical store 通过内部 `WorldStore` seam 隔离数据库差异，第一版
 Message
   ↓ retain
 Message persisted
-  ↓ enqueue (ingest returns queued)
-sequential LLM queue
-  ↓ extract
-Memory candidates + person references
-  ↓ resolve
-stable Person / Relationship references
-  ↓ reconcile
-active Memory changes
-  ↓ mark stale; daily local-midnight induction
-  ↓ reason (async, entity-scoped)
-inferred Memory + refreshed profile cards
+  ↓ extraction (Message → Memory; ingest returns queued)
+Memory
+  ↓ induction scan (startup and daily local midnight; stale projections)
+reasoning (one object per LLM computation)
+  ↓ projection refresh (reasoning + optimistic writeback)
+refreshed projections
 ```
 
 ### 3.1 Retain
@@ -87,7 +82,7 @@ inferred Memory + refreshed profile cards
 - 保留 author、时间和外部 source reference。
 - 不把 conversation key 当作 Memory scope。
 
-### 3.2 Extract
+### 3.2 Extraction
 
 职责：
 
@@ -99,7 +94,7 @@ inferred Memory + refreshed profile cards
 
 调用方可逐条选择 `conservative`、`balanced` 或 `comprehensive` extraction policy。它随 Message 持久化并选择对应的 ingest prompt，因此异步处理和崩溃恢复不会改变原定粒度；默认 `balanced`。
 
-Extract 可以理解语言中的隐含语义，但不做跨历史的长期归纳。例如：
+Extraction 可以理解语言中的隐含语义，但不做跨历史的长期归纳。例如：
 
 ```text
 “下个月发布前千万别再临时改需求了”
@@ -111,7 +106,7 @@ Extract 可以理解语言中的隐含语义，但不做跨历史的长期归纳
 说话者不喜欢发布前临时修改需求
 ```
 
-但“这个人总体上抗拒变化”需要结合历史，应留给 Reason。
+但“这个人总体上抗拒变化”需要结合历史，应留给 reasoning。
 
 ### 3.3 Resolve
 
@@ -128,15 +123,16 @@ Extract 可以理解语言中的隐含语义，但不做跨历史的长期归纳
 
 - 将 candidate 与现有 Memory 比较。
 - 执行 `create / merge / ignore / supersede / retract`。
-- 维护 source Message 和人物关联；人物在事实中的语义角色保留在 Memory content 和 evidence 中，不单独结构化。
+- 维护 source Message 和人物关联；人物在 Memory 中的语义角色保留在 content 和 evidence 中，不单独结构化。
 - 计算受影响的 Person 与 Relationship。
 - Memory 自身的 `updated_at` 作为对应 Person/Relationship projection 的 freshness 水位。
 
-`ingest` 在 Message 幂等落库并安排 Extract 后返回 `202 queued`。Memory 在后台处理完成后可查询；调用方可以轮询 Message processing state，但不需要理解 queue implementation。
+`ingest` 在 Message 幂等落库并安排 extraction 后返回 `202 queued`。Memory 在后台处理完成后可查询；调用方可以轮询 Message processing state，但不需要理解 queue implementation。
 
-### 3.5 Reason
+### 3.5 Induction and projection refresh
 
-Reason 是跨 Memory 的持久归纳阶段，详见下一节。
+Induction 扫描 stale projections，并为每个受影响对象调度一次 reasoning。一次
+projection refresh 包含该 reasoning、optimistic freshness check 和成功后的写回，详见下一节。
 
 ### 3.6 Query synthesis
 
@@ -149,7 +145,7 @@ Query synthesis 是只读、按需发生的推理：
 
 Query 默认不写入 Memory，也不修改 profile card。需要把 query 结论长期保存时，调用方必须显式通过 `apply(change)` 保存。
 
-## 4. Infer 与 Reasoning
+## 4. Infer 与 reasoning
 
 ### 4.1 两个不同问题
 
@@ -158,16 +154,16 @@ Query 默认不写入 Memory，也不修改 profile card。需要把 query 结�
 1. 从一句话理解它表达了什么。
 2. 从长期历史归纳这个人或关系是什么样的。
 
-第一类属于 Extract；第二类属于 Reason。
+第一类属于 extraction；第二类属于 reasoning。
 
 ```text
-Extract：Message → explicit/implicit Memory
-Reason：active Memories → inferred Memory + current projections
+extraction：Message → Memory
+reasoning：active Memories → inferred Memory + current projection result
 ```
 
-### 4.2 Reason 什么时候触发
+### 4.2 Reasoning 什么时候触发
 
-Reason 不在每条 Message 写入时同步执行。应用每天在本地午夜运行一次 induction，扫描 stale 实体后进入同一个本地 sequential queue；启动时先执行一次 stale catch-up。
+Reasoning 不在每条 Message 写入时同步执行。应用每天在本地午夜运行一次 induction，扫描 stale projection 后进入同一个本地 sequential queue；启动时先执行一次 stale catch-up。
 
 触发条件：
 
@@ -177,11 +173,11 @@ Reason 不在每条 Message 写入时同步执行。应用每天在本地午夜�
 - 人工要求重新生成指定 Person/Relationship。
 - reasoning prompt 或模型版本升级后进行重建。
 
-进程内调度以 Person/Relationship 为 key 避免同时安排重复任务。例如连续导入 20 条关于 Bob 的消息，会在当前 Reason 完成后检查相关 Memory 的最新 `updated_at` 决定是否重算。LLM queue 本身只保证 FIFO，不实现 priority。
+进程内调度以 Person/Relationship 为 key 避免同时安排重复任务。例如连续导入 20 条关于 Bob 的消息，会在当前 reasoning 完成后检查相关 Memory 的最新 `updated_at` 决定是否重算。LLM queue 本身只保证 FIFO，不实现 priority。
 
-Reason 在调用模型前记录相关 Memories 的最新 `updated_at`，模型返回后用同一水位做 optimistic check。如果期间 Memory 已变化，旧结果不写入，直接读取新状态重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。
+Reasoning 在调用模型前记录相关 Memories 的最新 `updated_at`，模型返回后用同一水位做 optimistic check。如果期间 Memory 已变化，旧结果不写入，直接读取新状态重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。optimistic check 和成功写回共同构成 projection refresh。
 
-### 4.3 Reason 做什么
+### 4.3 Reasoning 做什么
 
 对受影响的 Person：
 
@@ -220,9 +216,9 @@ Alice 和 Bob 最近的主要摩擦来自临时需求变更。
 
 每条 inferred Memory 必须通过 `memory_derivations` 指向直接依据，不能只存在一个没有来源的模型判断。
 
-### 4.5 Reported 信息如何参与 Reason
+### 4.5 Reported 信息如何参与 reasoning
 
-Reported Memory 可以参与 Reason，但不能在归纳时丢失其性质：
+Reported Memory 可以参与 reasoning，但不能在归纳时丢失其性质：
 
 - 单条 gossip 可以进入 `current_state`，但应保留“据说”“可能”等限定。
 - 单条负面 gossip 不应直接固化成稳定 trait。
@@ -234,7 +230,7 @@ Reported Memory 可以参与 Reason，但不能在归纳时丢失其性质：
 ### 4.6 防止 reasoning 自我强化
 
 - inferred Memory 必须有非 inferred 的直接依据，或明确引用人工 Memory。
-- 一次 Reason run 新建的 inferred Memory 不在同一次 run 中继续产生更高层 inference。
+- 一次 reasoning run 新建的 inferred Memory 不在同一次 run 中继续产生更高层 inference。
 - Profile card 可以读取 inferred Memory，但不能把 profile card 本身当作新 evidence。
 - Query synthesis 不自动回写。
 
@@ -334,7 +330,7 @@ POST /v1/spaces/{space_id}/memories
 - `retract` 标记原认识不再采用。
 - 直接创建 Memory 用于人工补充或确认认识。
 
-这些操作完成后只会使相关实体变为 stale；下一次每日 induction 会安排其 Reason。
+这些操作完成后只会使相关实体变为 stale；下一次每日 induction 会安排其 reasoning。
 
 ### 5.5 后续管理接口
 
@@ -395,7 +391,7 @@ POST /v1/spaces/{space_id}/reason
 - Message 成功落库并进入本地调度后，`ingest` 返回 `202 queued`。
 - 进程崩溃可能丢失内存 queue，但启动时会重新安排 `pending/failed` Message 和 stale projection。
 - 每个 persistence 方法只进行短原子写入；调用方看不到 transaction interface，LLM 调用期间不持有 transaction。
-- Reason 失败不回滚 Message 或 Memory；projection 保持 stale 并可重试。
+- Reasoning 失败不回滚 Message 或 Memory；projection 保持 stale 并可重试。
 - Query 必须识别 stale projection，并补充读取比 projection 更新的 active Memories。
 - 重复 ingest 由 source identity 或 idempotency key 去重。
 - Memory retract 和 supersede 由 SQLite Adapter 保证单次 apply 的原子性，但领域流程不依赖跨阶段 transaction。
@@ -411,13 +407,13 @@ POST /v1/spaces/{space_id}/reason
 - 自动提醒、follow-up 和任务管理。
 - query 结果默认回写长期记忆。
 - 自动 Person merge、Memory 内容合并和定时 expire job。
-- 手工触发 Reason 的管理 endpoint。
+- 手工触发 reasoning 的管理 endpoint。
 
 ## 9. 仍需通过 fixture 决定
 
 以下问题先保留为可测试决策，不提前扩张 schema：
 
-1. 什么程度的 implicit signal 值得在 Extract 阶段形成 Memory？
+1. 什么程度的 implicit signal 值得在 extraction 阶段形成 Memory？
 2. 只有 inferred evidence 时，何时自动创建 Relationship？
 3. 单条 reported Memory 可以进入 profile card 的哪些章节？
 4. Profile card 的固定 JSON sections 是否需要允许应用自定义扩展字段？

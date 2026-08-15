@@ -202,7 +202,7 @@ updated_at: 2026-08-09T12:30:00Z
 
 ## 5. messages
 
-Message 是不可变的原始 evidence，回答“输入中实际说了什么”。Agent 对话、私聊转述和批量导入的群聊消息都归一成同一种结构。
+Message 是 durable、不可变的原始 evidence，回答“输入中实际说了什么”。Agent 对话、私聊转述和批量导入的群聊消息都归一成同一种结构。
 
 ```yaml
 id: message_123
@@ -253,7 +253,7 @@ UNIQUE(space_id, source_provider, COALESCE(source_conversation_key, ''), source_
 
 ## 6. memories
 
-Memory 是系统决定长期保留的一条认识。它可以独立检索、修正、失效和追溯，不是每条 Message 的机械摘要，也不是完整画像。
+Memory 是系统决定长期保留的一条 durable semantic claim/record。它可以独立检索、修正、失效和追溯，但不保证客观真实；它不是每条 Message 的机械摘要，也不是完整画像。
 
 ```yaml
 id: memory_bob_job_01
@@ -335,7 +335,7 @@ person_id: person_bob
 
 Message author 不放入这里；`user` 和 `assistant` 只是消息角色，不是 Person。
 
-事实中的 subject、asserter、reporter、witness、participant 等语义直接保留在自然语言 `Memory.content` 和 Message evidence 中；不再定义 `PersonRole` 或 `PersonLink` 概念。
+Memory 中的 subject、asserter、reporter、witness、participant 等语义直接保留在自然语言 `Memory.content` 和 Message evidence 中；不再定义 `PersonRole` 或 `PersonLink` 概念。
 
 ### memory_relationships
 
