@@ -327,14 +327,17 @@ class SocialMemoryWorld:
             return
         context = self.store.load_extraction_context(space_id, batch_id)
         known_people = self.store.load_known_people(space_id, messages + context)
+        comparisons = self.store.load_extraction_comparisons(space_id, batch_id)
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
             result = await self.queue.submit(
-                "extract", self.model.extract, messages, context, known_people
+                "extract", self.model.extract, messages, context, known_people,
+                comparisons,
             )
             self.store.apply_extraction(
-                space_id, batch_id, result
+                space_id, batch_id, result,
+                {memory.id for memory in comparisons},
             )
             logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         except Exception as error:

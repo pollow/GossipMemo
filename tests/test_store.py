@@ -244,6 +244,168 @@ def test_extraction_persists_about_user_flag(store):
     assert row["about_user"] == 1
 
 
+def test_extraction_comparisons_exclude_inferred_and_supersede_only_supplied_memory(store):
+    original_receipt = store.record_messages(
+        "personal", [_message(content="Alex likes tea.")]
+    )[0]
+    original_batch = _batch(store, original_receipt)
+    store.apply_extraction(
+        "personal",
+        original_batch,
+        ExtractionResult(
+            people=[ExtractedPerson(ref="alex", display_name="Alex")],
+            memories=[
+                ExtractedMemory(
+                    content="Alex likes tea.", basis="stated", people=["alex"]
+                )
+            ],
+        ),
+    )
+    original_id = _rows(
+        store, "SELECT id FROM memories WHERE basis = 'stated'"
+    )[0]["id"]
+    inferred_receipt = store.record_messages(
+        "personal", [_message(content="Alex enjoys tea.")]
+    )[0]
+    inferred_batch = _batch(store, inferred_receipt)
+    store.apply_extraction(
+        "personal",
+        inferred_batch,
+        ExtractionResult(
+            memories=[
+                ExtractedMemory(
+                    content="Alex enjoys tea.", basis="inferred", people=["Alex"]
+                )
+            ]
+        ),
+    )
+    receipt = store.record_messages(
+        "personal", [_message(content="Actually Alex prefers coffee now.")]
+    )[0]
+    batch = _batch(store, receipt)
+    comparisons = store.load_extraction_comparisons("personal", batch)
+    assert [memory.id for memory in comparisons] == [original_id]
+    store.apply_extraction(
+        "personal",
+        batch,
+        ExtractionResult(
+            memories=[
+                ExtractedMemory(
+                    content="Alex prefers coffee now.",
+                    basis="stated",
+                    people=["Alex"],
+                    supersedes_memory_id=original_id,
+                )
+            ]
+        ),
+        {original_id},
+    )
+    rows = _rows(
+        store,
+        "SELECT id, status, supersedes_memory_id, source_batch_id FROM memories "
+        "WHERE basis = 'stated' ORDER BY created_at",
+    )
+    assert rows[-1]["supersedes_memory_id"] == original_id
+    assert rows[-1]["source_batch_id"] == batch
+    assert rows[0]["status"] == "superseded"
+    assert _rows(
+        store, "SELECT person_id FROM memory_people WHERE memory_id = ?", (rows[-1]["id"],)
+    )
+
+
+def test_extraction_ignores_unseen_supersede_id_without_losing_new_memory(store):
+    old_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Deus likes tea.", about_user=True)
+    )
+    receipt = store.record_messages(
+        "personal", [_message(content="I prefer coffee now.")]
+    )[0]
+    batch = _batch(store, receipt)
+    store.apply_extraction(
+        "personal",
+        batch,
+        ExtractionResult(
+            memories=[
+                ExtractedMemory(
+                    content="Deus prefers coffee now.",
+                    basis="stated",
+                    about_user=True,
+                    supersedes_memory_id=old_id,
+                )
+            ]
+        ),
+        comparison_memory_ids=set(),
+    )
+    old = _rows(store, "SELECT status FROM memories WHERE id = ?", (old_id,))[0]
+    new = _rows(
+        store, "SELECT supersedes_memory_id FROM memories WHERE source_batch_id = ?", (batch,)
+    )[0]
+    assert old["status"] == "active"
+    assert new["supersedes_memory_id"] is None
+
+
+def test_extraction_similar_guard_keeps_polarity_and_drops_in_batch_repeat(store):
+    first = store.record_messages("personal", [_message(content="I strongly prefer quiet mornings.")])[0]
+    first_batch = _batch(store, first)
+    store.apply_extraction(
+        "personal",
+        first_batch,
+        ExtractionResult(
+            memories=[
+                ExtractedMemory(
+                    content="I strongly prefer quiet mornings.",
+                    basis="stated",
+                    about_user=True,
+                ),
+                ExtractedMemory(
+                    content="I drink 1 cup of coffee.",
+                    basis="stated",
+                    about_user=True,
+                ),
+            ]
+        ),
+    )
+    old_ids = {row["id"] for row in _rows(store, "SELECT id FROM memories")}
+    second = store.record_messages("personal", [_message(content="I strongly prefer quiet mornings.")])[0]
+    second_batch = _batch(store, second)
+    store.apply_extraction(
+        "personal",
+        second_batch,
+        ExtractionResult(
+            memories=[
+                ExtractedMemory(
+                    content="I strongly prefer quiet mornings",
+                    basis="stated",
+                    about_user=True,
+                ),
+                ExtractedMemory(
+                    content="I strongly do not prefer quiet mornings.",
+                    basis="stated",
+                    about_user=True,
+                ),
+                ExtractedMemory(
+                    content="I strongly do not prefer quiet mornings",
+                    basis="stated",
+                    about_user=True,
+                ),
+                ExtractedMemory(
+                    content="I drink 2 cups of coffee.",
+                    basis="stated",
+                    about_user=True,
+                ),
+            ]
+        ),
+        old_ids,
+    )
+    rows = _rows(store, "SELECT content FROM memories WHERE status = 'active'")
+    assert {row["content"] for row in rows} == {
+        "I strongly prefer quiet mornings.",
+        "I strongly do not prefer quiet mornings.",
+        "I drink 1 cup of coffee.",
+        "I drink 2 cups of coffee.",
+    }
+
+
 def test_memory_view_preserves_temporal_bounds_in_read_and_user_model_context(store):
     receipt = store.record_messages("personal", [_message()])[0]
     store.apply_extraction(
@@ -385,8 +547,8 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     class FakeModel:
         configured = True
 
-        async def extract(self, message, context=(), known_people=()):
-            del message, context, known_people
+        async def extract(self, message, context=(), known_people=(), comparison_memories=()):
+            del message, context, known_people, comparison_memories
             return ExtractionResult(
                 people=[ExtractedPerson(ref="bob", display_name="Bob")],
                 memories=[

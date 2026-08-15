@@ -41,6 +41,15 @@ def test_extraction_prompt_applies_batch_policy_and_dates():
 
 
 def test_extraction_prompt_separates_recent_context_from_new_evidence():
+    comparison = MemoryView(
+        id="memory-1",
+        content="Deus likes tea.",
+        kind="fact",
+        basis="stated",
+        status="active",
+        about_user=True,
+        created_at="2026-08-13T12:00:00+00:00",
+    )
     prompt = extraction_prompt(
         [message("new")],
         context=[message("old")],
@@ -51,6 +60,7 @@ def test_extraction_prompt_separates_recent_context_from_new_evidence():
                 "aliases": ["Alex Wang"],
             }
         ],
+        comparison_memories=[comparison],
     )
     assert "Recent context (context only)" in prompt
     assert "Alex Wang" in prompt
@@ -58,6 +68,9 @@ def test_extraction_prompt_separates_recent_context_from_new_evidence():
     assert "Omit a known person unless" in prompt
     assert "Do not echo the known-people list" in prompt
     assert "Current batch evidence (user-authored; the only messages allowed" in prompt
+    assert "Comparison memories (deduplication/update reference only" in prompt
+    assert "supersedes_memory_id" in prompt
+    assert "never new evidence" in prompt
 
 
 def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():

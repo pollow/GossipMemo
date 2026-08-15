@@ -63,8 +63,8 @@ class _ContinuityModel:
     def __init__(self):
         self.calls = 0
 
-    async def extract(self, messages, context=(), known_people=()):
-        del context, known_people
+    async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+        del context, known_people, comparison_memories
         return ExtractionResult()
 
     async def reason_person(self, person, memories):

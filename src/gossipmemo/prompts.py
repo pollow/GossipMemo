@@ -127,6 +127,7 @@ def extraction_prompt(
     context: list[ModelMessage] | tuple[ModelMessage, ...] = (),
     known_people: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
     user_name: str = "CurrentUser",
+    comparison_memories: list[MemoryView] | tuple[MemoryView, ...] = (),
 ) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
@@ -181,6 +182,13 @@ def extraction_prompt(
         + _json(evidence_messages)
         + "\n\nCurrent batch context (assistant-authored; context only):\n"
         + _json(assistant_messages)
+        + "\n\nComparison memories (deduplication/update reference only; never new evidence):\n"
+        + _json(list(comparison_memories))
+        + "\nFor comparison memories only: omit a memory when the current user batch merely repeats it. "
+        "When current user evidence explicitly corrects, updates, or refines one, emit the new memory "
+        "and set `supersedes_memory_id` to that supplied comparison memory ID. Never copy details from a "
+        "comparison memory unless those details also appear in current user evidence. Do not use an inferred "
+        "comparison memory as evidence."
     )
 
 

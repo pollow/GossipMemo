@@ -35,6 +35,9 @@ from .models import (
 )
 
 
+DEFAULT_EXTRACTION_COMPARISON_LIMIT = 12
+
+
 def _id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
@@ -47,18 +50,25 @@ def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
-def _similar_inference(left: str, right: str) -> bool:
-    """Conservatively match a regenerated inference to its prior output."""
-    left, right = _normalized(left), _normalized(right)
+def _similar_memory_content(left: str, right: str) -> bool:
+    """Conservatively match near-identical Memory wording."""
+
+    def canonical(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).casefold()
+        value = re.sub(r"[^\w\u4e00-\u9fff]+", " ", value, flags=re.UNICODE)
+        return " ".join(value.split())
+
+    left, right = canonical(left), canonical(right)
     if left == right:
         return True
-    # Short facts and polarity/numeric changes are too risky to merge fuzzily.
-    if min(len(left), len(right)) < 20:
-        return False
+    # Preserve polarity and numeric/date changes even when wording is close.
     if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
         return False
-    negations = ("not", "never", "no", "不", "没", "未", "不是", "不会")
-    if any(token in left for token in negations) != any(token in right for token in negations):
+    def has_negation(value: str) -> bool:
+        english = re.search(r"\b(?:not|never|no)\b", value) is not None
+        return english or any(token in value for token in ("不", "没", "未"))
+
+    if has_negation(left) != has_negation(right):
         return False
     return SequenceMatcher(None, left, right).ratio() >= 0.97
 
@@ -121,8 +131,14 @@ class WorldStore(Protocol):
         self, space_id: str, messages: list[ModelMessage]
     ) -> list[dict[str, Any]]: ...
 
+    def load_extraction_comparisons(
+        self, space_id: str, batch_id: str,
+        limit: int = DEFAULT_EXTRACTION_COMPARISON_LIMIT,
+    ) -> list[MemoryView]: ...
+
     def apply_extraction(
-        self, space_id: str, batch_id: str, result: ExtractionResult
+        self, space_id: str, batch_id: str, result: ExtractionResult,
+        comparison_memory_ids: set[str] | None = None,
     ) -> tuple[set[str], set[str]]: ...
 
     def read(self, space_id: str, request: QueryRequest) -> QueryContext: ...
@@ -525,6 +541,49 @@ class SqliteWorldStore:
                 item["aliases"].append(row["alias"])
         return list(catalog.values())
 
+    def load_extraction_comparisons(
+        self, space_id: str, batch_id: str,
+        limit: int = DEFAULT_EXTRACTION_COMPARISON_LIMIT,
+    ) -> list[MemoryView]:
+        """Return a small comparison set; these rows are never new evidence."""
+        if limit <= 0:
+            return []
+        with self._connect() as connection:
+            messages = connection.execute(
+                """SELECT content FROM messages WHERE space_id = ?
+                   AND extraction_batch_id = ? AND author = 'user'
+                   AND extraction_state != 'completed'""", (space_id, batch_id)
+            ).fetchall()
+            texts = [row["content"] for row in messages]
+            context = self.load_extraction_context(space_id, batch_id)
+            person_ids = [person.id for person in self.match_people_in_text(
+                space_id, "\n".join(texts + [message.content for message in context])
+            )]
+            candidates: dict[str, sqlite3.Row] = {}
+            for text in texts:
+                fts = _fts_query(text)
+                if not fts:
+                    continue
+                for row in connection.execute(
+                    """SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
+                       WHERE memory_fts MATCH ? AND m.space_id = ? AND m.status = 'active'
+                         AND m.basis <> 'inferred'
+                       ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
+                    (fts, space_id, limit),
+                ).fetchall():
+                    candidates[row["id"]] = row
+            if person_ids:
+                placeholders = ",".join("?" for _ in person_ids)
+                for row in connection.execute(
+                    f"""SELECT DISTINCT m.* FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                       WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
+                         AND mp.person_id IN ({placeholders}) ORDER BY m.updated_at DESC LIMIT ?""",
+                    (space_id, *person_ids, limit),
+                ).fetchall():
+                    candidates[row["id"]] = row
+            rows = sorted(candidates.values(), key=lambda row: row["updated_at"], reverse=True)[:limit]
+            return [self._memory_view(connection, row, False) for row in rows]
+
     def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -595,7 +654,8 @@ class SqliteWorldStore:
         return relationship_id
 
     def apply_extraction(
-        self, space_id: str, batch_id: str, result: ExtractionResult
+        self, space_id: str, batch_id: str, result: ExtractionResult,
+        comparison_memory_ids: set[str] | None = None,
     ) -> tuple[set[str], set[str]]:
         affected_people: set[str] = set()
         affected_relationships: set[str] = set()
@@ -646,14 +706,93 @@ class SqliteWorldStore:
                     )
 
             now = _now()
+            comparison_rows: dict[str, sqlite3.Row] = {}
+            comparison_people: dict[str, set[str]] = {}
+            comparison_relationships: dict[str, set[str]] = {}
+            if comparison_memory_ids:
+                placeholders = ",".join("?" for _ in comparison_memory_ids)
+                rows = connection.execute(
+                    f"""SELECT * FROM memories WHERE space_id = ?
+                        AND status = 'active' AND basis <> 'inferred'
+                        AND id IN ({placeholders})""",
+                    (space_id, *comparison_memory_ids),
+                ).fetchall()
+                comparison_rows = {row["id"]: row for row in rows}
+                for memory_id in comparison_rows:
+                    comparison_people[memory_id] = {
+                        row["person_id"]
+                        for row in connection.execute(
+                            "SELECT person_id FROM memory_people WHERE memory_id = ?",
+                            (memory_id,),
+                        ).fetchall()
+                    }
+                    comparison_relationships[memory_id] = {
+                        row["relationship_id"]
+                        for row in connection.execute(
+                            "SELECT relationship_id FROM memory_relationships "
+                            "WHERE memory_id = ?",
+                            (memory_id,),
+                        ).fetchall()
+                    }
+            inserted_signatures: list[tuple[ExtractedMemory, set[str], set[str]]] = []
             for candidate in result.memories:
+                people_ids: set[str] = set()
+                for reference in candidate.people:
+                    person_id = people_by_ref.get(reference)
+                    if not person_id:
+                        person = self._find_person(connection, space_id, reference)
+                        person_id = person["id"] if person else None
+                    if person_id:
+                        people_ids.add(person_id)
+                relationship_ids: set[str] = set()
+                for relationship in candidate.relationships:
+                    a = people_by_ref.get(relationship.person_a_ref)
+                    b = people_by_ref.get(relationship.person_b_ref)
+                    if a and b:
+                        existing = connection.execute(
+                            """SELECT id FROM relationships WHERE space_id = ?
+                               AND ((person_a_id = ? AND person_b_id = ?) OR
+                                    (person_a_id = ? AND person_b_id = ?))""",
+                            (space_id, a, b, b, a),
+                        ).fetchone()
+                        if existing:
+                            relationship_ids.add(existing["id"])
+                comparison = comparison_rows.get(candidate.supersedes_memory_id or "")
+
+                def same_shape(row: sqlite3.Row) -> bool:
+                    memory_id = row["id"]
+                    return (
+                        row["kind"] == candidate.kind
+                        and row["basis"] == candidate.basis
+                        and bool(row["about_user"]) == candidate.about_user
+                        and row["valid_from"] == candidate.valid_from
+                        and row["valid_to"] == candidate.valid_to
+                        and comparison_people[memory_id] == people_ids
+                        and comparison_relationships[memory_id] == relationship_ids
+                    )
+
+                if comparison is None and any(
+                    same_shape(row)
+                    and _similar_memory_content(row["content"], candidate.content)
+                    for row in comparison_rows.values()
+                ):
+                    continue
+                if any(
+                    item.kind == candidate.kind and item.basis == candidate.basis
+                    and item.about_user == candidate.about_user
+                    and item.valid_from == candidate.valid_from and item.valid_to == candidate.valid_to
+                    and prior_people == people_ids and prior_relationships == relationship_ids
+                    and _similar_memory_content(item.content, candidate.content)
+                    for item, prior_people, prior_relationships in inserted_signatures
+                ):
+                    continue
                 memory_id = _id("memory")
                 connection.execute(
                     """
                     INSERT INTO memories(
                         id, space_id, content, kind, basis, about_user, valid_from, valid_to,
-                        source_batch_id, created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
+                        supersedes_memory_id, source_batch_id, created_by, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
                     """,
                     (
                         memory_id,
@@ -664,6 +803,7 @@ class SqliteWorldStore:
                         int(candidate.about_user),
                         candidate.valid_from,
                         candidate.valid_to,
+                        candidate.supersedes_memory_id if comparison is not None else None,
                         batch_id,
                         now,
                         now,
@@ -706,6 +846,24 @@ class SqliteWorldStore:
                         (memory_id, relationship_id),
                     )
                     affected_relationships.add(relationship_id)
+                    relationship_ids.add(relationship_id)
+                inserted_signatures.append((candidate, people_ids, relationship_ids))
+                if comparison is not None:
+                    for row in connection.execute(
+                        "SELECT person_id FROM memory_people WHERE memory_id = ?",
+                        (comparison["id"],),
+                    ).fetchall():
+                        affected_people.add(row["person_id"])
+                    for row in connection.execute(
+                        "SELECT relationship_id FROM memory_relationships WHERE memory_id = ?",
+                        (comparison["id"],),
+                    ).fetchall():
+                        affected_relationships.add(row["relationship_id"])
+                    connection.execute(
+                        """UPDATE memories SET status = 'superseded',
+                           invalidated_at = ?, invalidation_reason = ?, updated_at = ? WHERE id = ?""",
+                        (now, "superseded by extraction update", now, comparison["id"]),
+                    )
 
             connection.execute(
                 """
@@ -1042,7 +1200,7 @@ class SqliteWorldStore:
         for item in inferred:
             existing = next((row for row in existing_rows
                              if row["kind"] == item.kind
-                             and _similar_inference(row["content"], item.content)), None)
+                             and _similar_memory_content(row["content"], item.content)), None)
             valid_sources = [
                 row["id"]
                 for row in connection.execute(

@@ -19,8 +19,8 @@ from gossipmemo.world import SocialMemoryWorld
 class _NoopModel:
     configured = False
 
-    async def extract(self, messages, context=(), known_people=()):
-        del context, known_people
+    async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+        del context, known_people, comparison_memories
         return ExtractionResult()
 
     async def reason_continuity(self, continuity, messages):

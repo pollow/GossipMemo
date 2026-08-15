@@ -101,6 +101,7 @@ class ExtractedMemory(BaseModel):
     valid_from: str | None = None
     valid_to: str | None = None
     about_user: bool = False
+    supersedes_memory_id: str | None = None
 
 
 class ExtractionResult(BaseModel):

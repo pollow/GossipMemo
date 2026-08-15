@@ -68,6 +68,7 @@ class LlmModel(Protocol):
         messages: Sequence[ModelMessage],
         context: Sequence[ModelMessage] = (),
         known_people: Sequence[dict[str, Any]] = (),
+        comparison_memories: Sequence[MemoryView] = (),
     ) -> ExtractionResult: ...
 
     async def reason_person(
@@ -234,6 +235,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         messages: Sequence[ModelMessage],
         context: Sequence[ModelMessage] = (),
         known_people: Sequence[dict[str, Any]] = (),
+        comparison_memories: Sequence[MemoryView] = (),
     ) -> ExtractionResult:
         content = await self._structured_call(
             EXTRACTION_SYSTEM_PROMPT,
@@ -243,6 +245,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                 list(context),
                 list(known_people),
                 self.user_name,
+                list(comparison_memories),
             ),
             ExtractionResult,
         )
