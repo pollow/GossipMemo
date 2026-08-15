@@ -148,7 +148,9 @@ def extraction_prompt(
         + _json(list(known_people))
         + "\nReuse a known person's canonical display_name when the messages refer "
         "to them. If the messages explicitly introduce a new short name, return "
-        "it in that person's `aliases` field.\n"
+        "it in that person's `aliases` field. Omit a known person unless a new "
+        "memory references them or the messages explicitly add an alias. Do not "
+        "echo the known-people list.\n"
         + "\n\nNew messages (the only evidence allowed to produce memories):\n"
         + _json(messages)
     )

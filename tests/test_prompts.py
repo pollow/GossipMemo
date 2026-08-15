@@ -51,6 +51,8 @@ def test_extraction_prompt_separates_recent_context_from_new_evidence():
     assert "Recent context (context only)" in prompt
     assert "Alex Wang" in prompt
     assert "canonical display_name" in prompt
+    assert "Omit a known person unless" in prompt
+    assert "Do not echo the known-people list" in prompt
     assert "New messages (the only evidence allowed to produce memories)" in prompt
 
 
