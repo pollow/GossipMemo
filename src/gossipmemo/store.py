@@ -40,6 +40,8 @@ from .models import (
     CoverageMapView,
     GoalPlanningResult,
     LearningGoalView,
+    GuidanceItem,
+    GuidanceBundle,
     coverage_skeleton,
     ContextBundle,
     utc_now,
@@ -190,6 +192,7 @@ class WorldStore(Protocol):
     def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str | None, result: ContinuityReasoningResult) -> bool: ...
 
     def context_bundle(self, space_id: str) -> ContextBundle: ...
+    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle: ...
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
 
@@ -1843,6 +1846,48 @@ class SqliteWorldStore:
             )
             return True
 
+    def _guidance(self, connection: sqlite3.Connection, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
+        """Return a bounded, deterministic set; coverage maps never leave this method."""
+        person_ids = tuple(dict.fromkeys(activated_person_ids))
+        placeholders = ','.join('?' for _ in person_ids) or 'NULL'
+        rows = connection.execute(
+            f"SELECT id, owner_kind, owner_id, content, confidence, status, updated_at FROM hypotheses "
+            f"WHERE space_id = ? AND status = 'open' AND (owner_kind = 'user' OR (owner_kind = 'person' AND owner_id IN ({placeholders})) OR "
+            f"(owner_kind = 'relationship' AND owner_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "ORDER BY updated_at DESC, id",
+            (space_id, *person_ids, space_id, *person_ids, *person_ids),
+        ).fetchall()
+        updated: dict[str, str] = {}
+        items = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'], owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
+        updated.update({row['id']: row['updated_at'] for row in rows})
+        goals = connection.execute(
+            f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
+            f"WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' OR (focus_kind = 'person' AND focus_id IN ({placeholders})) OR "
+            f"(focus_kind = 'relationship' AND focus_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "ORDER BY updated_at DESC, id",
+            (space_id, *person_ids, space_id, *person_ids, *person_ids),
+        ).fetchall()
+        items.extend(GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'], owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status']) for row in goals)
+        updated.update({row['id']: row['updated_at'] for row in goals})
+        # Lexical relevance is only a tie-breaker over recency. Character
+        # bigrams keep short/non-space-separated text useful (including CJK).
+        folded = query.casefold()
+        grams = {folded[i:i + 2] for i in range(max(0, len(folded) - 1))}
+        def rank(item: GuidanceItem) -> tuple[int, str, str]:
+            text = item.content.casefold()
+            relevance = (1000 if folded and folded in text else 0) + sum(text.count(g) for g in grams)
+            return (relevance, updated[item.id], item.id)
+        by_kind: dict[str, list[GuidanceItem]] = {"hypothesis": [], "learning_goal": []}
+        for item in items:
+            by_kind[item.kind].append(item)
+        selected = [sorted(by_kind[k], key=rank, reverse=True)[0] for k in ("hypothesis", "learning_goal") if by_kind[k]]
+        selected.sort(key=lambda item: (item.kind, item.id))
+        return GuidanceBundle(items=selected)
+
+    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
+        with self._connect() as connection:
+            return self._guidance(connection, space_id, activated_person_ids, query)
+
     def context_bundle(self, space_id: str) -> ContextBundle:
         with self._connect() as connection:
             user = connection.execute("SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
@@ -1859,11 +1904,13 @@ class SqliteWorldStore:
                 if row:
                     people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
                                              profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
+            guidance = self._guidance(connection, space_id)
             payload = {"user_model": user_view.model_dump(mode="json") if user_view else None,
                        "continuity": continuity.model_dump(mode="json") if continuity else None,
-                       "people": [item.model_dump(mode="json") for item in people]}
+                       "people": [item.model_dump(mode="json") for item in people],
+                       "guidance": guidance.model_dump(mode="json")}
             version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
-            return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people)
+            return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people, guidance=guidance)
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]:
         """Resolve explicit aliases without creating people or invoking an LLM."""

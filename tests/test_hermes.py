@@ -48,3 +48,15 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
         assert "answer for Bob" in result
     finally:
         provider.shutdown()
+
+
+def test_hermes_labels_guidance_as_tentative_or_optional():
+    formatted = GossipMemoMemoryProvider._format_context({
+        "guidance": {"items": [
+            {"id": "h", "kind": "hypothesis", "content": "Maybe true"},
+            {"id": "g", "kind": "learning_goal", "content": "Learn more"},
+        ]}
+    })
+    assert "Tentative hypothesis: Maybe true" in formatted
+    assert "Optional learning goal: Learn more" in formatted
+    assert "Memory" not in formatted

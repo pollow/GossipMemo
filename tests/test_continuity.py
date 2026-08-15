@@ -131,7 +131,7 @@ def test_context_endpoint_is_read_only_and_returns_bundle(tmp_path: Path):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.get("/v1/spaces/space/context")
                 assert response.status_code == 200
-                assert set(response.json()) == {"version", "user_model", "continuity", "people"}
+                assert set(response.json()) == {"version", "user_model", "continuity", "people", "guidance"}
                 post = await client.post("/v1/spaces/space/context")
                 assert post.status_code == 405
 

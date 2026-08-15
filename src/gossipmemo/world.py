@@ -11,6 +11,7 @@ from .llm import LLMModel
 from .logging import elapsed_ms
 from .models import (
     ContextBundle,
+    GuidanceBundle,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -219,12 +220,20 @@ class SocialMemoryWorld:
         known_people = []
         memory_recall = []
         context_update: ContextBundle | None = None
+        guidance = GuidanceBundle()
         context_status = "available"
         try:
             known_people = self.store.match_people_in_text(space_id, request.message.content)
         except Exception:
             context_status = "unavailable"
             logger.exception("turn person matching failed for %s", space_id)
+        try:
+            guidance = self.store.guidance_bundle(
+                space_id, [person.id for person in known_people], request.message.content
+            )
+        except Exception:
+            context_status = "unavailable"
+            logger.exception("turn guidance preparation failed for %s", space_id)
         try:
             memory_recall = self.store.recall_user_memories(
                 space_id, request.message.content, request.memory_limit
@@ -243,6 +252,7 @@ class SocialMemoryWorld:
             message_id=message_id,
             known_people=known_people,
             memory_recall=memory_recall,
+            guidance=guidance,
             context_update=context_update,
             context_status=context_status,
         )

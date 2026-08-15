@@ -377,6 +377,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
             "bundle": update or cached,
             "known_people": result.get("known_people", []),
             "memory_recall": result.get("memory_recall", []),
+            "guidance": result.get("guidance", {}),
         }
         formatted = self._format_context(merged)
         with self._prefetch_lock:
@@ -459,6 +460,20 @@ class GossipMemoMemoryProvider(MemoryProvider):
         if continuity:
             text = continuity.get("text") if isinstance(continuity, Mapping) else continuity
             if _compact(text): lines.append(f"Continuity: {_compact(text, 900)}")
+        guidance = result.get("guidance", {}) if isinstance(result.get("guidance"), Mapping) else (bundle.get("guidance", {}) if isinstance(bundle, Mapping) else {})
+        guidance_items = guidance.get("items", []) if isinstance(guidance, Mapping) else []
+        if isinstance(guidance_items, list):
+            seen_guidance: set[str] = set()
+            for item in guidance_items[:8]:
+                if not isinstance(item, Mapping):
+                    continue
+                item_id = str(item.get("id") or item.get("content") or "")
+                content = _compact(item.get("content"), 420)
+                if not content or item_id in seen_guidance:
+                    continue
+                seen_guidance.add(item_id)
+                label = "Tentative hypothesis" if item.get("kind") == "hypothesis" else "Optional learning goal"
+                lines.append(f"{label}: {content}")
         people = bundle.get("people", []) if isinstance(bundle, Mapping) else []
         people = list(people) + list(result.get("known_people", []))
         seen_people: set[str] = set()

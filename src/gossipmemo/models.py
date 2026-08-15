@@ -72,6 +72,21 @@ class IngestResponse(BaseModel):
     message_ids: list[str]
 
 
+class GuidanceItem(BaseModel):
+    """Small, tentative prompts that may help an agent guide a conversation."""
+    id: str
+    kind: Literal["hypothesis", "learning_goal"]
+    content: str
+    owner_kind: Literal["user", "person", "relationship"]
+    owner_id: str | None = None
+    status: str
+    confidence: HypothesisConfidence | None = None
+
+
+class GuidanceBundle(BaseModel):
+    items: list[GuidanceItem] = Field(default_factory=list)
+
+
 class TurnRequest(BaseModel):
     """One user turn, plus the SDK's cached context watermark."""
 
@@ -92,6 +107,7 @@ class TurnResponse(BaseModel):
     message_id: str
     known_people: list[PersonView] = Field(default_factory=list)
     memory_recall: list[MemoryView] = Field(default_factory=list)
+    guidance: GuidanceBundle = Field(default_factory=GuidanceBundle)
     context_update: ContextBundle | None = None
     context_status: Literal["available", "unavailable"] = "available"
 
@@ -403,6 +419,7 @@ class ContextBundle(BaseModel):
     user_model: UserModelView | None = None
     continuity: ContinuityView | None = None
     people: list[PersonView] = Field(default_factory=list)
+    guidance: GuidanceBundle = Field(default_factory=GuidanceBundle)
 
 
 class RelationshipView(BaseModel):

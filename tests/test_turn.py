@@ -109,3 +109,32 @@ def test_turn_schedules_continuity_and_rejects_assistant(tmp_path: Path):
             await world.stop()
 
     asyncio.run(scenario())
+
+
+def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path):
+    store = SqliteWorldStore(tmp_path / "guidance.db")
+    store.initialize()
+    store.ensure_space("s")
+    store.add_manual_memory("s", ManualMemoryRequest(content="Alice is a friend", people=["Alice"]))
+    with store._connect() as connection:
+        pid = connection.execute("SELECT id FROM people WHERE display_name = 'Alice'").fetchone()["id"]
+        connection.execute("INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('h','s','person',?,'Alice may move','impression','low','1','1')", (pid,))
+        connection.execute("INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('new','s','person',?,'unrelated newest','impression','low','3','3')", (pid,))
+        connection.execute("INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('cjk','s','person',?,'旅行计划未定','impression','low','0','0')", (pid,))
+        connection.execute("INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,status,created_at,updated_at) VALUES ('closed','s','person',?,'旅行已确认','impression','low','rejected','4','4')", (pid,))
+        connection.execute("INSERT INTO learning_goals(id,space_id,prompt,rationale,criteria_refs,boundary_ids,status,created_at,updated_at) VALUES ('deferred','s','旅行方向','context','[]','[]','deferred','5','5')")
+        connection.execute("INSERT INTO learning_goals(id,space_id,prompt,rationale,criteria_refs,boundary_ids,created_at,updated_at) VALUES ('g','s','Learn Alice plans','context','[]','[]','2','2')")
+    generic = store.context_bundle("s")
+    assert [item.id for item in generic.guidance.items] == ["g"]
+    assert store.context_bundle("s").version == generic.version
+    selected = store.guidance_bundle("s", [pid], "Alice")
+    assert [item.id for item in selected.items] == ["h", "g"]
+    assert store.guidance_bundle("s", [pid], "旅行").items[0].id == "cjk"
+
+    async def scenario():
+        world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
+        response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="Alice?")))
+        assert any(item.id == "h" for item in response.guidance.items)
+    before = store.context_bundle("s").version
+    asyncio.run(scenario())
+    assert store.context_bundle("s").version == before
