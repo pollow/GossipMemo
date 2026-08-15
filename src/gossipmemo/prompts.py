@@ -49,6 +49,12 @@ from people merely appearing in the same message. Inferred memories are
 optional; each one must cite one or more supplied source memory IDs.
 """
 
+USER_MODEL_REASONING_SYSTEM_PROMPT = """You maintain a compact, bounded profile
+of the current user from active memories explicitly marked about_user. Rebuild
+the profile from the supplied memories; do not append, invent, or include a
+Person identity. Return only a JSON object matching the supplied schema.
+"""
+
 QUERY_SYNTHESIS_SYSTEM_PROMPT = """You answer a read-only question using the supplied
 social-memory context. Return concise plain text only (no JSON wrapper and no
 Markdown code fence). Distinguish evidence from inference, mention relevant
@@ -102,7 +108,9 @@ def extraction_prompt(messages: list[ModelMessage]) -> str:
         "The user/assistant author role is context and never a Person. List every "
         "Person referenced by a memory in its `people` refs; express who said or "
         "did what in the memory content itself. Preserve reported claims as "
-        "`reported`, not facts.\n\n"
+        "`reported`, not facts. Set `about_user` only when the memory is a durable "
+        "fact, preference, plan, situation, or other claim about the current user; "
+        "the current user is not a Person and must never appear in `people`.\n\n"
         "Messages:\n"
         + _json(messages)
     )
@@ -137,6 +145,13 @@ def relationship_reasoning_prompt(
     )
 
 
+def user_model_reasoning_prompt(memories: list[MemoryView]) -> str:
+    return (
+        "Rebuild the compact profile card for the current user from these active "
+        "memories only.\n\nActive about-user memories:\n" + _json(memories)
+    )
+
+
 def query_synthesis_prompt(question: str, context: QueryContext) -> str:
     """Build the user prompt for read-only query synthesis."""
 
@@ -153,9 +168,11 @@ __all__ = [
     "PERSON_REASONING_SYSTEM_PROMPT",
     "QUERY_SYNTHESIS_SYSTEM_PROMPT",
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
+    "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "extraction_prompt",
     "person_reasoning_prompt",
     "query_synthesis_prompt",
     "relationship_reasoning_prompt",
+    "user_model_reasoning_prompt",
     "schema_instruction",
 ]

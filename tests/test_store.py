@@ -18,6 +18,7 @@ from gossipmemo.models import (
     QueryRequest,
     ExtractedRelationship,
     SourceRef,
+    UserModelReasoningResult,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
 
@@ -152,6 +153,45 @@ def test_zero_memory_extraction_completes_message_without_creating_memory(store)
     assert row["extraction_attempts"] == 0
     assert store.pending_extractions() == []
     assert _rows(store, "SELECT id FROM memories") == []
+
+
+def test_extraction_persists_about_user_flag(store):
+    receipt = store.record_messages("personal", [_message()])[0]
+    store.apply_extraction(
+        "personal", _batch(store, receipt),
+        ExtractionResult(memories=[ExtractedMemory(
+            content="I prefer tea.", basis="stated", about_user=True,
+        )]),
+    )
+    row = _rows(store, "SELECT about_user FROM memories")[0]
+    assert row["about_user"] == 1
+
+
+def test_user_model_reads_active_about_user_memories_and_uses_watermark(store):
+    about_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="I like tea.", about_user=True)
+    )
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob likes coffee.")
+    )
+    context = store.user_model_context("personal")
+    assert context is not None
+    view, memories, watermark = context
+    assert view.stale is True
+    assert [memory.content for memory in memories] == ["I like tea."]
+    assert watermark is not None
+    assert store.apply_user_model_reasoning(
+        "personal", watermark, UserModelReasoningResult(profile_card={"summary": "tea"})
+    ) is True
+    refreshed = store.user_model_context("personal")
+    assert refreshed is not None and refreshed[0].stale is False
+    assert store.apply_user_model_reasoning(
+        "personal", watermark, UserModelReasoningResult(profile_card={"summary": "old"})
+    ) is False
+    store.retract_memory("personal", about_id)
+    after_retract = store.user_model_context("personal")
+    assert after_retract is not None and after_retract[1] == []
+    assert after_retract[0].stale is False
 
 
 def test_memory_fts_triggers_track_insert_update_and_delete(store):

@@ -235,6 +235,26 @@ class SocialMemoryWorld:
             self._reason_relationship(space_id, relationship_id),
         )
 
+    def _schedule_user_model_reason(self, space_id: str) -> None:
+        self._spawn(
+            ("user-model", space_id, space_id),
+            self._reason_user_model(space_id),
+        )
+
+    async def _reason_user_model(self, space_id: str) -> None:
+        while not self._stopping:
+            context = self.store.user_model_context(space_id)
+            if not context:
+                return
+            user_model, memories, watermark = context
+            if not user_model.stale:
+                return
+            result = await self.queue.submit(
+                "reason-user-model", self.model.reason_user_model, memories
+            )
+            if self.store.apply_user_model_reasoning(space_id, watermark, result):
+                return
+
     async def _reason_relationship(
         self, space_id: str, relationship_id: str
     ) -> None:
@@ -285,11 +305,13 @@ class SocialMemoryWorld:
     def _schedule_all_stale(self) -> None:
         if self._stopping:
             return
-        people, relationships = self.store.stale_entities()
+        people, relationships, user_models = self.store.stale_entities()
         for space_id, person_id in people:
             self._schedule_person_reason(space_id, person_id)
         for space_id, relationship_id in relationships:
             self._schedule_relationship_reason(space_id, relationship_id)
+        for space_id in user_models:
+            self._schedule_user_model_reason(space_id)
 
     def health(self) -> HealthResponse:
         return HealthResponse(

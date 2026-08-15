@@ -67,6 +67,7 @@ class ExtractedMemory(BaseModel):
     relationships: list[ExtractedRelationship] = Field(default_factory=list)
     valid_from: str | None = None
     valid_to: str | None = None
+    about_user: bool = False
 
 
 class ExtractionResult(BaseModel):
@@ -83,6 +84,12 @@ class InferredMemory(BaseModel):
 class PersonReasoningResult(BaseModel):
     profile_card: dict[str, Any] = Field(default_factory=dict)
     inferred_memories: list[InferredMemory] = Field(default_factory=list)
+
+
+class UserModelReasoningResult(BaseModel):
+    """Bounded, rebuildable profile projection for the current user."""
+
+    profile_card: dict[str, Any] = Field(default_factory=dict)
 
 
 class RelationshipReasoningResult(BaseModel):
@@ -112,11 +119,20 @@ class MemoryView(BaseModel):
     people: list[dict[str, str]] = Field(default_factory=list)
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str
+    about_user: bool = False
 
 
 class PersonView(BaseModel):
     id: str
     display_name: str
+    profile_card: dict[str, Any] = Field(default_factory=dict)
+    profile_source_updated_at: str | None = None
+    profile_updated_at: str | None = None
+    stale: bool = False
+
+
+class UserModelView(BaseModel):
+    space_id: str
     profile_card: dict[str, Any] = Field(default_factory=dict)
     profile_source_updated_at: str | None = None
     profile_updated_at: str | None = None
@@ -153,6 +169,7 @@ class ManualMemoryRequest(BaseModel):
     people: list[str] = Field(default_factory=list)
     valid_from: str | None = None
     valid_to: str | None = None
+    about_user: bool = False
 
 
 class RetractRequest(BaseModel):
@@ -165,6 +182,7 @@ class SupersedeRequest(BaseModel):
     valid_from: str | None = None
     valid_to: str | None = None
     reason: str | None = None
+    about_user: bool | None = None
 
 
 class QueueStatus(BaseModel):

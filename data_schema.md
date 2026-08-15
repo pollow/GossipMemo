@@ -12,6 +12,7 @@ GossipMemo 保存一个以个人为观察原点、沿人物和关系向外扩展
 Space
 ├── Person
 ├── Relationship (Person ↔ Person)
+├── UserModel (one compact projection per Space)
 ├── Message
 └── Memory
     ├── Person links
@@ -28,7 +29,9 @@ Message
 Memory
 ```
 
-`Space` 是数据隔离和观察视角，不是社交实体。
+`Space` 是数据隔离和观察视角，不是社交实体。当前 User 不是 Person，
+也不建立 ego/author-person binding；关于当前 User 的 Memory 使用
+`about_user: true` 标记。
 
 核心约束：
 
@@ -278,6 +281,7 @@ updated_at: 2026-08-09T12:00:08Z
 | `content` | 可独立理解的规范化自然语言内容 |
 | `kind` | 内容类别 |
 | `basis` | 该认识如何获得 |
+| `about_user` | 是否是关于当前 User 的依据；不建立 Person 关联 |
 | `status` | 当前生命周期状态 |
 | `valid_from` / `valid_to` | 内容在现实世界中的有效时间 |
 | `supersedes_memory_id` | 此 Memory 替代的旧 Memory |
@@ -386,6 +390,7 @@ derivation_role: support
 
 - Person.profile_card
 - Relationship.facets、summary、closeness、tone 和 status projection
+- `user_models` 中每个 Space 一条 `profile_card` projection；仅从 active `about_user` Memory 低频重建，保持 compact、有界且可删除重建
 - 全文、embedding 或图索引
 
 Projection 可以删除并从 active Memory 重建。人工编辑 projection 时，系统应先创建一条 `created_by: human` 的 Memory，再重新生成 projection，避免人工判断只存在于可重建字段中。

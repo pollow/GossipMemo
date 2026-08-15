@@ -7,6 +7,13 @@ CREATE TABLE IF NOT EXISTS spaces (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_models (
+    space_id TEXT PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
+    profile_card TEXT NOT NULL DEFAULT '{}',
+    profile_source_updated_at TEXT,
+    profile_updated_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS people (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
@@ -93,6 +100,7 @@ CREATE TABLE IF NOT EXISTS memories (
     content TEXT NOT NULL,
     kind TEXT NOT NULL,
     basis TEXT NOT NULL,
+    about_user INTEGER NOT NULL DEFAULT 0 CHECK(about_user IN (0, 1)),
     status TEXT NOT NULL DEFAULT 'active',
     valid_from TEXT,
     valid_to TEXT,

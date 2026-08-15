@@ -27,16 +27,19 @@ from .models import (
     QueryContext,
     RelationshipReasoningResult,
     RelationshipView,
+    UserModelReasoningResult,
 )
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
     QUERY_SYNTHESIS_SYSTEM_PROMPT,
     RELATIONSHIP_REASONING_SYSTEM_PROMPT,
+    USER_MODEL_REASONING_SYSTEM_PROMPT,
     extraction_prompt,
     person_reasoning_prompt,
     query_synthesis_prompt,
     relationship_reasoning_prompt,
+    user_model_reasoning_prompt,
     schema_instruction,
 )
 
@@ -61,6 +64,10 @@ class LlmModel(Protocol):
     async def reason_relationship(
         self, relationship: RelationshipView, memories: Sequence[MemoryView]
     ) -> RelationshipReasoningResult: ...
+
+    async def reason_user_model(
+        self, memories: Sequence[MemoryView]
+    ) -> UserModelReasoningResult: ...
 
     async def synthesize(self, question: str, context: QueryContext) -> str: ...
 
@@ -220,6 +227,16 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             RelationshipReasoningResult,
         )
         return cast(RelationshipReasoningResult, content)
+
+    async def reason_user_model(
+        self, memories: Sequence[MemoryView]
+    ) -> UserModelReasoningResult:
+        content = await self._structured_call(
+            USER_MODEL_REASONING_SYSTEM_PROMPT,
+            user_model_reasoning_prompt(list(memories)),
+            UserModelReasoningResult,
+        )
+        return cast(UserModelReasoningResult, content)
 
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():

@@ -192,6 +192,27 @@ def test_supersede_preserves_history_and_retract_reason(tmp_path):
     assert reason == "No longer reliable"
 
 
+def test_supersede_inherits_or_overrides_about_user(tmp_path):
+    store = _store(tmp_path)
+    original = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="I like tea.", about_user=True)
+    )
+    inherited = store.supersede_memory(
+        "personal", original, SupersedeRequest(content="I like green tea.")
+    )
+    assert inherited
+    overridden = store.supersede_memory(
+        "personal", inherited, SupersedeRequest(content="This is about Bob.", about_user=False)
+    )
+    assert overridden
+    with store._connect() as connection:
+        rows = connection.execute(
+            "SELECT about_user FROM memories WHERE id IN (?, ?) ORDER BY created_at",
+            (inherited, overridden),
+        ).fetchall()
+    assert [row["about_user"] for row in rows] == [1, 0]
+
+
 def test_message_time_requires_timezone():
     with pytest.raises(ValidationError, match="timezone"):
         MessageInput(
@@ -313,6 +334,37 @@ def test_induction_waits_for_daily_scheduler(tmp_path):
 
     asyncio.run(scenario())
     assert calls == ["Bob"]
+
+
+def test_induction_schedules_user_model_only_for_about_user_memory(tmp_path):
+    calls: list[int] = []
+
+    class UserModel(FakeModel):
+        async def reason_user_model(self, memories):
+            calls.append(len(memories))
+            from gossipmemo.models import UserModelReasoningResult
+            return UserModelReasoningResult(profile_card={"count": len(memories)})
+
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        world = SocialMemoryWorld(store, UserModel(), induction_interval_seconds=0.01)
+        await world.start()
+        try:
+            world.add_memory("personal", ManualMemoryRequest(content="ordinary fact"))
+            await asyncio.sleep(0.03)
+            assert calls == []
+            world.add_memory(
+                "personal", ManualMemoryRequest(content="I like tea", about_user=True)
+            )
+            for _ in range(100):
+                if calls:
+                    break
+                await asyncio.sleep(0.001)
+        finally:
+            await world.stop()
+        assert calls == [1]
+
+    asyncio.run(scenario())
 
 
 def test_startup_catches_up_stale_profiles(tmp_path):

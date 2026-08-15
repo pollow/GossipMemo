@@ -23,6 +23,8 @@ from .models import (
     RelationshipReasoningResult,
     RelationshipView,
     SupersedeRequest,
+    UserModelReasoningResult,
+    UserModelView,
     utc_now,
 )
 
@@ -95,6 +97,19 @@ class WorldStore(Protocol):
 
     def read(self, space_id: str, request: QueryRequest) -> QueryContext: ...
 
+    def user_model_context(
+        self, space_id: str
+    ) -> tuple[UserModelView, list[MemoryView], str | None] | None: ...
+
+    def apply_user_model_reasoning(
+        self, space_id: str, expected_watermark: str | None,
+        result: UserModelReasoningResult,
+    ) -> bool: ...
+
+    def stale_entities(
+        self,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
+
 
 class AmbiguousPersonError(ValueError):
     def __init__(self, reference: str) -> None:
@@ -133,6 +148,9 @@ class SqliteWorldStore:
                 "INSERT OR IGNORE INTO spaces(id, name, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?)",
                 (space_id, name or space_id, now, now),
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO user_models(space_id) VALUES (?)", (space_id,)
             )
             return space_id
 
@@ -477,9 +495,9 @@ class SqliteWorldStore:
                 connection.execute(
                     """
                     INSERT INTO memories(
-                        id, space_id, content, kind, basis, valid_from, valid_to,
+                        id, space_id, content, kind, basis, about_user, valid_from, valid_to,
                         source_batch_id, created_by, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'extractor', ?, ?)
                     """,
                     (
                         memory_id,
@@ -487,6 +505,7 @@ class SqliteWorldStore:
                         candidate.content,
                         candidate.kind,
                         candidate.basis,
+                        int(candidate.about_user),
                         candidate.valid_from,
                         candidate.valid_to,
                         batch_id,
@@ -615,6 +634,7 @@ class SqliteWorldStore:
             people=people,
             evidence=evidence,
             created_at=row["created_at"],
+            about_user=bool(row["about_user"]),
         )
 
     def _person_watermark(self, connection: sqlite3.Connection, space_id: str, person_id: str) -> str | None:
@@ -979,7 +999,56 @@ class SqliteWorldStore:
             )
             return True
 
-    def stale_entities(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
+    def user_model_context(
+        self, space_id: str
+    ) -> tuple[UserModelView, list[MemoryView], str | None] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM user_models WHERE space_id = ?", (space_id,)
+            ).fetchone()
+            if not row:
+                return None
+            memories = connection.execute(
+                """SELECT * FROM memories WHERE space_id = ? AND status = 'active'
+                   AND about_user = 1 ORDER BY created_at DESC LIMIT 100""",
+                (space_id,),
+            ).fetchall()
+            watermark = self._user_model_watermark(connection, space_id)
+            view = UserModelView(
+                space_id=space_id,
+                profile_card=_loads(row["profile_card"], {}),
+                profile_source_updated_at=row["profile_source_updated_at"],
+                profile_updated_at=row["profile_updated_at"],
+                stale=watermark is not None and row["profile_source_updated_at"] != watermark,
+            )
+            return view, [self._memory_view(connection, item, True) for item in memories], watermark
+
+    def _user_model_watermark(self, connection: sqlite3.Connection, space_id: str) -> str | None:
+        row = connection.execute(
+            "SELECT MAX(updated_at) AS watermark FROM memories "
+            "WHERE space_id = ? AND status = 'active' AND about_user = 1",
+            (space_id,),
+        ).fetchone()
+        return row["watermark"] if row else None
+
+    def apply_user_model_reasoning(
+        self, space_id: str, expected_watermark: str | None,
+        result: UserModelReasoningResult,
+    ) -> bool:
+        with self._connect() as connection:
+            if self._user_model_watermark(connection, space_id) != expected_watermark:
+                return False
+            now = _now()
+            updated = connection.execute(
+                """UPDATE user_models SET profile_card = ?, profile_source_updated_at = ?,
+                   profile_updated_at = ? WHERE space_id = ?
+                   AND (profile_source_updated_at IS NULL OR profile_source_updated_at < ?)""",
+                (_json(result.profile_card), expected_watermark, now, space_id,
+                 expected_watermark),
+            )
+            return updated.rowcount == 1
+
+    def stale_entities(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]:
         with self._connect() as connection:
             people = [
                 (row["space_id"], row["id"])
@@ -998,7 +1067,12 @@ class SqliteWorldStore:
                 watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
                 if watermark is not None and row["profile_source_updated_at"] != watermark:
                     relationships.append((row["space_id"], row["id"]))
-            return people, relationships
+            user_models = []
+            for row in connection.execute("SELECT * FROM user_models").fetchall():
+                watermark = self._user_model_watermark(connection, row["space_id"])
+                if watermark is not None and row["profile_source_updated_at"] != watermark:
+                    user_models.append(row["space_id"])
+            return people, relationships, user_models
 
     def add_manual_memory(
         self, space_id: str, request: ManualMemoryRequest
@@ -1010,15 +1084,16 @@ class SqliteWorldStore:
             connection.execute(
                 """
                 INSERT INTO memories(
-                    id, space_id, content, kind, basis, valid_from, valid_to,
+                    id, space_id, content, kind, basis, about_user, valid_from, valid_to,
                     created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, 'human', ?, ?)
+                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, 'human', ?, ?)
                 """,
                 (
                     memory_id,
                     space_id,
                     request.content,
                     request.kind,
+                    int(request.about_user),
                     request.valid_from,
                     request.valid_to,
                     now,
@@ -1057,17 +1132,18 @@ class SqliteWorldStore:
             connection.execute(
                 """
                 INSERT INTO memories(
-                    id, space_id, content, kind, basis, valid_from, valid_to,
+                    id, space_id, content, kind, basis, about_user, valid_from, valid_to,
                     supersedes_memory_id, created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, 'human', ?, ?)
+                ) VALUES (?, ?, ?, ?, 'manual', ?, ?, ?, ?, 'human', ?, ?)
                 """,
                 (
                     replacement_id,
                     space_id,
                     request.content,
                     request.kind or original["kind"],
-                    request.valid_from,
-                    request.valid_to,
+                    int(original["about_user"] if request.about_user is None else request.about_user),
+                    request.valid_from if request.valid_from is not None else original["valid_from"],
+                    request.valid_to if request.valid_to is not None else original["valid_to"],
                     memory_id,
                     now,
                     now,
