@@ -5,6 +5,7 @@ import re
 import sqlite3
 import uuid
 import hashlib
+import unicodedata
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -117,6 +118,10 @@ class WorldStore(Protocol):
     def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str | None, result: ContinuityReasoningResult) -> bool: ...
 
     def context_bundle(self, space_id: str) -> ContextBundle: ...
+
+    def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
+
+    def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]: ...
 
     def stale_entities(
         self,
@@ -1131,6 +1136,59 @@ class SqliteWorldStore:
                        "people": [item.model_dump(mode="json") for item in people]}
             version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
             return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people)
+
+    def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]:
+        """Resolve explicit aliases without creating people or invoking an LLM."""
+        folded = unicodedata.normalize("NFKC", text).casefold()
+        with self._connect() as connection:
+            aliases = connection.execute(
+                """SELECT a.normalized_value, a.value, a.person_id, p.*
+                   FROM person_aliases a JOIN people p ON p.id = a.person_id
+                   WHERE a.space_id = ? AND p.status = 'active'""", (space_id,)
+            ).fetchall()
+            by_alias: dict[str, set[str]] = {}
+            for row in aliases:
+                by_alias.setdefault(unicodedata.normalize("NFKC", row["normalized_value"]).casefold(), set()).add(row["person_id"])
+
+            candidates: list[tuple[int, int, str]] = []
+            for alias, person_ids in by_alias.items():
+                if not alias or len(person_ids) != 1:
+                    continue  # An ambiguous alias is deliberately ignored.
+                escaped = re.escape(alias).replace(r"\ ", r"\s+")
+                latin = bool(re.search(r"[a-z]", alias))
+                boundary_left = r"(?<![a-z])" if latin else ""
+                boundary_right = r"(?![a-z])" if latin else ""
+                for match in re.finditer(boundary_left + escaped + boundary_right, folded):
+                    candidates.append((len(alias), match.start(), next(iter(person_ids))))
+            selected: list[tuple[int, str]] = []
+            occupied: list[tuple[int, int]] = []
+            for length, start, person_id in sorted(candidates, key=lambda item: (-item[0], item[1])):
+                end = start + length
+                if any(start < right and end > left for left, right in occupied):
+                    continue
+                occupied.append((start, end))
+                selected.append((start, person_id))
+            people: list[PersonView] = []
+            seen: set[str] = set()
+            rows_by_id = {row["id"]: row for row in aliases}
+            for _, person_id in sorted(selected):
+                if person_id not in seen:
+                    people.append(self._person_view(connection, rows_by_id[person_id]))
+                    seen.add(person_id)
+            return people
+
+    def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]:
+        query = _fts_query(text)
+        if not query:
+            return []
+        with self._connect() as connection:
+            rows = connection.execute(
+                """SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
+                   WHERE memory_fts MATCH ? AND m.space_id = ? AND m.status = 'active'
+                     AND m.about_user = 1 ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
+                (query, space_id, limit),
+            ).fetchall()
+            return [self._memory_view(connection, row, False) for row in rows]
 
     def _user_model_watermark(self, connection: sqlite3.Connection, space_id: str) -> str | None:
         row = connection.execute(

@@ -18,6 +18,8 @@ from .models import (
     QueryResponse,
     RetractRequest,
     SupersedeRequest,
+    TurnRequest,
+    TurnResponse,
 )
 from .store import AmbiguousPersonError, SqliteWorldStore
 from .world import SocialMemoryWorld
@@ -88,6 +90,15 @@ def create_app(
     )
     async def ingest(space_id: str, request: IngestRequest) -> IngestResponse:
         return await world.ingest(space_id, request)
+
+    @app.post(
+        "/v1/spaces/{space_id}/turns",
+        response_model=TurnResponse,
+        status_code=status.HTTP_202_ACCEPTED,
+        dependencies=protected,
+    )
+    async def turn(space_id: str, request: TurnRequest) -> TurnResponse:
+        return await world.turn(space_id, request)
 
     @app.post(
         "/v1/spaces/{space_id}/query",

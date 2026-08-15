@@ -15,6 +15,9 @@ from .models import (
     QueryRequest,
     QueryResponse,
     SupersedeRequest,
+    TurnRequest,
+    TurnResponse,
+    ContextBundle,
 )
 from .queue import SequentialLLMQueue
 from .store import SqliteWorldStore
@@ -120,6 +123,43 @@ class SocialMemoryWorld:
         if space_id in self.store.pending_continuities(self.continuity_threshold):
             self._schedule_continuity_reason(space_id)
         return IngestResponse(message_ids=message_ids)
+
+    async def turn(self, space_id: str, request: TurnRequest) -> TurnResponse:
+        """Persist this turn first; all enrichment is best-effort and local."""
+        message_ids = self.store.record_messages(space_id, [request.message])
+        self._drain_extraction_batches(space_id)
+        if space_id in self.store.pending_continuities(self.continuity_threshold):
+            self._schedule_continuity_reason(space_id)
+        message_id = message_ids[0]
+        known_people = []
+        memory_recall = []
+        context_update: ContextBundle | None = None
+        context_status = "available"
+        try:
+            known_people = self.store.match_people_in_text(space_id, request.message.content)
+        except Exception:
+            context_status = "unavailable"
+            logger.exception("turn person matching failed for %s", space_id)
+        try:
+            memory_recall = self.store.recall_user_memories(
+                space_id, request.message.content, request.memory_limit
+            )
+        except Exception:
+            logger.exception("turn memory recall failed for %s", space_id)
+        try:
+            latest = self.store.context_bundle(space_id)
+            if latest.version != request.context_version:
+                context_update = latest
+        except Exception:
+            context_status = "unavailable"
+            logger.exception("turn context preparation failed for %s", space_id)
+        return TurnResponse(
+            message_id=message_id,
+            known_people=known_people,
+            memory_recall=memory_recall,
+            context_update=context_update,
+            context_status=context_status,
+        )
 
     def _schedule_continuity_reason(self, space_id: str) -> None:
         self._spawn(("continuity", space_id, space_id), self._reason_continuity(space_id))

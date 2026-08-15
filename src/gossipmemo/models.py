@@ -47,6 +47,30 @@ class IngestResponse(BaseModel):
     message_ids: list[str]
 
 
+class TurnRequest(BaseModel):
+    """One user turn, plus the SDK's cached context watermark."""
+
+    message: MessageInput
+    context_version: str | None = None
+    memory_limit: int = Field(default=5, ge=1, le=10)
+
+    @field_validator("message")
+    @classmethod
+    def require_user_message(cls, value: MessageInput) -> MessageInput:
+        if value.author != "user":
+            raise ValueError("turn message author must be user")
+        return value
+
+
+class TurnResponse(BaseModel):
+    status: Literal["accepted"] = "accepted"
+    message_id: str
+    known_people: list[PersonView] = Field(default_factory=list)
+    memory_recall: list[MemoryView] = Field(default_factory=list)
+    context_update: ContextBundle | None = None
+    context_status: Literal["available", "unavailable"] = "available"
+
+
 class ExtractedPerson(BaseModel):
     ref: str
     display_name: str
