@@ -38,6 +38,8 @@ def test_extraction_prompt_applies_batch_policy_and_dates():
     assert "never use an inferred basis for extraction" in " ".join(
         EXTRACTION_SYSTEM_PROMPT.split()
     )
+    assert "dominant language of current user evidence" in EXTRACTION_SYSTEM_PROMPT
+    assert "including new display names" in EXTRACTION_SYSTEM_PROMPT
 
 
 def test_extraction_prompt_separates_recent_context_from_new_evidence():
@@ -144,3 +146,8 @@ def test_all_prompt_contracts_keep_i18n_rule_compact():
     ):
         assert "language" in prompt and "best matches" in prompt
     assert "language of the question" in QUERY_SYNTHESIS_SYSTEM_PROMPT
+
+
+def test_query_synthesis_does_not_treat_unmerged_people_as_distinct_evidence():
+    assert "Separate Person records are not evidence" in QUERY_SYNTHESIS_SYSTEM_PROMPT
+    assert "identities may overlap" in QUERY_SYNTHESIS_SYSTEM_PROMPT

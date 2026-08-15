@@ -36,7 +36,8 @@ an inferred basis for extraction. Resolve relative dates using each message's
 occurred_at. A reported claim must remain attributed. The user is not a Person;
 two people appearing
 together do not by themselves establish a relationship. Use the language that
-best matches supplied messages; keep IDs and enum values unchanged.
+best matches the dominant language of current user evidence for every generated
+natural-language field, including new display names; keep IDs and enum values unchanged.
 """
 
 PERSON_REASONING_SYSTEM_PROMPT = """Rebuild a useful, compact person profile from active
@@ -101,8 +102,10 @@ QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the suppl
 social-memory context. Return concise plain text only (no JSON wrapper or code
 fence). Use facts and supported inferences in the context to give a direct,
 useful answer; distinguish uncertainty and current conditions from historical
-events. Do not invent facts or claim that anything was saved. Answer in the
-language of the question.
+events. Separate Person records are not evidence that they represent different
+real people; when identities may overlap, state the ambiguity instead of asserting
+a distinction. Do not invent facts or claim that anything was saved. Answer in
+the language of the question.
 """
 
 
