@@ -208,6 +208,56 @@ def test_owner_digest_retries_semantically_incomplete_source_ids() -> None:
     assert digest_calls[0]["messages"] == digest_calls[1]["messages"]
 
 
+def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        calls.append(payload)
+        combined = str(payload["messages"])
+        if "Compress evidence only" in combined:
+            ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
+            user_prompt = payload["messages"][-1]["content"]
+            if '"summary"' in user_prompt:
+                # A reduce response need not mechanically repeat every
+                # already-validated original ID; the server inherits them.
+                body = {"items": [{
+                    "summary": "reduced",
+                    "source_memory_ids": ids[:1],
+                }]}
+            else:
+                groups = [ids[index:index + 2] for index in range(0, len(ids), 2)]
+                body = {"items": [{
+                    "summary": "中" * 600,
+                    "source_memory_ids": group,
+                } for group in groups]}
+        elif "Return only the requested projection" in combined:
+            assert "m0" in combined and "m39" in combined
+            body = {"profile_card": {"summary": "ok"}}
+        else:
+            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(body)}}]},
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client,
+                context_budget=ContextBudget(6000, 400, 200),
+            )
+            result = await adapter.reason_person(
+                PersonView(id="p", display_name="Bob"),
+                [_memory(f"m{index}", "证据" * 300) for index in range(40)],
+            )
+            assert result.profile_card == {"summary": "ok"}
+
+    asyncio.run(run())
+    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
+    assert any('"summary"' in str(call) for call in digest_calls)
+
+
 def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None:
     calls: list[dict] = []
     budget = ContextBudget(6000, 400, 200)

@@ -495,7 +495,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
 
     async def _digest_owner_evidence(self, target: BaseModel, memories: Sequence[MemoryView], inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView], system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel]) -> list[OwnerEvidenceDigestView]:
         source: list[MemoryView | OwnerEvidenceDigestView] = list(memories)
-        original_ids = {memory.id for memory in source}
         previous_size: int | None = None
         for _ in range(3):
             chunks: list[list[MemoryView | OwnerEvidenceDigestView]] = []
@@ -520,9 +519,13 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     candidate_ids = set().union(
                         *(self._owner_evidence_source_ids(item) for item in candidate)
                     )
+                    source_id_limit = (
+                        32 if any(isinstance(item, MemoryView) for item in candidate)
+                        else 512
+                    )
                     candidate_fits = self.context_budget.report(
                         self.context_budget.estimate_request(self._digest_request(candidate))
-                    ).fits and len(candidate_ids) <= 64
+                    ).fits and len(candidate_ids) <= source_id_limit
                     if current and not candidate_fits:
                         chunks.append(current)
                         current = []
@@ -541,6 +544,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                 allowed = set().union(
                     *(self._owner_evidence_source_ids(item) for item in chunk)
                 )
+                recursive = all(
+                    isinstance(item, OwnerEvidenceDigestView) for item in chunk
+                )
                 semantic_attempt = 0
                 while True:
                     _, result = await self._structured_messages(
@@ -557,6 +563,19 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     covered = set().union(
                         *(set(item.source_memory_ids) for item in accepted), set()
                     )
+                    if recursive and accepted:
+                        # These inputs already passed strict raw-ID validation.
+                        # The server carries their provenance union through the
+                        # reduce layer instead of asking the model to retype a
+                        # large mechanical ID list on every recursive pass.
+                        accepted = [OwnerEvidenceDigestView(
+                            summary="\n".join(item.summary for item in accepted)[:600],
+                            source_memory_ids=sorted(allowed),
+                            basis="compressed",
+                            uncertainty="",
+                            semantic_subject="",
+                        )]
+                        break
                     if covered == allowed:
                         break
                     if semantic_attempt >= self.max_retries:
