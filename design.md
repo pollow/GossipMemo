@@ -42,7 +42,7 @@ query(request)    从人物和关系出发检索、扩展和综合
 apply(change)     纠正 Memory、合并 Person 或人工补充认识
 ```
 
-调用方不需要理解 extraction、resolve、reconcile、reasoning、projection refresh 或索引维护。这些都是 module implementation。
+调用方不需要理解 extraction、resolve、owner reasoning、coverage audit、goal planning、projection refresh 或索引维护。这些都是 module implementation。
 
 外部 LLM 是 module implementation 的依赖，放在内部 seam 后：
 
@@ -68,10 +68,12 @@ Message
 Message persisted
   ↓ extraction (Message → Memory; ingest returns queued)
 Memory
-  ↓ induction scan (startup and daily local midnight; stale projections)
-reasoning (one object per LLM computation)
-  ↓ projection refresh (reasoning + optimistic writeback)
-refreshed projections
+  ├─ owner reasoning: projection call → epistemic review call
+  │    └─ refreshed card + explicit inferred/Hypothesis actions
+  └─ coverage audit (bounded chunks) → CoverageMap → goal planning
+
+Context/turn reads deterministically select at most one open Hypothesis and one
+open/partial LearningGoal; the request path does not call an LLM.
 ```
 
 ### 3.1 Retain
@@ -117,22 +119,32 @@ Extraction 可以理解语言中的隐含语义，但不做跨历史的长期归
 - 不因同名或 embedding 相似自动合并 Person。
 - 只有明确关系表达或具有可说明依据的关系认识才创建 Relationship；共同出现不创建关系。
 
-### 3.4 Reconcile
+### 3.4 Persistence reconciliation
 
 职责：
 
-- 将 candidate 与现有 Memory 比较。
-- 执行 `create / merge / ignore / supersede / retract`。
+- 将 extraction candidate 与 caller-supplied comparison Memories 比较。
+- 执行 `create / ignore / explicit supersede`；不因为一次随机 LLM 输出遗漏旧结果而 retract。
 - 维护 source Message 和人物关联；人物在 Memory 中的语义角色保留在 content 和 evidence 中，不单独结构化。
 - 计算受影响的 Person 与 Relationship。
 - Memory 自身的 `updated_at` 作为对应 Person/Relationship projection 的 freshness 水位。
+
+第一版不设置独立的通用 Reconciliation LLM stage。Person/Relationship owner
+reasoner 的第二个 call 负责自己的 inferred Memory 与 Hypothesis lifecycle；所有
+retract/transition 都必须显式返回、带 reason，并且只能引用本次 context 中由
+server 提供的 ID。User owner 同样维护 Hypothesis，但不产生 inferred Memory。
 
 `ingest` 在 Message 幂等落库并安排 extraction 后返回 `202 queued`。Memory 在后台处理完成后可查询；调用方可以轮询 Message processing state，但不需要理解 queue implementation。
 
 ### 3.5 Induction and projection refresh
 
-Induction 扫描 stale projections，并为每个受影响对象调度一次 reasoning。一次
-projection refresh 包含该 reasoning、optimistic freshness check 和成功后的写回，详见下一节。
+Induction 扫描 stale projections，并为每个受影响 owner 调度 reasoning；CoverageMap
+使用独立 composite `(updated_at, id)` cursor 增量 catch up。一次 projection refresh
+包含 reasoning、optimistic freshness check 和成功后的写回，详见下一节。
+
+Coverage catch up 后，UserLearningGoalReasoner 才执行 goal planning。Coverage criteria
+只服务这一 reasoner；CoverageMap 不进入 extraction、Person/Relationship reasoning，
+也不直接进入 Hermes prompt。
 
 ### 3.6 Query synthesis
 
@@ -158,7 +170,9 @@ Query 默认不写入 Memory，也不修改 profile card。需要把 query 结�
 
 ```text
 extraction：Message → Memory
-reasoning：active Memories → inferred Memory + current projection result
+owner reasoning call 1：active evidence Memories → current projection
+owner reasoning call 2：same context + projection result → explicit epistemic actions
+coverage reasoning：changed evidence chunks → CoverageMap → LearningGoals
 ```
 
 ### 4.2 Reasoning 什么时候触发
@@ -181,18 +195,21 @@ Reasoning 在调用模型前记录相关 Memories 的最新 `updated_at`，模�
 
 对受影响的 Person：
 
-1. 读取该 Person 的 active Memories、当前 profile card 和最近变化。
-2. 判断是否出现可长期复用的新认识。
-3. 必要时创建或 supersede `basis: inferred` 的 Memory。
-4. 根据最新 active Memories 重建 profile card。
-5. 将 `profile_source_updated_at` 更新为当前相关 Memories 的最新 `updated_at`。
+1. 构建 evidence Memories、当前 card、active inferred Memories 和 open Hypotheses 的同一 context。
+2. call 1 仅重建 profile card。
+3. call 2 复用 call 1 的完整 transcript/prefix，显式 upsert/retract inferred Memory，或 upsert/transition Hypothesis。
+4. omission 是 no-op；只有 optimistic watermark 仍匹配时一起写回。
 
 对受影响的 Relationship：
 
-1. 读取 relationship-linked Memory、同时涉及双方的 Memory 和当前关系画像。
-2. 更新 facets、closeness、tone、status 和 summary。
-3. 必要时创建可独立引用的 inferred Memory。
+1. 使用相同的两阶段结构读取 relationship evidence、当前画像、inferred Memories 和 Hypotheses。
+2. call 1 更新 facets、closeness、tone、status 和 summary。
+3. call 2 显式维护可独立引用的 inferred Memory 与 Hypothesis。
 4. 更新 Relationship 的 projection freshness 水位。
+
+UserModel 使用相同 cached-prefix 两阶段结构，但第二阶段只维护 Hypothesis。稳定的
+user information 继续由 active `about_user` Memories 支撑 UserModel；不为 user 复制一套
+inferred Memory。
 
 ### 4.4 什么应该成为 inferred Memory
 
@@ -214,7 +231,7 @@ Alice 和 Bob 最近的主要摩擦来自临时需求变更。
 调整 profile card 的章节顺序和措辞。
 ```
 
-每条 inferred Memory 必须通过 `memory_derivations` 指向直接依据，不能只存在一个没有来源的模型判断。
+每条 inferred Memory 必须通过 `memory_derivations` 指向直接依据，不能只存在一个没有来源的模型判断。尚不稳定但值得讨论的 interpretation 应进入 Hypothesis，而不是降格成一个“低置信度 inferred Memory”。
 
 ### 4.5 Reported 信息如何参与 reasoning
 
@@ -231,7 +248,8 @@ Reported Memory 可以参与 reasoning，但不能在归纳时丢失其性质：
 
 - inferred Memory 必须有非 inferred 的直接依据，或明确引用人工 Memory。
 - 一次 reasoning run 新建的 inferred Memory 不在同一次 run 中继续产生更高层 inference。
-- Profile card 可以读取 inferred Memory，但不能把 profile card 本身当作新 evidence。
+- Profile card、existing inferred Memory 和 Hypothesis 可以作为 comparison context，但不能当作新 evidence。
+- LLM 随机 omission 不触发 soft-retract；retraction 与 Hypothesis transition 必须显式返回 context ID 和 reason。
 - Query synthesis 不自动回写。
 
 ## 5. HTTP endpoints
@@ -309,7 +327,24 @@ POST /v1/spaces/{space_id}/query
 - 可选的 Message evidence；
 - stale projection 标记。
 
-### 5.3 Dossier reads
+### 5.3 Context and turn facade
+
+```http
+GET  /v1/spaces/{space_id}/context
+POST /v1/spaces/{space_id}/turns
+```
+
+Context 返回带稳定 version 的 compact UserModel、rolling continuity、continuity-related
+Person cards，以及最多一条 user-owned open Hypothesis 和一条 open/partial LearningGoal。
+Turn 先持久化 user Message，再用 deterministic alias matching、SQLite FTS 和本轮文字选择
+相关 context；Person/Relationship guidance 只有 owner 被本轮激活时才返回。两条路径都不调用
+LLM。Hermes 必须将两类 guidance 分别标成 tentative understanding 和 optional learning
+invitation，不能伪装成 Memory/fact。
+
+`conversation_key` 只保留为 Message source coordinate。Context version、CoverageMap 和长期
+Memory scope 都是 Space 级，不要求 Hermes session key 与历史 import key 同步。
+
+### 5.4 Dossier reads
 
 ```http
 GET /v1/spaces/{space_id}/people/{person_id}
@@ -318,7 +353,7 @@ GET /v1/spaces/{space_id}/relationships/{relationship_id}
 
 返回当前 projection、相关 active Memories、关系邻接和 evidence 摘要，不执行开放式 query synthesis。
 
-### 5.4 Corrections
+### 5.5 Corrections
 
 ```http
 POST /v1/spaces/{space_id}/memories/{memory_id}/supersede
@@ -332,7 +367,7 @@ POST /v1/spaces/{space_id}/memories
 
 这些操作完成后只会使相关实体变为 stale；下一次每日 induction 会安排其 reasoning。
 
-### 5.5 后续管理接口
+### 5.6 后续管理接口
 
 ```http
 POST /v1/spaces/{space_id}/reason
@@ -378,6 +413,14 @@ POST /v1/spaces/{space_id}/reason
 - 允许多重、方向性 relationship facets。
 - 关系画像包括 summary、closeness、tone 和当前状态。
 
+### Epistemic guidance 与 user learning
+
+- Person/Relationship reasoner 显式维护 inferred Memory 与 Hypothesis；User reasoner 只维护 Hypothesis。
+- 每个 Space 从 20 个稳定 memoir/persona criteria 初始化空白 CoverageMap，并按 changed Memory chunks 增量更新。
+- CoverageMap catch up 后单独规划 LearningGoals；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
+- 私密、未知或 deferred 的区域不是自动提问目标；goal 是可拒绝的邀请，禁止直接病理诊断。
+- Hermes 每轮最多消费一条 Hypothesis 和一条 LearningGoal，不在请求路径增加 LLM latency。
+
 ### Query
 
 - 单人 dossier。
@@ -392,6 +435,8 @@ POST /v1/spaces/{space_id}/reason
 - 进程崩溃可能丢失内存 queue，但启动时会重新安排 `pending/failed` Message 和 stale projection。
 - 每个 persistence 方法只进行短原子写入；调用方看不到 transaction interface，LLM 调用期间不持有 transaction。
 - Reasoning 失败不回滚 Message 或 Memory；projection 保持 stale 并可重试。
+- owner reasoning 的第二个 call 失败时，projection 和 epistemic actions 都不写入；两个阶段作为一次 optimistic refresh 提交。
+- CoverageMap 用 composite cursor 防止相同 timestamp 的 Memory 被跳过；retract/supersede 会显式进入 audit 并移除失效 evidence。
 - Query 必须识别 stale projection，并补充读取比 projection 更新的 active Memories。
 - 重复 ingest 由 source identity 或 idempotency key 去重。
 - Memory retract 和 supersede 由 SQLite Adapter 保证单次 apply 的原子性，但领域流程不依赖跨阶段 transaction。
@@ -404,7 +449,7 @@ POST /v1/spaces/{space_id}/reason
 - 任意深度 provenance 或 theory-of-mind graph。
 - 图数据库作为 canonical store。
 - 数值化人物信誉、人格评分或关系分数。
-- 自动提醒、follow-up 和任务管理。
+- 自动提醒、任务管理或未经 chat agent 选择就主动追问 LearningGoal。
 - query 结果默认回写长期记忆。
 - 自动 Person merge、Memory 内容合并和定时 expire job。
 - 手工触发 reasoning 的管理 endpoint。

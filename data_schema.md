@@ -13,6 +13,9 @@ Space
 ├── Person
 ├── Relationship (Person ↔ Person)
 ├── UserModel (one compact projection per Space)
+├── CoverageMap (one incremental projection per Space)
+├── Hypothesis (owned by user / Person / Relationship)
+├── LearningGoal (user-owned; may focus Person / Relationship)
 ├── Message
 └── Memory
     ├── Person links
@@ -20,13 +23,15 @@ Space
     └── Message evidence
 ```
 
-第一版的持久领域实体只有：
+第一版的持久领域记录包括：
 
 ```text
 Person
 Relationship
 Message
 Memory
+Hypothesis
+LearningGoal
 ```
 
 `Space` 是数据隔离和观察视角，不是社交实体。当前 User 不是 Person，
@@ -40,6 +45,8 @@ Memory
 - Group 不作为第一版实体；多人查询通过一组 Person ID 表达。
 - Message author、Memory subject、asserter 和 reporter 不得混为一个字段。
 - Person 和 Relationship 的画像是可重建 projection，Memory 和 Message 才是其依据。
+- Hypothesis 是待确认 interpretation，不是 Memory/evidence；LearningGoal 是可选了解方向，不是用户事实。
+- CoverageMap 是可重建的 user-learning projection，只由 UserLearningGoalReasoner 消费。
 - 人物合并必须显式发生，不能仅凭同名或语义相似自动合并。
 
 ## 2. spaces
@@ -374,7 +381,54 @@ derivation_role: support
 
 `derivation_role` 第一版使用 `support \| contradict`。这不是通用 provenance graph，只保存一层直接依据，防止 reasoning 结论失去可解释性。
 
-## 8. Projection 与 canonical data
+## 8. Epistemic state 与 user learning
+
+### hypotheses
+
+Hypothesis 保存“有 evidence、值得讨论、但尚不稳定”的 interpretation。它独立于
+inferred Memory，不能被 reasoning 当作 evidence。
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` / `space_id` | 稳定 ID 与所属 Space |
+| `owner_kind` | `user \| person \| relationship` |
+| `owner_id` | Person/Relationship owner ID；user owner 为 null |
+| `content` / `kind` | tentative interpretation 及语义类型 |
+| `confidence` | `low \| medium \| high`，只表达当前校准，不等于事实概率 |
+| `status` | `open \| promoted \| rejected \| superseded \| retired` |
+| `promoted_memory_id` | promote 时必须指向同 owner 的 active Memory |
+
+`hypothesis_evidence` 保存 support/counter Memory IDs。Upsert/transition 只能引用
+reasoner 本次 context 中 server 提供的 owner、Memory 和 Hypothesis IDs；遗漏是 no-op。
+
+### coverage_maps
+
+每个 Space 初始化一份包含 20 个稳定 parent criteria 的 CoverageMap。Criterion 只保存
+`unknown / fragmentary / grounded / rich`、简短 `known_state` 和 active evidence Memory IDs，
+不保存虚假的百分比。Map 另含有界 inventories 和 `edge / blind_spot / conflict`
+boundaries；boundary ID 由 store 分配。
+
+增量 cursor 使用 `(source_watermark, source_cursor_id)`，按所有 non-inferred Memory 的
+`(updated_at, id)` 前进，因此同 timestamp 以及 retract/supersede 都不会漏审。Hypothesis
+可以产生 boundary/conflict，但不能提高 criterion level。
+
+### learning_goals
+
+LearningGoal 属于 Space/current user，即使 `focus_kind` 指向 Person 或 Relationship，也不是
+第三方 dossier 任务。
+
+| 字段 | 含义 |
+| --- | --- |
+| `prompt` | chat agent 可选择如何转化为对话的了解方向 |
+| `rationale` | 为什么该方向可能有价值 |
+| `criteria_refs` / `boundary_ids` | 必须引用当前 CoverageMap 的 criteria 与 open boundaries |
+| `focus_kind` / `focus_id` | `user`，或同 Space 的 Person/Relationship |
+| `status` | `open \| partial \| answered \| deferred \| retired` |
+
+Goal planning 使用 CoverageMap revision 做 optimistic compare-and-swap。Unknown/private 不自动
+产生 Goal；deferred 不进入 chat guidance。创建 Goal 本身不提高 coverage。
+
+## 9. Projection 与 canonical data
 
 数据分为两类：
 
@@ -384,17 +438,21 @@ derivation_role: support
 - Relationship 身份；人工确认的关系认识先保存为 manual Memory
 - Message
 - Memory 及其状态、时间和关联
+- Hypothesis 及其显式 lifecycle/evidence links
+- LearningGoal 及其显式 lifecycle
 
 ### Regenerable projection
 
 - Person.profile_card
 - Relationship.facets、summary、closeness、tone 和 status projection
 - `user_models` 中每个 Space 一条 `profile_card` projection；仅从 active `about_user` Memory 低频重建，保持 compact、有界且可删除重建
+- `coverage_maps` 中每个 Space 一条、从 non-inferred Memory 增量重建的 coverage projection
+- rolling continuity；每次只读取有界 Message window 并推进 through-message watermark
 - 全文、embedding 或图索引
 
 Projection 可以删除并从 active Memory 重建。人工编辑 projection 时，系统应先创建一条 `created_by: human` 的 Memory，再重新生成 projection，避免人工判断只存在于可重建字段中。
 
-## 9. 第一版数据库映射
+## 10. 第一版数据库映射
 
 第一版 canonical store 使用 SQLite：
 
@@ -406,7 +464,7 @@ Projection 可以删除并从 active Memory 重建。人工编辑 projection 时
 
 `WorldStore` 是 implementation 内部 seam。未来 PostgreSQL Adapter 可以使用不同 SQL、JSONB 或索引实现，但必须满足相同的幂等、projection freshness check 和 provenance 行为；具体 freshness watermark 的持久化形式仍待决定。
 
-## 10. 示例：转述与直接导入归一
+## 11. 示例：转述与直接导入归一
 
 ### 通过 Agent 转述
 
@@ -442,7 +500,7 @@ memory.people:
 
 两种输入得到相同的 Memory；转述来源等语义保留在自然语言 `content` 和 Message evidence 中。Conversation 不是长期记忆边界。
 
-## 11. 第一版不包含
+## 12. 第一版不包含
 
 - Session 或 Episode 领域实体
 - Group、群体画像或群体规范实体
