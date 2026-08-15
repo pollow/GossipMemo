@@ -33,6 +33,9 @@ class Settings:
     port: int = 8765
     api_key: str = ""
     llm_timeout_seconds: float = 120.0
+    llm_max_retries: int = 5
+    llm_retry_base_seconds: float = 1.0
+    llm_retry_max_seconds: float = 30.0
     extraction_batch_size: int = 6
     extraction_batch_timeout_seconds: float = 1800.0
     extraction_policy: Literal[
@@ -59,6 +62,16 @@ class Settings:
             raise ConfigurationError("user_name must not be empty")
         if self.llm_timeout_seconds <= 0:
             raise ConfigurationError("llm_timeout_seconds must be greater than zero")
+        if self.llm_max_retries < 0:
+            raise ConfigurationError("llm_max_retries must not be negative")
+        if self.llm_retry_base_seconds <= 0:
+            raise ConfigurationError(
+                "llm_retry_base_seconds must be greater than zero"
+            )
+        if self.llm_retry_max_seconds < self.llm_retry_base_seconds:
+            raise ConfigurationError(
+                "llm_retry_max_seconds must be at least llm_retry_base_seconds"
+            )
         if self.extraction_batch_size < 1:
             raise ConfigurationError("extraction_batch_size must be greater than zero")
         if self.extraction_batch_timeout_seconds <= 0:
@@ -103,6 +116,13 @@ class Settings:
             api_key=_env("GOSSIPMEMO_API_KEY"),
             llm_timeout_seconds=float(
                 _env("GOSSIPMEMO_LLM_TIMEOUT_SECONDS", "120")
+            ),
+            llm_max_retries=int(_env("GOSSIPMEMO_LLM_MAX_RETRIES", "5")),
+            llm_retry_base_seconds=float(
+                _env("GOSSIPMEMO_LLM_RETRY_BASE_SECONDS", "1")
+            ),
+            llm_retry_max_seconds=float(
+                _env("GOSSIPMEMO_LLM_RETRY_MAX_SECONDS", "30")
             ),
             extraction_batch_size=int(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_SIZE", "6")

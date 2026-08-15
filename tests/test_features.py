@@ -17,6 +17,7 @@ from gossipmemo.models import (
     MessageInput,
     ModelMessage,
     PersonReasoningResult,
+    QueryContext,
     QueryRequest,
     ExtractedRelationship,
     RelationshipReasoningResult,
@@ -24,7 +25,7 @@ from gossipmemo.models import (
     SupersedeRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import OpenAICompatibleAdapter
+from gossipmemo.llm import LLMRequestError, OpenAICompatibleAdapter
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
@@ -483,6 +484,123 @@ def test_openai_compatible_adapter_validates_structured_output():
             assert result.memories[0].basis == "stated"
 
     asyncio.run(scenario())
+
+
+def test_openai_compatible_adapter_retries_transient_statuses(monkeypatch):
+    statuses = iter([429, 503, 200])
+    requests = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        status = next(statuses)
+        if status == 200:
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": "Recovered"}}]},
+            )
+        return httpx.Response(
+            status,
+            headers={"Retry-After": "7"} if status == 429 else {},
+            json={"error": {"message": "temporarily overloaded"}},
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("gossipmemo.llm.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "gossipmemo.llm.random.uniform", lambda _lower, upper: upper
+    )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://llm.test/v1",
+                "key",
+                "test-model",
+                client=client,
+                max_retries=2,
+                retry_base_seconds=2,
+                retry_max_seconds=10,
+            )
+            assert await adapter.synthesize("Question", QueryContext()) == "Recovered"
+
+    asyncio.run(scenario())
+    assert requests == 3
+    assert delays == [7, 4]
+
+
+def test_openai_compatible_adapter_does_not_retry_permanent_status(monkeypatch):
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    async def unexpected_sleep(delay: float) -> None:
+        raise AssertionError(f"unexpected retry delay: {delay}")
+
+    monkeypatch.setattr("gossipmemo.llm.asyncio.sleep", unexpected_sleep)
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://llm.test/v1", "key", "test-model", client=client
+            )
+            with pytest.raises(LLMRequestError, match="HTTP 401: bad key"):
+                await adapter.synthesize("Question", QueryContext())
+
+    asyncio.run(scenario())
+    assert requests == 1
+
+
+def test_openai_compatible_adapter_retries_transport_errors(monkeypatch):
+    requests = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        if requests == 1:
+            raise httpx.ConnectError("model is restarting", request=request)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "Recovered"}}]},
+        )
+
+    async def fake_sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr("gossipmemo.llm.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "gossipmemo.llm.random.uniform", lambda _lower, upper: upper
+    )
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler)
+        ) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://llm.test/v1",
+                "key",
+                "test-model",
+                client=client,
+                max_retries=1,
+                retry_base_seconds=3,
+                retry_max_seconds=10,
+            )
+            assert await adapter.synthesize("Question", QueryContext()) == "Recovered"
+
+    asyncio.run(scenario())
+    assert requests == 2
+    assert delays == [3]
 
 
 def test_http_auth_and_correction_endpoints(tmp_path):

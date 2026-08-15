@@ -8,8 +8,10 @@ callers never need to parse a chat-completions response themselves.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import random
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
@@ -176,6 +178,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         headers: Mapping[str, str] | None = None,
         extraction_policy: str = "balanced",
         user_name: str = "CurrentUser",
+        max_retries: int = 5,
+        retry_base_seconds: float = 1.0,
+        retry_max_seconds: float = 30.0,
     ) -> None:
         normalized_base = base_url.strip().rstrip("/")
         if not normalized_base:
@@ -194,6 +199,14 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             )
         if not user_name.strip():
             raise ValueError("LLM user_name must not be empty")
+        if max_retries < 0:
+            raise ValueError("LLM max_retries must not be negative")
+        if retry_base_seconds <= 0:
+            raise ValueError("LLM retry_base_seconds must be greater than zero")
+        if retry_max_seconds < retry_base_seconds:
+            raise ValueError(
+                "LLM retry_max_seconds must be at least retry_base_seconds"
+            )
 
         self.base_url = normalized_base
         self.api_key = api_key.strip()
@@ -203,6 +216,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.max_tokens = max_tokens
         self.extraction_policy = extraction_policy
         self.user_name = user_name.strip()
+        self.max_retries = max_retries
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_max_seconds = retry_max_seconds
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -218,6 +234,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             timeout=settings.llm_timeout_seconds,
             extraction_policy=settings.extraction_policy,
             user_name=settings.user_name,
+            max_retries=settings.llm_max_retries,
+            retry_base_seconds=settings.llm_retry_base_seconds,
+            retry_max_seconds=settings.llm_retry_max_seconds,
         )
 
     @property
@@ -337,24 +356,78 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         headers = {"Accept": "application/json", **self._headers}
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
-        try:
+        attempt = 0
+        while True:
             started = time.perf_counter()
-            response = await client.post(
-                self.endpoint,
-                headers=headers,
-                json=request.model_dump(exclude_none=True),
+            try:
+                response = await client.post(
+                    self.endpoint,
+                    headers=headers,
+                    json=request.model_dump(exclude_none=True),
+                )
+            except httpx.TransportError as error:
+                if attempt >= self.max_retries:
+                    logger.exception(
+                        "llm_call_transport_failed",
+                        extra={
+                            "model": self.model,
+                            "attempt": attempt + 1,
+                            "duration_ms": round(
+                                (time.perf_counter() - started) * 1000, 2
+                            ),
+                        },
+                    )
+                    raise LLMRequestError(f"LLM request failed: {error}") from error
+                delay = self._retry_delay(attempt)
+                logger.warning(
+                    "llm_call_retry_scheduled",
+                    extra={
+                        "model": self.model,
+                        "attempt": attempt + 1,
+                        "reason": type(error).__name__,
+                        "delay_seconds": round(delay, 3),
+                    },
+                )
+                await asyncio.sleep(delay)
+                attempt += 1
+                continue
+
+            logger.info(
+                "llm_call_completed",
+                extra={
+                    "model": self.model,
+                    "status": response.status_code,
+                    "attempt": attempt + 1,
+                    "duration_ms": round(
+                        (time.perf_counter() - started) * 1000, 2
+                    ),
+                    "structured": structured,
+                },
             )
-        except httpx.HTTPError as error:
-            logger.exception("llm_call_transport_failed", extra={"model": self.model, "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
-            raise LLMRequestError(f"LLM request failed: {error}") from error
 
-        logger.info("llm_call_completed", extra={"model": self.model, "status": response.status_code, "duration_ms": round((time.perf_counter() - started) * 1000, 2), "structured": structured})
-
-        if response.is_error:
+            if not response.is_error:
+                break
+            if _retryable_status(response.status_code) and attempt < self.max_retries:
+                delay = self._retry_delay(
+                    attempt, _retry_after_seconds(response.headers.get("Retry-After"))
+                )
+                logger.warning(
+                    "llm_call_retry_scheduled",
+                    extra={
+                        "model": self.model,
+                        "attempt": attempt + 1,
+                        "status": response.status_code,
+                        "delay_seconds": round(delay, 3),
+                    },
+                )
+                await asyncio.sleep(delay)
+                attempt += 1
+                continue
             detail = _response_detail(response)
             raise LLMRequestError(
                 f"LLM request failed with HTTP {response.status_code}: {detail}"
             )
+
         try:
             payload = response.json()
             completion = ChatCompletionResponse.model_validate(payload)
@@ -362,6 +435,16 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             raise LLMProtocolError("LLM returned an invalid chat-completion response") from error
         message = completion.choices[0].message
         return _message_content(message.content)
+
+    def _retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
+        exponential = min(
+            self.retry_max_seconds,
+            self.retry_base_seconds * (2**attempt),
+        )
+        jittered = random.uniform(exponential / 2, exponential)
+        if retry_after is None:
+            return jittered
+        return max(jittered, min(retry_after, self.retry_max_seconds))
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -454,6 +537,20 @@ def _response_detail(response: httpx.Response) -> str:
         else:
             detail = json.dumps(payload, ensure_ascii=False)
     return str(detail).strip()[:1000] or "no response body"
+
+
+def _retryable_status(status_code: int) -> bool:
+    return status_code in {408, 429} or 500 <= status_code <= 599
+
+
+def _retry_after_seconds(value: str | None) -> float | None:
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except ValueError:
+        return None
+    return max(0.0, seconds)
 
 
 def create_llm(settings: Settings) -> LlmModel:

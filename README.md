@@ -69,6 +69,12 @@ when its oldest message has waited 30 minutes. These values can be changed with
 `GOSSIPMEMO_EXTRACTION_POLICY` (`conservative`, `balanced`, or `comprehensive`)
 to every extraction batch; the default is `balanced`.
 
+Transient LLM failures (`408`, `429`, `5xx`, and transport errors) are retried
+with jittered exponential backoff. Configure the retry count, initial delay,
+and delay cap with `GOSSIPMEMO_LLM_MAX_RETRIES`,
+`GOSSIPMEMO_LLM_RETRY_BASE_SECONDS`, and
+`GOSSIPMEMO_LLM_RETRY_MAX_SECONDS`; defaults are 5, 1 second, and 30 seconds.
+
 Profile induction runs once per day at local midnight. Startup performs one
 stale-profile catch-up before waiting for the next induction run.
 
