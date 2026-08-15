@@ -9,5 +9,6 @@ dist/
 build/
 *.egg-info/
 .env
+gossipmemo_test_data.txt
 data/*.db
 data/*.db-*
