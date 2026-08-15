@@ -12,6 +12,10 @@ def utc_now() -> datetime:
 
 MemoryBasis = Literal["stated", "observed", "reported", "inferred", "manual"]
 MemoryKind = Literal["fact", "event", "preference", "plan", "situation", "impression"]
+HypothesisOwnerKind = Literal["user", "person", "relationship"]
+HypothesisStatus = Literal["open", "promoted", "rejected", "superseded", "retired"]
+HypothesisConfidence = Literal["low", "medium", "high"]
+HypothesisEvidenceRole = Literal["support", "counter"]
 
 
 class SourceRef(BaseModel):
@@ -115,9 +119,75 @@ class InferredMemory(BaseModel):
     source_memory_ids: list[str] = Field(min_length=1)
 
 
+class InferredMemoryRetraction(BaseModel):
+    """An explicit request to retract one target-owned inferred Memory."""
+
+    memory_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class InferredMemoryActions(BaseModel):
+    """Lifecycle mutations emitted for inferred Memories.
+
+    Omitting an item is deliberately not a retraction.  A caller must provide
+    both the inferred Memory IDs it showed to the reasoner and an explicit,
+    reasoned retraction action before an existing inference can be retracted.
+    """
+
+    upserts: list[InferredMemory] = Field(default_factory=list)
+    retractions: list[InferredMemoryRetraction] = Field(default_factory=list)
+
+
+class HypothesisEvidence(BaseModel):
+    memory_id: str = Field(min_length=1)
+    role: HypothesisEvidenceRole = "support"
+
+
+class HypothesisUpsert(BaseModel):
+    """A tentative claim independent of any inferred Memory."""
+
+    hypothesis_id: str | None = None
+    content: str = Field(min_length=1)
+    kind: MemoryKind = "impression"
+    confidence: HypothesisConfidence = "low"
+    evidence: list[HypothesisEvidence] = Field(min_length=1)
+
+
+class HypothesisTransition(BaseModel):
+    hypothesis_id: str = Field(min_length=1)
+    status: Literal["promoted", "rejected", "superseded", "retired"]
+    reason: str = Field(min_length=1)
+    promoted_memory_id: str | None = None
+
+
+class HypothesisActions(BaseModel):
+    """Additive hypothesis upserts plus explicitly scoped transitions."""
+
+    upserts: list[HypothesisUpsert] = Field(default_factory=list)
+    transitions: list[HypothesisTransition] = Field(default_factory=list)
+
+
+class HypothesisView(BaseModel):
+    """Durable tentative claim and its non-inferred evidence."""
+
+    id: str
+    space_id: str
+    owner_kind: HypothesisOwnerKind
+    owner_id: str | None = None
+    content: str
+    kind: MemoryKind
+    confidence: HypothesisConfidence
+    status: HypothesisStatus
+    promoted_memory_id: str | None = None
+    evidence: list[HypothesisEvidence] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
 class PersonReasoningResult(BaseModel):
     profile_card: dict[str, Any] = Field(default_factory=dict)
     inferred_memories: list[InferredMemory] = Field(default_factory=list)
+    inferred_memory_actions: InferredMemoryActions | None = None
 
 
 class UserModelReasoningResult(BaseModel):
@@ -145,6 +215,7 @@ class RelationshipReasoningResult(BaseModel):
     status: str = "unknown"
     summary: str = ""
     inferred_memories: list[InferredMemory] = Field(default_factory=list)
+    inferred_memory_actions: InferredMemoryActions | None = None
 
 
 class QueryRequest(BaseModel):

@@ -11,6 +11,12 @@ from gossipmemo.models import (
     ExtractionResult,
     ExtractedPerson,
     InferredMemory,
+    InferredMemoryActions,
+    InferredMemoryRetraction,
+    HypothesisActions,
+    HypothesisEvidence,
+    HypothesisTransition,
+    HypothesisUpsert,
     ManualMemoryRequest,
     ExtractedMemory,
     MessageInput,
@@ -1013,7 +1019,8 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
         "AND source_memory_id = ?",
         (first, supporting_source),
     )
-    # A fresh source permits a rebuild, but an inferred source cannot be reused.
+    # An inferred source cannot be reused, but its omission is deliberately a
+    # no-op: existing hypotheses remain active until explicitly retracted.
     new_source = store.add_manual_memory(
         "personal", ManualMemoryRequest(content="Bob also follows up on decisions.", people=["Bob"])
     )
@@ -1024,8 +1031,14 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
             InferredMemory(content="Bob reliably follows up on plans.", source_memory_ids=[first])
         ]),
     )
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[0]["status"] == "active"
+    store.apply_inferred_memory_actions(
+        "personal", "person", bob.id, {new_source}, {first},
+        InferredMemoryActions(
+            retractions=[InferredMemoryRetraction(memory_id=first, reason="support was reconsidered")],
+        ),
+    )
     assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[0]["status"] == "retracted"
-    assert _rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'") == []
     # A changed output is a new active record with derivations to current source.
     latest_source = store.add_manual_memory(
         "personal", ManualMemoryRequest(content="Bob follows up on outcomes too.", people=["Bob"])
@@ -1039,6 +1052,120 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
     )
     active = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")
     assert len(active) == 1 and active[0]["id"] != first
+
+
+def test_inferred_memory_is_not_a_hypothesis(store):
+    source_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+    )
+    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    _, _, watermark = store.person_context("personal", bob.id)
+    assert store.apply_person_reasoning(
+        "personal", bob.id, watermark,
+        PersonReasoningResult(inferred_memories=[InferredMemory(
+            content="Bob is organized.", source_memory_ids=[source_id]
+        )]),
+    )
+    inferred_id = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    assert _rows(store, "SELECT id FROM hypotheses") == []
+    # Not present in the supplied context: retraction is ignored.
+    store.apply_inferred_memory_actions(
+        "personal", "person", bob.id, {source_id}, set(),
+        InferredMemoryActions(retractions=[InferredMemoryRetraction(
+            memory_id=inferred_id, reason="not enough evidence"
+        )]),
+    )
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (inferred_id,))[0]["status"] == "active"
+
+
+def test_hypothesis_actions_require_active_context_evidence_and_scoped_transition(store):
+    source_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+    )
+    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    store.apply_inferred_memory_actions(
+        "personal", "person", bob.id, {source_id}, set(),
+        InferredMemoryActions(upserts=[InferredMemory(
+            content="Bob is organized.", source_memory_ids=[source_id]
+        )]),
+    )
+    inferred_id = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {inferred_id}, set(),
+        HypothesisActions(upserts=[HypothesisUpsert(
+            content="This must not persist.",
+            evidence=[HypothesisEvidence(memory_id=inferred_id)],
+        )]),
+    )
+    assert _rows(store, "SELECT id FROM hypotheses") == []
+    actions = HypothesisActions(upserts=[HypothesisUpsert(
+        content="Bob may be preparing for a role change.",
+        confidence="medium",
+        evidence=[HypothesisEvidence(memory_id=source_id, role="support")],
+    )])
+    store.apply_hypothesis_actions("personal", "person", bob.id, {source_id}, set(), actions)
+    hypothesis = _rows(store, "SELECT * FROM hypotheses")[0]
+    assert hypothesis["status"] == "open"
+    assert hypothesis["owner_kind"] == "person" and hypothesis["owner_id"] == bob.id
+    assert _rows(
+        store, "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (hypothesis["id"],)
+    )[0]["role"] == "support"
+    # A transition omitted from its supplied hypothesis context is a no-op.
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, set(),
+        HypothesisActions(transitions=[HypothesisTransition(
+            hypothesis_id=hypothesis["id"], status="rejected", reason="insufficient evidence"
+        )]),
+    )
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["status"] == "open"
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, {hypothesis["id"]},
+        HypothesisActions(
+            transitions=[HypothesisTransition(
+                hypothesis_id=hypothesis["id"], status="rejected", reason="insufficient evidence"
+            )],
+        ),
+    )
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["status"] == "rejected"
+    # Closed hypotheses cannot be upserted or transitioned again, even when
+    # the caller supplies their ID in context.
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, {hypothesis["id"]},
+        HypothesisActions(upserts=[HypothesisUpsert(
+            hypothesis_id=hypothesis["id"], content="Changed claim", confidence="high",
+            evidence=[HypothesisEvidence(memory_id=source_id)],
+        )]),
+    )
+    assert _rows(store, "SELECT content FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["content"] != "Changed claim"
+
+
+def test_hypothesis_promotion_requires_active_owned_memory(store):
+    source_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+    )
+    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, set(),
+        HypothesisActions(upserts=[HypothesisUpsert(
+            content="Bob may be changing roles.", evidence=[HypothesisEvidence(memory_id=source_id)]
+        )]),
+    )
+    hypothesis_id = _rows(store, "SELECT id FROM hypotheses")[0]["id"]
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, {hypothesis_id},
+        HypothesisActions(transitions=[HypothesisTransition(
+            hypothesis_id=hypothesis_id, status="promoted", reason="confirmed"
+        )]),
+    )
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]["status"] == "open"
+    store.apply_hypothesis_actions(
+        "personal", "person", bob.id, {source_id}, {hypothesis_id},
+        HypothesisActions(transitions=[HypothesisTransition(
+            hypothesis_id=hypothesis_id, status="promoted", reason="confirmed", promoted_memory_id=source_id
+        )]),
+    )
+    promoted = _rows(store, "SELECT status, promoted_memory_id FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]
+    assert promoted["status"] == "promoted" and promoted["promoted_memory_id"] == source_id
 
 
 def test_inferred_outputs_are_scoped_to_each_person_target(store):

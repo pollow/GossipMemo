@@ -15,6 +15,8 @@ from typing import Any, Iterator, Protocol
 
 from .models import (
     ExtractionResult,
+    HypothesisActions,
+    InferredMemoryActions,
     ManualMemoryRequest,
     MemoryView,
     MessageInput,
@@ -151,6 +153,18 @@ class WorldStore(Protocol):
         self, space_id: str, expected_watermark: str | None,
         result: UserModelReasoningResult,
     ) -> bool: ...
+
+    def apply_inferred_memory_actions(
+        self, space_id: str, owner_kind: str, owner_id: str | None,
+        source_memory_ids: set[str], context_inferred_memory_ids: set[str],
+        actions: InferredMemoryActions,
+    ) -> None: ...
+
+    def apply_hypothesis_actions(
+        self, space_id: str, owner_kind: str, owner_id: str | None,
+        source_memory_ids: set[str], context_hypothesis_ids: set[str],
+        actions: HypothesisActions,
+    ) -> None: ...
 
     def continuity_context(self, space_id: str) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
 
@@ -1183,17 +1197,25 @@ class SqliteWorldStore:
         person_id: str | None = None,
         relationship_id: str | None = None,
         source_ids: set[str] | None = None,
+        owner_kind: str | None = None,
     ) -> None:
+        """Add or deduplicate inferences; lifecycle retraction is explicit elsewhere."""
+        owner_kind = owner_kind or ("person" if person_id else "relationship")
+        owner_id = person_id or relationship_id
         if person_id:
             target_join = "JOIN memory_people mt ON mt.memory_id = m.id AND mt.person_id = ?"
             target_params: list[Any] = [person_id]
-        else:
+        elif relationship_id:
             target_join = "JOIN memory_relationships mt ON mt.memory_id = m.id AND mt.relationship_id = ?"
             target_params = [relationship_id]
+        else:
+            target_join = ""
+            target_params = []
+        target_filter = "AND m.about_user = 1" if owner_kind == "user" else ""
         existing_rows = connection.execute(
             f"""SELECT m.id, m.content, m.kind FROM memories m {target_join}
                 WHERE m.space_id = ? AND m.status = 'active'
-                  AND m.basis = 'inferred' AND m.created_by = 'reasoner'""",
+                  AND m.basis = 'inferred' AND m.created_by = 'reasoner' {target_filter}""",
             [*target_params, space_id],
         ).fetchall()
         matched: set[str] = set()
@@ -1234,10 +1256,10 @@ class SqliteWorldStore:
             connection.execute(
                 """
                 INSERT INTO memories(
-                    id, space_id, content, kind, basis, created_by, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, 'inferred', 'reasoner', ?, ?)
+                    id, space_id, content, kind, basis, about_user, created_by, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'inferred', ?, 'reasoner', ?, ?)
                 """,
-                (memory_id, space_id, item.content, item.kind, now, now),
+                (memory_id, space_id, item.content, item.kind, int(owner_kind == "user"), now, now),
             )
             if person_id:
                 connection.execute(
@@ -1258,13 +1280,172 @@ class SqliteWorldStore:
                 [(memory_id, source_id) for source_id in valid_sources],
             )
             matched.add(memory_id)
-        now = _now()
-        for row in existing_rows:
-            if row["id"] not in matched:
-                connection.execute(
+
+    def apply_inferred_memory_actions(
+        self,
+        space_id: str,
+        owner_kind: str,
+        owner_id: str | None,
+        source_memory_ids: set[str],
+        context_inferred_memory_ids: set[str],
+        actions: InferredMemoryActions,
+    ) -> None:
+        """Apply explicitly scoped inferred-Memory lifecycle actions.
+
+        ``source_memory_ids`` is the non-inferred evidence shown to the
+        reasoner. Retractions additionally require the target-owned inference
+        to have been supplied by the trusted caller in context.
+        """
+        if owner_kind not in {"user", "person", "relationship"}:
+            raise ValueError("owner_kind must be user, person, or relationship")
+        if (owner_kind == "user") != (owner_id is None):
+            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
+        with self._connect() as connection:
+            self._apply_inferred_memory_actions(
+                connection, space_id, owner_kind, owner_id, source_memory_ids,
+                context_inferred_memory_ids, actions,
+            )
+
+    def _apply_inferred_memory_actions(
+        self, connection: sqlite3.Connection, space_id: str, owner_kind: str,
+        owner_id: str | None, source_memory_ids: set[str],
+        context_inferred_memory_ids: set[str], actions: InferredMemoryActions,
+    ) -> None:
+        if actions.upserts:
+            target = {"person": "person_id", "relationship": "relationship_id"}.get(owner_kind)
+            target_kwargs = {target: owner_id} if target else {}
+            self._reconcile_inferred_memories(
+                connection, space_id, actions.upserts, **target_kwargs,
+                source_ids=source_memory_ids, owner_kind=owner_kind,
+            )
+        for retraction in actions.retractions:
+            if retraction.memory_id not in context_inferred_memory_ids:
+                continue
+            if owner_kind == "person":
+                owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
+                owner_params: list[Any] = [owner_id]
+            elif owner_kind == "relationship":
+                owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
+                owner_params = [owner_id]
+            else:
+                owner_clause = "m.about_user = 1"
+                owner_params = []
+            row = connection.execute(
+                f"""SELECT m.id FROM memories m WHERE m.space_id = ? AND m.id = ?
+                    AND m.basis = 'inferred' AND m.status = 'active' AND {owner_clause}""",
+                [space_id, retraction.memory_id, *owner_params],
+            ).fetchone()
+            if not row:
+                continue
+            now = _now()
+            connection.execute(
                     """UPDATE memories SET status = 'retracted', invalidated_at = ?,
                        invalidation_reason = ?, updated_at = ? WHERE id = ?""",
-                    (now, "reasoning output no longer supported by current source memories", now, row["id"]),
+                (now, retraction.reason, now, retraction.memory_id),
+            )
+
+    def apply_hypothesis_actions(
+        self,
+        space_id: str,
+        owner_kind: str,
+        owner_id: str | None,
+        source_memory_ids: set[str],
+        context_hypothesis_ids: set[str],
+        actions: HypothesisActions,
+    ) -> None:
+        """Persist standalone hypotheses and explicit, context-scoped transitions."""
+        if owner_kind not in {"user", "person", "relationship"}:
+            raise ValueError("owner_kind must be user, person, or relationship")
+        if (owner_kind == "user") != (owner_id is None):
+            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
+        with self._connect() as connection:
+            for item in actions.upserts:
+                if item.hypothesis_id and item.hypothesis_id not in context_hypothesis_ids:
+                    continue
+                evidence = [
+                    row for row in connection.execute(
+                        f"""SELECT m.id FROM memories m WHERE m.space_id = ? AND m.status = 'active'
+                            AND m.basis <> 'inferred' AND m.id IN ({','.join('?' for _ in item.evidence)})""",
+                        [space_id, *(e.memory_id for e in item.evidence)],
+                    ).fetchall()
+                    if row["id"] in source_memory_ids
+                ]
+                evidence_ids = {row["id"] for row in evidence}
+                if not evidence_ids:
+                    continue
+                hypothesis_id = item.hypothesis_id
+                if hypothesis_id:
+                    existing = connection.execute(
+                        """SELECT id FROM hypotheses WHERE id = ? AND space_id = ?
+                           AND owner_kind = ? AND owner_id IS ? AND status = 'open'""",
+                        (hypothesis_id, space_id, owner_kind, owner_id),
+                    ).fetchone()
+                    if not existing and connection.execute(
+                        "SELECT 1 FROM hypotheses WHERE id = ?", (hypothesis_id,)
+                    ).fetchone():
+                        continue
+                else:
+                    existing = connection.execute(
+                        """SELECT id FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ?
+                           AND status = 'open' AND kind = ? AND content = ?""",
+                        (space_id, owner_kind, owner_id, item.kind, item.content),
+                    ).fetchone()
+                now = _now()
+                if existing:
+                    hypothesis_id = existing["id"]
+                    connection.execute(
+                        "UPDATE hypotheses SET content = ?, kind = ?, confidence = ?, updated_at = ? WHERE id = ?",
+                        (item.content, item.kind, item.confidence, now, hypothesis_id),
+                    )
+                else:
+                    hypothesis_id = hypothesis_id or _id("hypothesis")
+                    connection.execute(
+                        """INSERT INTO hypotheses(
+                            id, space_id, owner_kind, owner_id, content, kind, confidence,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (hypothesis_id, space_id, owner_kind, owner_id, item.content, item.kind,
+                         item.confidence, now, now),
+                    )
+                connection.executemany(
+                    "INSERT OR IGNORE INTO hypothesis_evidence(hypothesis_id, memory_id, role) VALUES (?, ?, ?)",
+                    [(hypothesis_id, e.memory_id, e.role) for e in item.evidence if e.memory_id in evidence_ids],
+                )
+            for transition in actions.transitions:
+                if transition.hypothesis_id not in context_hypothesis_ids:
+                    continue
+                row = connection.execute(
+                    """SELECT id FROM hypotheses WHERE id = ? AND space_id = ?
+                       AND owner_kind = ? AND owner_id IS ? AND status = 'open'""",
+                    (transition.hypothesis_id, space_id, owner_kind, owner_id),
+                ).fetchone()
+                if not row:
+                    continue
+                if transition.status == "promoted" and not transition.promoted_memory_id:
+                    continue
+                if transition.status != "promoted" and transition.promoted_memory_id:
+                    continue
+                if transition.promoted_memory_id:
+                    if owner_kind == "person":
+                        owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
+                        owner_params: list[Any] = [owner_id]
+                    elif owner_kind == "relationship":
+                        owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
+                        owner_params = [owner_id]
+                    else:
+                        owner_clause = "m.about_user = 1"
+                        owner_params = []
+                    memory = connection.execute(
+                        f"SELECT m.id FROM memories m WHERE m.id = ? AND m.space_id = ? AND m.status = 'active' AND {owner_clause}",
+                        [transition.promoted_memory_id, space_id, *owner_params],
+                    ).fetchone()
+                    if not memory:
+                        continue
+                now = _now()
+                connection.execute(
+                    """UPDATE hypotheses SET status = ?, status_reason = ?, promoted_memory_id = ?,
+                       updated_at = ? WHERE id = ?""",
+                    (transition.status, transition.reason, transition.promoted_memory_id, now, row["id"]),
                 )
 
     def _person_reasoning_source_ids(
@@ -1327,9 +1508,10 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            self._reconcile_inferred_memories(
-                connection, space_id, result.inferred_memories, person_id=person_id,
-                source_ids=self._person_reasoning_source_ids(connection, space_id, person_id),
+            actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
+            self._apply_inferred_memory_actions(
+                connection, space_id, "person", person_id,
+                self._person_reasoning_source_ids(connection, space_id, person_id), set(), actions,
             )
             final_watermark = self._person_watermark(connection, space_id, person_id)
             connection.execute(
@@ -1371,14 +1553,10 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            self._reconcile_inferred_memories(
-                connection,
-                space_id,
-                result.inferred_memories,
-                relationship_id=relationship_id,
-                source_ids=self._relationship_reasoning_source_ids(
-                    connection, space_id, relationship_id
-                ),
+            actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
+            self._apply_inferred_memory_actions(
+                connection, space_id, "relationship", relationship_id,
+                self._relationship_reasoning_source_ids(connection, space_id, relationship_id), set(), actions,
             )
             final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
             now = _now()

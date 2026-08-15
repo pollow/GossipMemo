@@ -150,6 +150,33 @@ CREATE TABLE IF NOT EXISTS memory_derivations (
     PRIMARY KEY(derived_memory_id, source_memory_id, derivation_role)
 );
 
+CREATE TABLE IF NOT EXISTS hypotheses (
+    id TEXT PRIMARY KEY,
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('user', 'person', 'relationship')),
+    owner_id TEXT,
+    content TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
+    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'promoted', 'rejected', 'superseded', 'retired')),
+    status_reason TEXT,
+    promoted_memory_id TEXT REFERENCES memories(id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK((owner_kind = 'user' AND owner_id IS NULL) OR
+          (owner_kind IN ('person', 'relationship') AND owner_id IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS hypotheses_by_owner
+ON hypotheses(space_id, owner_kind, owner_id, status);
+
+CREATE TABLE IF NOT EXISTS hypothesis_evidence (
+    hypothesis_id TEXT NOT NULL REFERENCES hypotheses(id) ON DELETE CASCADE,
+    memory_id TEXT NOT NULL REFERENCES memories(id),
+    role TEXT NOT NULL DEFAULT 'support' CHECK(role IN ('support', 'counter')),
+    PRIMARY KEY(hypothesis_id, memory_id, role)
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
     content,
     content='memories',
