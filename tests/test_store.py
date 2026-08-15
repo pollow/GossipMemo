@@ -16,6 +16,7 @@ from gossipmemo.models import (
     MessageInput,
     ModelMessage,
     PersonReasoningResult,
+    RelationshipReasoningResult,
     QueryRequest,
     ExtractedRelationship,
     SourceRef,
@@ -805,3 +806,150 @@ def test_person_reasoning_timestamp_compare_and_swap_is_atomic(store):
             ("personal",),
         )
     ) == 1
+
+
+def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
+    source_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob repeatedly follows up on plans.", people=["Bob"])
+    )
+    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    _, memories, watermark = store.person_context("personal", bob.id)
+    assert all(memory.basis != "inferred" for memory in memories)
+    result = PersonReasoningResult(
+        profile_card={"summary": "follows up"},
+        inferred_memories=[InferredMemory(
+            content="Bob reliably follows up on plans.", source_memory_ids=[source_id]
+        )],
+    )
+    assert store.apply_person_reasoning("personal", bob.id, watermark, result)
+    first = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    _, _, unchanged_watermark = store.person_context("personal", bob.id)
+    assert unchanged_watermark == watermark
+    assert store.stale_entities()[0] == []
+    # A near-identical regenerated result reuses the durable inference and adds
+    # its newly supplied derivation instead of creating another Memory.
+    supporting_source = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob follows up after meetings.", people=["Bob"])
+    )
+    _, _, supporting_watermark = store.person_context("personal", bob.id)
+    assert store.apply_person_reasoning(
+        "personal", bob.id, supporting_watermark,
+        PersonReasoningResult(profile_card={}, inferred_memories=[
+            InferredMemory(
+                content="Bob reliably follows up on plans",
+                source_memory_ids=[supporting_source],
+            )
+        ]),
+    )
+    assert _rows(
+        store,
+        "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'",
+    )[0]["id"] == first
+    assert _rows(
+        store,
+        "SELECT source_memory_id FROM memory_derivations WHERE derived_memory_id = ? "
+        "AND source_memory_id = ?",
+        (first, supporting_source),
+    )
+    # A fresh source permits a rebuild, but an inferred source cannot be reused.
+    new_source = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob also follows up on decisions.", people=["Bob"])
+    )
+    _, _, next_watermark = store.person_context("personal", bob.id)
+    assert store.apply_person_reasoning(
+        "personal", bob.id, next_watermark,
+        PersonReasoningResult(profile_card={}, inferred_memories=[
+            InferredMemory(content="Bob reliably follows up on plans.", source_memory_ids=[first])
+        ]),
+    )
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[0]["status"] == "retracted"
+    assert _rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'") == []
+    # A changed output is a new active record with derivations to current source.
+    latest_source = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bob follows up on outcomes too.", people=["Bob"])
+    )
+    _, _, latest_watermark = store.person_context("personal", bob.id)
+    assert store.apply_person_reasoning(
+        "personal", bob.id, latest_watermark,
+        PersonReasoningResult(profile_card={}, inferred_memories=[
+            InferredMemory(content="Bob reliably follows up on plans and decisions.", source_memory_ids=[latest_source])
+        ]),
+    )
+    active = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")
+    assert len(active) == 1 and active[0]["id"] != first
+
+
+def test_inferred_outputs_are_scoped_to_each_person_target(store):
+    first_source = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Alex plans carefully.", people=["Alex"])
+    )
+    second_source = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Bea plans carefully.", people=["Bea"])
+    )
+    alex = store.read("personal", QueryRequest(question="alex", people=["Alex"])).people[0]
+    bea = store.read("personal", QueryRequest(question="bea", people=["Bea"])).people[0]
+    _, _, alex_watermark = store.person_context("personal", alex.id)
+    _, _, bea_watermark = store.person_context("personal", bea.id)
+    shared = "This person plans carefully."
+    assert store.apply_person_reasoning(
+        "personal", alex.id, alex_watermark,
+        PersonReasoningResult(inferred_memories=[InferredMemory(content=shared, source_memory_ids=[first_source])]),
+    )
+    assert store.apply_person_reasoning(
+        "personal", bea.id, bea_watermark,
+        PersonReasoningResult(inferred_memories=[InferredMemory(content=shared, source_memory_ids=[second_source])]),
+    )
+    assert len(_rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")) == 2
+
+
+def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store):
+    receipt = store.record_messages("personal", [_message()])[0]
+    affected_relationships: set[str]
+    _, affected_relationships = store.apply_extraction(
+        "personal",
+        _batch(store, receipt),
+        ExtractionResult(
+            people=[
+                ExtractedPerson(ref="alice", display_name="Alice"),
+                ExtractedPerson(ref="bob", display_name="Bob"),
+            ],
+            memories=[
+                ExtractedMemory(
+                    content="Alice and Bob resolve disagreements directly.",
+                    basis="stated",
+                    people=["alice", "bob"],
+                    relationships=[
+                        ExtractedRelationship(
+                            person_a_ref="alice", person_b_ref="bob"
+                        )
+                    ],
+                )
+            ],
+        ),
+    )
+    relationship_id = next(iter(affected_relationships))
+    _, memories, watermark = store.relationship_context("personal", relationship_id)
+    source_id = memories[0].id
+    assert store.apply_relationship_reasoning(
+        "personal",
+        relationship_id,
+        watermark,
+        RelationshipReasoningResult(
+            summary="They address friction directly.",
+            inferred_memories=[
+                InferredMemory(
+                    content="Alice and Bob tend to address friction directly.",
+                    source_memory_ids=[source_id],
+                )
+            ],
+        ),
+    )
+    inferred_id = _rows(
+        store,
+        "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'",
+    )[0]["id"]
+    _, next_memories, next_watermark = store.relationship_context(
+        "personal", relationship_id
+    )
+    assert all(memory.id != inferred_id for memory in next_memories)
+    assert next_watermark == watermark

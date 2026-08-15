@@ -51,8 +51,10 @@ schema. Actively identify supported patterns in behavior, preferences,
 communication, decision-making, sensitivities, and helpful ways to interact.
 Make reasonable social inferences when supported, with uncertainty proportional
 to evidence.
-Do not use the old profile as evidence. Inferred memories are optional and must
-cite supplied non-inferred source memory IDs. Distinguish current conditions from
+Do not use the old profile as evidence. Inferred memories are optional: emit only
+clearly reusable, novel conclusions that add value beyond the source memories and
+profile; do not restate either one. Quality over quantity. They must cite supplied
+non-inferred source memory IDs. Distinguish current conditions from
 historical events using valid_from and valid_to. Use the language that best matches
 supplied memories; keep IDs and enum values unchanged.
 """
@@ -69,7 +71,9 @@ for recurring interaction patterns, cooperation, friction, trust, initiative, an
 meaningful changes in closeness, tone, or status. Recurring patterns require
 multiple distinct source memories; a narrow inference from one highly diagnostic
 interaction is allowed when calibrated to that evidence. Inferred memories are
-optional and must cite supplied non-inferred source memory IDs. Use valid_from and
+optional: emit only clearly reusable, novel relationship conclusions that add value
+beyond the source memories and projection; do not restate either one. Quality over
+quantity, and cite supplied non-inferred source memory IDs. Use valid_from and
 valid_to to distinguish current conditions from historical events. Use the
 language that best matches supplied memories; keep IDs and enum values unchanged.
 Return only the supplied JSON schema.

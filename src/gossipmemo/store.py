@@ -6,6 +6,7 @@ import sqlite3
 import uuid
 import hashlib
 import unicodedata
+from difflib import SequenceMatcher
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -44,6 +45,22 @@ def _now() -> str:
 
 def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
+
+
+def _similar_inference(left: str, right: str) -> bool:
+    """Conservatively match a regenerated inference to its prior output."""
+    left, right = _normalized(left), _normalized(right)
+    if left == right:
+        return True
+    # Short facts and polarity/numeric changes are too risky to merge fuzzily.
+    if min(len(left), len(right)) < 20:
+        return False
+    if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
+        return False
+    negations = ("not", "never", "no", "不", "没", "未", "不是", "不会")
+    if any(token in left for token in negations) != any(token in right for token in negations):
+        return False
+    return SequenceMatcher(None, left, right).ratio() >= 0.97
 
 
 def _json(value: Any) -> str:
@@ -798,7 +815,7 @@ class SqliteWorldStore:
         row = connection.execute(
             """SELECT MAX(m.updated_at) AS watermark FROM memories m
                JOIN memory_people mp ON mp.memory_id = m.id
-               WHERE m.space_id = ? AND mp.person_id = ?""",
+               WHERE m.space_id = ? AND mp.person_id = ? AND m.basis <> 'inferred'""",
             (space_id, person_id),
         ).fetchone()
         return row["watermark"] if row else None
@@ -807,7 +824,7 @@ class SqliteWorldStore:
         row = connection.execute(
             """SELECT MAX(m.updated_at) AS watermark FROM memories m
                JOIN relationships r ON r.id = ? AND r.space_id = m.space_id
-               WHERE m.space_id = ? AND (
+               WHERE m.space_id = ? AND m.basis <> 'inferred' AND (
                  m.id IN (SELECT memory_id FROM memory_relationships WHERE relationship_id = r.id)
                  OR m.id IN (SELECT a.memory_id FROM memory_people a JOIN memory_people b ON b.memory_id = a.memory_id
                              WHERE a.person_id = r.person_a_id AND b.person_id = r.person_b_id))""",
@@ -963,7 +980,7 @@ class SqliteWorldStore:
             return None
         with self._connect() as connection:
             watermark = self._person_watermark(connection, space_id, person_id)
-        return context.people[0], context.memories, watermark
+        return context.people[0], [m for m in context.memories if m.basis != "inferred"], watermark
 
     def relationship_context(
         self, space_id: str, relationship_id: str
@@ -981,7 +998,7 @@ class SqliteWorldStore:
                 LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
                 LEFT JOIN memory_people a ON a.memory_id = m.id
                 LEFT JOIN memory_people b ON b.memory_id = m.id
-                WHERE m.space_id = ? AND m.status = 'active' AND (
+                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND (
                     mr.relationship_id = ? OR
                     (a.person_id = ? AND b.person_id = ?)
                 ) ORDER BY m.created_at DESC LIMIT 100
@@ -995,41 +1012,64 @@ class SqliteWorldStore:
             ).fetchall()
             return (
                 self._relationship_view(connection, relationship),
-                [self._memory_view(connection, row, True) for row in rows],
+                [self._memory_view(connection, row, True) for row in rows
+                 if row["basis"] != "inferred"],
                 self._relationship_watermark(connection, space_id, relationship_id),
             )
 
-    def _insert_inferred_memories(
+    def _reconcile_inferred_memories(
         self,
         connection: sqlite3.Connection,
         space_id: str,
         inferred: Iterable[Any],
         person_id: str | None = None,
         relationship_id: str | None = None,
-    ) -> bool:
-        inserted = False
+        source_ids: set[str] | None = None,
+    ) -> None:
+        if person_id:
+            target_join = "JOIN memory_people mt ON mt.memory_id = m.id AND mt.person_id = ?"
+            target_params: list[Any] = [person_id]
+        else:
+            target_join = "JOIN memory_relationships mt ON mt.memory_id = m.id AND mt.relationship_id = ?"
+            target_params = [relationship_id]
+        existing_rows = connection.execute(
+            f"""SELECT m.id, m.content, m.kind FROM memories m {target_join}
+                WHERE m.space_id = ? AND m.status = 'active'
+                  AND m.basis = 'inferred' AND m.created_by = 'reasoner'""",
+            [*target_params, space_id],
+        ).fetchall()
+        matched: set[str] = set()
         for item in inferred:
-            existing = connection.execute(
-                """
-                SELECT id FROM memories
-                WHERE space_id = ? AND status = 'active' AND basis = 'inferred'
-                  AND content = ?
-                """,
-                (space_id, item.content),
-            ).fetchone()
-            if existing:
-                continue
+            existing = next((row for row in existing_rows
+                             if row["kind"] == item.kind
+                             and _similar_inference(row["content"], item.content)), None)
             valid_sources = [
                 row["id"]
                 for row in connection.execute(
                     f"""
-                    SELECT id FROM memories
-                    WHERE space_id = ? AND id IN ({','.join('?' for _ in item.source_memory_ids)})
+                    SELECT DISTINCT m.id FROM memories m
+                    WHERE m.space_id = ? AND m.status = 'active'
+                      AND m.basis <> 'inferred'
+                      AND m.id IN ({','.join('?' for _ in item.source_memory_ids)})
                     """,
                     [space_id, *item.source_memory_ids],
                 ).fetchall()
             ]
+            if source_ids is not None:
+                valid_sources = [source_id for source_id in valid_sources if source_id in source_ids]
             if not valid_sources:
+                continue
+            if existing:
+                matched.add(existing["id"])
+                connection.executemany(
+                    """
+                    INSERT OR IGNORE INTO memory_derivations(
+                        derived_memory_id, source_memory_id
+                    )
+                    VALUES (?, ?)
+                    """,
+                    [(existing["id"], source_id) for source_id in valid_sources],
+                )
                 continue
             memory_id = _id("memory")
             now = _now()
@@ -1046,6 +1086,7 @@ class SqliteWorldStore:
                     "INSERT INTO memory_people(memory_id, person_id) VALUES (?, ?)",
                     (memory_id, person_id),
                 )
+
             if relationship_id:
                 connection.execute(
                     "INSERT INTO memory_relationships(memory_id, relationship_id) VALUES (?, ?)",
@@ -1058,8 +1099,48 @@ class SqliteWorldStore:
                 """,
                 [(memory_id, source_id) for source_id in valid_sources],
             )
-            inserted = True
-        return inserted
+            matched.add(memory_id)
+        now = _now()
+        for row in existing_rows:
+            if row["id"] not in matched:
+                connection.execute(
+                    """UPDATE memories SET status = 'retracted', invalidated_at = ?,
+                       invalidation_reason = ?, updated_at = ? WHERE id = ?""",
+                    (now, "reasoning output no longer supported by current source memories", now, row["id"]),
+                )
+
+    def _person_reasoning_source_ids(
+        self, connection: sqlite3.Connection, space_id: str, person_id: str
+    ) -> set[str]:
+        rows = connection.execute(
+            """SELECT DISTINCT m.id FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+               WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
+                 AND mp.person_id = ? ORDER BY m.created_at DESC LIMIT 100""",
+            (space_id, person_id),
+        ).fetchall()
+        return {row["id"] for row in rows}
+
+    def _relationship_reasoning_source_ids(
+        self, connection: sqlite3.Connection, space_id: str, relationship_id: str
+    ) -> set[str]:
+        relationship = connection.execute(
+            "SELECT person_a_id, person_b_id FROM relationships WHERE space_id = ? AND id = ?",
+            (space_id, relationship_id),
+        ).fetchone()
+        if not relationship:
+            return set()
+        rows = connection.execute(
+            """SELECT DISTINCT m.id FROM memories m
+               LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
+               LEFT JOIN memory_people a ON a.memory_id = m.id
+               LEFT JOIN memory_people b ON b.memory_id = m.id
+               WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
+                 AND (mr.relationship_id = ? OR
+                      (a.person_id = ? AND b.person_id = ?))
+               ORDER BY m.created_at DESC LIMIT 100""",
+            (space_id, relationship_id, relationship["person_a_id"], relationship["person_b_id"]),
+        ).fetchall()
+        return {row["id"] for row in rows}
 
     def apply_person_reasoning(
         self,
@@ -1075,7 +1156,8 @@ class SqliteWorldStore:
                 WHERE space_id = ? AND id = ?
                   AND ? IS (SELECT MAX(m.updated_at) FROM memories m
                             JOIN memory_people mp ON mp.memory_id = m.id
-                            WHERE m.space_id = ? AND mp.person_id = ?)
+                            WHERE m.space_id = ? AND mp.person_id = ?
+                              AND m.basis <> 'inferred')
                   AND (profile_source_updated_at IS NULL OR profile_source_updated_at < ?)""",
                 (
                     _json(result.profile_card),
@@ -1087,8 +1169,9 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            inserted = self._insert_inferred_memories(
-                connection, space_id, result.inferred_memories, person_id=person_id
+            self._reconcile_inferred_memories(
+                connection, space_id, result.inferred_memories, person_id=person_id,
+                source_ids=self._person_reasoning_source_ids(connection, space_id, person_id),
             )
             final_watermark = self._person_watermark(connection, space_id, person_id)
             connection.execute(
@@ -1130,11 +1213,14 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            inserted = self._insert_inferred_memories(
+            self._reconcile_inferred_memories(
                 connection,
                 space_id,
                 result.inferred_memories,
                 relationship_id=relationship_id,
+                source_ids=self._relationship_reasoning_source_ids(
+                    connection, space_id, relationship_id
+                ),
             )
             final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
             now = _now()
@@ -1536,10 +1622,12 @@ class SqliteWorldStore:
                     """SELECT p.space_id, p.id FROM people p
                     WHERE p.status = 'active' AND (
                       p.profile_source_updated_at IS NULL OR p.profile_source_updated_at <
-                      (SELECT MAX(m.updated_at) FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
-                       WHERE m.space_id = p.space_id AND mp.person_id = p.id)
+                       (SELECT MAX(m.updated_at) FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                       WHERE m.space_id = p.space_id AND mp.person_id = p.id
+                         AND m.basis <> 'inferred')
                     ) AND EXISTS (SELECT 1 FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
-                       WHERE m.space_id = p.space_id AND mp.person_id = p.id)"""
+                       WHERE m.space_id = p.space_id AND mp.person_id = p.id
+                         AND m.basis <> 'inferred')"""
                 ).fetchall()
             ]
             relationships = []
