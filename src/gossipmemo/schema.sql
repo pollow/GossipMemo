@@ -14,6 +14,15 @@ CREATE TABLE IF NOT EXISTS user_models (
     profile_updated_at TEXT
 );
 
+CREATE TABLE IF NOT EXISTS continuities (
+    space_id TEXT PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
+    text TEXT NOT NULL DEFAULT '',
+    related_person_ids TEXT NOT NULL DEFAULT '[]',
+    through_message_id TEXT,
+    through_message_rowid INTEGER,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS people (
     id TEXT PRIMARY KEY,
     space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,

@@ -28,6 +28,8 @@ from .models import (
     RelationshipReasoningResult,
     RelationshipView,
     UserModelReasoningResult,
+    ContinuityReasoningResult,
+    ContinuityView,
 )
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -40,6 +42,8 @@ from .prompts import (
     query_synthesis_prompt,
     relationship_reasoning_prompt,
     user_model_reasoning_prompt,
+    CONTINUITY_SYSTEM_PROMPT,
+    continuity_prompt,
     schema_instruction,
 )
 
@@ -68,6 +72,10 @@ class LlmModel(Protocol):
     async def reason_user_model(
         self, memories: Sequence[MemoryView]
     ) -> UserModelReasoningResult: ...
+
+    async def reason_continuity(
+        self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
+    ) -> ContinuityReasoningResult: ...
 
     async def synthesize(self, question: str, context: QueryContext) -> str: ...
 
@@ -237,6 +245,16 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             UserModelReasoningResult,
         )
         return cast(UserModelReasoningResult, content)
+
+    async def reason_continuity(
+        self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
+    ) -> ContinuityReasoningResult:
+        content = await self._structured_call(
+            CONTINUITY_SYSTEM_PROMPT,
+            continuity_prompt(continuity, list(messages)),
+            ContinuityReasoningResult,
+        )
+        return cast(ContinuityReasoningResult, content)
 
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():

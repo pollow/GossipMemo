@@ -22,6 +22,8 @@ from .models import (
     QueryContext,
     RelationshipReasoningResult,
     RelationshipView,
+    ContinuityReasoningResult,
+    ContinuityView,
 )
 
 
@@ -47,6 +49,13 @@ from active, provenance-bearing memories. Return only a JSON object matching
 the supplied schema. Preserve uncertainty and do not infer a relationship
 from people merely appearing in the same message. Inferred memories are
 optional; each one must cite one or more supplied source memory IDs.
+"""
+
+CONTINUITY_SYSTEM_PROMPT = """You rebuild a compact cross-session conversation continuity.
+Return only JSON matching the supplied schema. Preserve unfinished threads and
+recent decisions, and retain useful continuity across sessions. Do not copy
+long person profiles; refer to people only by the supplied stable IDs. The
+current user is not a Person.
 """
 
 USER_MODEL_REASONING_SYSTEM_PROMPT = """You maintain a compact, bounded profile
@@ -152,6 +161,18 @@ def user_model_reasoning_prompt(memories: list[MemoryView]) -> str:
     )
 
 
+def continuity_prompt(
+    continuity: ContinuityView | None, messages: list[ModelMessage]
+) -> str:
+    return (
+        "Rebuild continuity from the prior summary and newer raw messages. "
+        "Choose the last supplied message as through_message_id.\n\nPrior continuity:\n"
+        + _json(continuity)
+        + "\n\nNew messages:\n"
+        + _json(messages)
+    )
+
+
 def query_synthesis_prompt(question: str, context: QueryContext) -> str:
     """Build the user prompt for read-only query synthesis."""
 
@@ -169,10 +190,12 @@ __all__ = [
     "QUERY_SYNTHESIS_SYSTEM_PROMPT",
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
+    "CONTINUITY_SYSTEM_PROMPT",
     "extraction_prompt",
     "person_reasoning_prompt",
     "query_synthesis_prompt",
     "relationship_reasoning_prompt",
     "user_model_reasoning_prompt",
+    "continuity_prompt",
     "schema_instruction",
 ]

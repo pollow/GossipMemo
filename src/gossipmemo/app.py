@@ -97,6 +97,10 @@ def create_app(
     async def query(space_id: str, request: QueryRequest) -> QueryResponse:
         return await world.query(space_id, request)
 
+    @app.get("/v1/spaces/{space_id}/context", dependencies=protected)
+    async def context_bundle(space_id: str) -> dict:
+        return world.store.context_bundle(space_id).model_dump()
+
     @app.get(
         "/v1/spaces/{space_id}/people/{person_id}",
         dependencies=protected,

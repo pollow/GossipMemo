@@ -39,6 +39,7 @@ class SocialMemoryWorld:
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
+        continuity_threshold: int = 20,
     ) -> None:
         self.store = store
         self.model = model
@@ -46,6 +47,7 @@ class SocialMemoryWorld:
         self.extraction_batch_size = extraction_batch_size
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self.induction_interval_seconds = induction_interval_seconds
+        self.continuity_threshold = continuity_threshold
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
@@ -65,6 +67,8 @@ class SocialMemoryWorld:
         for space_id in unbatched_spaces:
             self._drain_extraction_batches(space_id)
         self._schedule_all_stale()
+        for space_id in self.store.pending_continuities(self.continuity_threshold):
+            self._schedule_continuity_reason(space_id)
         self._induction_task = asyncio.create_task(
             self._induction_loop(), name="gossipmemo-daily-induction"
         )
@@ -113,7 +117,28 @@ class SocialMemoryWorld:
     async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
         message_ids = self.store.record_messages(space_id, request.messages)
         self._drain_extraction_batches(space_id)
+        if space_id in self.store.pending_continuities(self.continuity_threshold):
+            self._schedule_continuity_reason(space_id)
         return IngestResponse(message_ids=message_ids)
+
+    def _schedule_continuity_reason(self, space_id: str) -> None:
+        self._spawn(("continuity", space_id, space_id), self._reason_continuity(space_id))
+
+    async def _reason_continuity(self, space_id: str) -> None:
+        while not self._stopping:
+            context = self.store.continuity_context(space_id)
+            if not context:
+                return
+            continuity, messages = context
+            if len(messages) < self.continuity_threshold:
+                return
+            result = await self.queue.submit(
+                "reason-continuity", self.model.reason_continuity, continuity, messages
+            )
+            expected = continuity.through_message_id if continuity else None
+            if self.store.apply_continuity_reasoning(space_id, expected, result):
+                continue
+            return
 
     def _drain_extraction_batches(self, space_id: str) -> None:
         pending = self.store.unbatched_messages(space_id)

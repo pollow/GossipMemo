@@ -92,6 +92,18 @@ class UserModelReasoningResult(BaseModel):
     profile_card: dict[str, Any] = Field(default_factory=dict)
 
 
+class ContinuityReasoningResult(BaseModel):
+    text: str = ""
+    related_person_ids: list[str] = Field(default_factory=list)
+    through_message_id: str
+
+
+class ContinuityView(BaseModel):
+    text: str = ""
+    related_person_ids: list[str] = Field(default_factory=list)
+    through_message_id: str | None = None
+
+
 class RelationshipReasoningResult(BaseModel):
     facets: list[dict[str, Any]] = Field(default_factory=list)
     closeness: str | None = None
@@ -137,6 +149,13 @@ class UserModelView(BaseModel):
     profile_source_updated_at: str | None = None
     profile_updated_at: str | None = None
     stale: bool = False
+
+
+class ContextBundle(BaseModel):
+    version: str
+    user_model: UserModelView | None = None
+    continuity: ContinuityView | None = None
+    people: list[PersonView] = Field(default_factory=list)
 
 
 class RelationshipView(BaseModel):
