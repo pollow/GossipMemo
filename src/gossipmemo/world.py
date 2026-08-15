@@ -347,6 +347,7 @@ class SocialMemoryWorld:
             for relationship_id in relationships:
                 self._schedule_relationship_reason(space_id, relationship_id)
             self._schedule_user_model_reason(space_id)
+            self._schedule_coverage_reason(space_id)
             logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         except Exception as error:
             self.store.fail_extraction(space_id, batch_id, str(error))
@@ -422,6 +423,54 @@ class SocialMemoryWorld:
             self._reason_user_model(space_id),
         )
 
+    def _schedule_coverage_reason(self, space_id: str) -> None:
+        self._spawn(
+            ("coverage", space_id, space_id),
+            self._reason_coverage(space_id),
+        )
+
+    async def _reason_coverage(self, space_id: str) -> None:
+        """Audit all bounded chunks before a single goal-planning pass."""
+        while not self._stopping:
+            context = self.store.coverage_context(space_id)
+            if not context:
+                return
+            coverage, memories, hypotheses, pending = context
+            if not memories:
+                if not pending:
+                    await self._plan_learning_goals(space_id)
+                return
+            audit = getattr(self.model, "audit_coverage", None)
+            if audit is None:
+                return
+            result = await self.queue.submit(
+                "audit-coverage", audit, coverage, memories, hypotheses
+            )
+            if not self.store.apply_coverage_audit(
+                space_id, coverage.source_watermark, coverage.source_cursor_id, result,
+                {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries},
+                {hypothesis.id for hypothesis in hypotheses},
+            ):
+                continue
+            if pending:
+                continue
+            await self._plan_learning_goals(space_id)
+            return
+
+    async def _plan_learning_goals(self, space_id: str) -> None:
+        context = self.store.learning_goal_context(space_id)
+        if not context:
+            return
+        coverage, hypotheses, open_goals, closed_goals = context
+        planner = getattr(self.model, "plan_learning_goals", None)
+        if planner is None:
+            return
+        result = await self.queue.submit(
+            "plan-learning-goals", planner,
+            coverage, hypotheses, open_goals, closed_goals,
+        )
+        self.store.apply_goal_planning(space_id, coverage.revision, result, {goal.id for goal in open_goals} | {goal.id for goal in closed_goals})
+
     async def _reason_user_model(self, space_id: str) -> None:
         while not self._stopping:
             context = self.store.user_model_context(space_id)
@@ -472,18 +521,23 @@ class SocialMemoryWorld:
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
         memory_id = self.store.add_manual_memory(space_id, request)
+        self._schedule_coverage_reason(space_id)
         return memory_id
 
     def retract_memory(
         self, space_id: str, memory_id: str, reason: str | None = None
     ) -> bool:
         changed = self.store.retract_memory(space_id, memory_id, reason)
+        if changed:
+            self._schedule_coverage_reason(space_id)
         return changed
 
     def supersede_memory(
         self, space_id: str, memory_id: str, request: SupersedeRequest
     ) -> str | None:
         replacement_id = self.store.supersede_memory(space_id, memory_id, request)
+        if replacement_id:
+            self._schedule_coverage_reason(space_id)
         return replacement_id
 
     def _schedule_all_stale(self) -> None:
@@ -504,6 +558,12 @@ class SocialMemoryWorld:
             self._schedule_relationship_reason(space_id, relationship_id)
         for space_id in user_models:
             self._schedule_user_model_reason(space_id)
+        # Coverage has an independent source watermark, including spaces whose
+        # UserModel card is already current.
+        for space_id in {space_id for space_id, _ in people} | {space_id for space_id, _ in relationships} | set(user_models):
+            self._schedule_coverage_reason(space_id)
+        for space_id in self.store.stale_coverage_spaces():
+            self._schedule_coverage_reason(space_id)
 
     def health(self) -> HealthResponse:
         return HealthResponse(

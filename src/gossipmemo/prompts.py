@@ -26,6 +26,8 @@ from .models import (
     ContinuityReasoningResult,
     ContinuityView,
     HypothesisView,
+    CoverageMapView,
+    LearningGoalView,
 )
 
 
@@ -85,6 +87,69 @@ another person's identity. Use valid_from and valid_to to separate current
 conditions from historical events. Do not use projections, inferred memories, or
 hypotheses as evidence. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
+
+COVERAGE_AUDIT_SYSTEM_PROMPT = """Audit long-term autobiographical and persona coverage.
+Return only the supplied JSON schema. Coverage is a summary of supported evidence,
+not a profile and not an invitation to disclose. A hypothesis may identify an edge,
+blind spot, or conflict, but never raises a coverage level. Preserve uncertainty:
+unknown, private, or deferred material is valid and must not be treated as a gap to
+press. Do not diagnose pathology. Use the supplied memory IDs exactly; do not invent
+facts, evidence, or private details. Keep natural-language summaries concise and in
+the language of the evidence."""
+
+GOAL_PLANNING_SYSTEM_PROMPT = """Plan a very small number of optional, user-owned
+learning invitations from an updated coverage map. Return only the supplied JSON
+schema. Every new or changed goal must cite supplied criterion and boundary IDs.
+Unknown, intimate, traumatic, stigmatized, or otherwise private areas are never
+automatic targets: respect explicit readiness, consent, defer, and do-not-pursue
+signals. Prefer gentle, specific questions with an easy opt-out; never pressure,
+diagnose, or imply that disclosure is owed. Omission is no-op: only explicitly
+transition an existing supplied goal when its lifecycle changes."""
+
+# Stable parent IDs deliberately have richer prompt-only facets. The stored map is
+# compact, while this readable rubric lets audit boundaries name meaningful blind
+# spots without turning sensitive life material into a normalized schema.
+COVERAGE_RUBRIC = """M1 life_chapters — Which eras, beginnings, moves, endings, and chapters are legible? Rich when chronology and transitions have texture; blind spots: childhood, family origin, education, work, migration, future chapters.
+M2 everyday_life — What does ordinary life, routine, home, work, care, money, and security feel like? Rich when habits and constraints have context; blind spots: class, housing, debt, caregiving, disability access.
+M3 turning_points — Which choices, accidents, losses, recoveries, and reversals changed the story? Rich when consequences and alternatives are known; blind spots: regret, repair, harm done, survival.
+M4 people_and_relationship_arcs — Which attachments, ruptures, loyalties, intimacy, and family/friend arcs matter? Rich when change and boundaries are clear; blind spots: sexuality, consent, estrangement, reconciliation.
+M5 places_and_context — Which places, communities, cultures, institutions, and historical contexts shape meaning? Rich when belonging and constraint are visible; blind spots: religion, politics, class, diaspora, taboo contexts.
+M6 lived_scenes — What concrete scenes, sensory memories, conversations, and small moments carry the story? Rich when scenes ground abstractions; blind spots: body, health, illness, substance use, private rituals.
+M7 inner_experience — How are feelings, needs, shame, guilt, secrets, fear, desire, grief, and self-protection described? Rich when the user's own meaning is present; blind spots: unspoken or explicitly private inner life.
+M8 themes_and_change — What recurring themes, tensions, growth, and contradictions span time? Rich when evidence supports change and exceptions; blind spots: envy, resentment, moral injury, forgiveness, repair.
+M9 unresolved_threads — What questions, conflicts, decisions, losses, or hopes remain open? Rich when uncertainty and next steps are named; blind spots: mortality, legacy, unfinished goodbyes.
+P1 identity_and_self_story — How does the user name self, belonging, and self-understanding? Rich when self-authored and contextual; blind spots: protected identities and labels not offered.
+P2 values_and_tradeoffs — What matters and what costs are accepted? Rich when choices reveal tensions; blind spots: morality, faith, politics, loyalty, money.
+P3 worldview_and_beliefs — What assumptions, beliefs, and sources of meaning guide interpretation? Rich when complexity and change are represented; blind spots: religion, ideology, taboos.
+P4 goals_motives_fears — What pulls the user forward or holds them back? Rich when motives and constraints are situated; blind spots: safety, status, intimacy, mortality.
+P5 reasoning_and_decisions — How does the user decide under uncertainty, conflict, or pressure? Rich when strategies and exceptions are supported; blind spots: avoidance, risk, regret.
+P6 emotional_patterns — What non-clinical emotional rhythms and coping patterns recur? Rich when grounded across contexts; blind spots: grief, shame, anger, substance-related coping. Never diagnose.
+P7 social_style_and_boundaries — How does the user connect, communicate, protect space, and repair? Rich when context and consent are clear; blind spots: conflict, attachment, intimacy.
+P8 preferences_and_routines — What tastes, practices, environments, and practical rhythms recur? Rich when stable versus situational preferences are separated; blind spots: health, money, accessibility constraints.
+P9 voice_and_expression — How does the user tell stories, joke, ask, withhold, create, or communicate? Rich when examples span settings; blind spots: silence and code-switching.
+P10 context_and_exceptions — Which roles, settings, identities, pressures, and exceptions change the pattern? Rich when it prevents overgeneralization; blind spots: home/work, safety, power, culture.
+P11 skills_and_knowledge — What has the user learned, practiced, taught, or become capable of? Rich when confidence and limits are clear; blind spots: informal knowledge and blocked opportunities."""
+
+# Method cues are deliberately non-clinical: they guide respectful inquiry and
+# audit interpretation, not treatment or a demand for disclosure.
+COVERAGE_METHOD = """Scan with memoir and oral-history facets: origins; childhood and
+adolescence; education; work; moves; partnership/parenthood; high and low scenes;
+failure, pride, kindness, loneliness; choice, consequence, and meaning; caregivers,
+siblings, mentors, rivals, children, absent or lost people; homes, neighborhood,
+language, institutions and history; scene details (where, when, who, dialogue,
+senses, objects, action, emotion); desire, sexuality, intimacy, body, trauma and
+coping; agency and communion; multiple futures, apologies, repair, mortality and
+legacy. For persona also scan roles, belonging, gender/sexuality, ethnicity/class,
+masks, ideal/feared self; autonomy/security, loyalty/truth, care/fairness,
+achievement/rest, fidelity/taboo/harm/forgiveness; trust, justice, spirituality,
+meaning/death and epistemology; attention, evidence, intuition, planning, risk and
+changing one's mind; emotional triggers/regulation; closeness, power, help and
+repair without attachment labels; sleep, sensory life, technology, money, rituals;
+register, humor, profanity, metaphor, silence and persuasion; work/home/intimate/
+public/crisis exceptions; tacit heuristics, teaching, creative and practical skill.
+Use partnership, evocation, acceptance, safety, trust, collaboration, voice and
+choice. Evidence-backed non-clinical patterns are allowed; direct pathology diagnosis
+is not."""
 
 QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the supplied
 social-memory context. Return concise plain text only (no JSON wrapper or code
@@ -276,6 +341,36 @@ def user_model_reasoning_prompt(
     )
 
 
+def coverage_audit_prompt(
+    coverage: CoverageMapView, memories: list[MemoryView], hypotheses: list[HypothesisView]
+) -> str:
+    """Immutable audit prefix plus one bounded evidence chunk."""
+    return (
+        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
+        "<current-coverage-map>\n" + _json(coverage) + "\n</current-coverage-map>\n"
+        "<new-evidence>\n" + _evidence_lines(memories) + "\n</new-evidence>\n"
+        "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
+        + "\n</open-hypotheses>\nApply a patch only for this chunk. Preserve prior coverage unless new evidence changes it. "
+        "Hypotheses may add a boundary or conflict with hypothesis_id, never evidence; a hypothesis never raises a coverage level. "
+        "Each criterion patch needs only its stable parent criterion_id. Keep inventories compact and additive."
+    )
+
+
+def goal_planning_prompt(
+    coverage: CoverageMapView, hypotheses: list[HypothesisView],
+    open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
+) -> str:
+    return (
+        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
+        "<updated-coverage-map>\n" + _json(coverage) + "\n</updated-coverage-map>\n"
+        "<open-hypotheses>\n" + _json(hypotheses) + "\n</open-hypotheses>\n"
+        "<open-goals>\n" + _json(open_goals) + "\n</open-goals>\n"
+        "<recent-closed-goals>\n" + _json(recent_closed_goals) + "\n</recent-closed-goals>\n"
+        "Plan only after the map is caught up. Use trauma-informed partnership, choice, and an easy decline; "
+        "do not equate a blind spot with a question to ask now. Goals can focus a person or relationship but remain user-owned."
+    )
+
+
 def continuity_prompt(
     continuity: ContinuityView | None, messages: list[ModelMessage]
 ) -> str:
@@ -306,6 +401,8 @@ __all__ = [
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "CONTINUITY_SYSTEM_PROMPT",
+    "COVERAGE_AUDIT_SYSTEM_PROMPT",
+    "GOAL_PLANNING_SYSTEM_PROMPT",
     "extraction_prompt",
     "person_reasoning_prompt",
     "query_synthesis_prompt",
@@ -315,5 +412,7 @@ __all__ = [
     "actions_stage_prompt",
     "user_model_reasoning_prompt",
     "continuity_prompt",
+    "coverage_audit_prompt",
+    "goal_planning_prompt",
     "schema_instruction",
 ]

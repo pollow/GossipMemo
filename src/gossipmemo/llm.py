@@ -40,6 +40,10 @@ from .models import (
     UserModelView,
     ContinuityReasoningResult,
     ContinuityView,
+    CoverageAuditPatch,
+    CoverageMapView,
+    GoalPlanningResult,
+    LearningGoalView,
 )
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -56,7 +60,11 @@ from .prompts import (
     relationship_reasoning_prompt,
     user_model_reasoning_prompt,
     CONTINUITY_SYSTEM_PROMPT,
+    COVERAGE_AUDIT_SYSTEM_PROMPT,
+    GOAL_PLANNING_SYSTEM_PROMPT,
     continuity_prompt,
+    coverage_audit_prompt,
+    goal_planning_prompt,
     schema_instruction,
 )
 
@@ -100,6 +108,16 @@ class LlmModel(Protocol):
     async def reason_continuity(
         self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
     ) -> ContinuityReasoningResult: ...
+
+    async def audit_coverage(
+        self, coverage: CoverageMapView, memories: Sequence[MemoryView],
+        hypotheses: Sequence[HypothesisView] = (),
+    ) -> CoverageAuditPatch: ...
+
+    async def plan_learning_goals(
+        self, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
+        open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
+    ) -> GoalPlanningResult: ...
 
     async def synthesize(self, question: str, context: QueryContext) -> str: ...
 
@@ -326,6 +344,28 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             ContinuityReasoningResult,
         )
         return cast(ContinuityReasoningResult, content)
+
+    async def audit_coverage(
+        self, coverage: CoverageMapView, memories: Sequence[MemoryView],
+        hypotheses: Sequence[HypothesisView] = (),
+    ) -> CoverageAuditPatch:
+        content = await self._structured_call(
+            COVERAGE_AUDIT_SYSTEM_PROMPT,
+            coverage_audit_prompt(coverage, list(memories), list(hypotheses)),
+            CoverageAuditPatch,
+        )
+        return cast(CoverageAuditPatch, content)
+
+    async def plan_learning_goals(
+        self, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
+        open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
+    ) -> GoalPlanningResult:
+        content = await self._structured_call(
+            GOAL_PLANNING_SYSTEM_PROMPT,
+            goal_planning_prompt(coverage, list(hypotheses), list(open_goals), list(recent_closed_goals)),
+            GoalPlanningResult,
+        )
+        return cast(GoalPlanningResult, content)
 
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():

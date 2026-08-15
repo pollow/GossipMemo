@@ -34,6 +34,13 @@ from .models import (
     UserModelView,
     ContinuityReasoningResult,
     ContinuityView,
+    CoverageAuditPatch,
+    CoverageBoundary,
+    CoverageBoundaryUpsert,
+    CoverageMapView,
+    GoalPlanningResult,
+    LearningGoalView,
+    coverage_skeleton,
     ContextBundle,
     utc_now,
 )
@@ -156,6 +163,14 @@ class WorldStore(Protocol):
         result: UserModelReasoningResult,
     ) -> bool: ...
 
+    def coverage_context(self, space_id: str, limit: int = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None: ...
+
+    def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch, evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool: ...
+
+    def learning_goal_context(self, space_id: str) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None: ...
+
+    def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
+
     def apply_inferred_memory_actions(
         self, space_id: str, owner_kind: str, owner_id: str | None,
         source_memory_ids: set[str], context_inferred_memory_ids: set[str],
@@ -183,6 +198,8 @@ class WorldStore(Protocol):
     def stale_entities(
         self,
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
+
+    def stale_coverage_spaces(self) -> list[str]: ...
 
     def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None: ...
 
@@ -239,6 +256,10 @@ class SqliteWorldStore:
             )
             connection.execute(
                 "INSERT OR IGNORE INTO user_models(space_id) VALUES (?)", (space_id,)
+            )
+            connection.execute(
+                "INSERT OR IGNORE INTO coverage_maps(space_id, criteria, updated_at) VALUES (?, ?, ?)",
+                (space_id, _json(coverage_skeleton()), now),
             )
             connection.execute(
                 "INSERT OR IGNORE INTO continuities(space_id, updated_at) VALUES (?, ?)",
@@ -1625,6 +1646,133 @@ class SqliteWorldStore:
             )
             return view, [self._memory_view(connection, item, True) for item in memories], watermark
 
+    def _coverage_view(self, row: sqlite3.Row) -> CoverageMapView:
+        criteria = _loads(row["criteria"], coverage_skeleton())
+        # Existing development DBs may have a partial hand-written map; keep
+        # the static skeleton complete at every read.
+        for criterion_id, value in coverage_skeleton().items():
+            criteria.setdefault(criterion_id, value)
+        return CoverageMapView(
+            space_id=row["space_id"], revision=row["revision"],
+            source_watermark=row["source_watermark"], criteria=criteria,
+            source_cursor_id=row["source_cursor_id"],
+            boundaries=[CoverageBoundary.model_validate(value) for value in _loads(row["boundaries"], [])],
+            life_periods=_loads(row["life_periods"], []),
+            relationship_arcs=_loads(row["relationship_arcs"], []),
+            behavioral_contexts=_loads(row["behavioral_contexts"], []),
+        )
+
+    def _hypothesis_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> HypothesisView:
+        evidence = connection.execute(
+            "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (row["id"],)
+        ).fetchall()
+        return HypothesisView(id=row["id"], space_id=row["space_id"], owner_kind=row["owner_kind"], owner_id=row["owner_id"], content=row["content"], kind=row["kind"], confidence=row["confidence"], status=row["status"], promoted_memory_id=row["promoted_memory_id"], evidence=[HypothesisEvidence(memory_id=item["memory_id"], role=item["role"]) for item in evidence], created_at=row["created_at"], updated_at=row["updated_at"])
+
+    def coverage_context(self, space_id: str, limit: int = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None:
+        """Return a bounded changed-evidence chunk and whether more remains."""
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            if not row:
+                return None
+            coverage = self._coverage_view(row)
+            watermark, cursor_id = coverage.source_watermark or "", coverage.source_cursor_id or ""
+            changed = connection.execute(
+                """SELECT * FROM memories WHERE space_id = ? AND basis <> 'inferred'
+                   AND (updated_at > ? OR (updated_at = ? AND id > ?))
+                   ORDER BY updated_at, id LIMIT ?""",
+                (space_id, watermark, watermark, cursor_id, limit + 1),
+            ).fetchall()
+            chunk, pending = changed[:limit], len(changed) > limit
+            hypotheses = connection.execute(
+                "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)
+            ).fetchall()
+            return coverage, [self._memory_view(connection, item, True) for item in chunk], [self._hypothesis_view(connection, item) for item in hypotheses], pending
+
+    def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch, evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            if not row or row["source_watermark"] != expected_watermark or row["source_cursor_id"] != expected_cursor_id:
+                return False
+            coverage = self._coverage_view(row)
+            active_ids = {item["id"] for item in connection.execute("SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND basis <> 'inferred'", (space_id,)).fetchall()}
+            for item in patch.criteria:
+                if item.criterion_id not in coverage.criteria:
+                    continue
+                evidence = [memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids and memory_id in active_ids]
+                # A patch with no current evidence cannot raise coverage. This
+                # is the persistence backstop for the prompt's hypothesis rule.
+                old = coverage.criteria[item.criterion_id]
+                levels = ["unknown", "fragmentary", "grounded", "rich"]
+                level = item.level if evidence or levels.index(item.level) <= levels.index(old.get("level", "unknown")) else old.get("level", "unknown")
+                coverage.criteria[item.criterion_id] = {"level": level, "known_state": item.known_state, "evidence_memory_ids": sorted(set(old.get("evidence_memory_ids", []) + evidence))}
+            # Evidence can be retracted/superseded after a prior audit. Prune
+            # it before applying this patch, and do not let an empty criterion
+            # retain a misleading grounded/rich level.
+            for criterion in coverage.criteria.values():
+                criterion["evidence_memory_ids"] = [memory_id for memory_id in criterion.get("evidence_memory_ids", []) if memory_id in active_ids]
+                if not criterion["evidence_memory_ids"]:
+                    criterion["level"], criterion["known_state"] = "unknown", ""
+            boundaries = {item.id: item for item in coverage.boundaries}
+            for item in boundaries.values():
+                item.evidence_memory_ids = [memory_id for memory_id in item.evidence_memory_ids if memory_id in active_ids]
+            for item in patch.boundary_upserts:
+                if all(ref in coverage.criteria for ref in item.criterion_refs):
+                    evidence = [memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids]
+                    if item.hypothesis_id not in context_hypothesis_ids:
+                        item.hypothesis_id = None
+                    duplicate = next((boundary for boundary in boundaries.values() if boundary.status == "open" and boundary.kind == item.kind and boundary.summary == item.summary and boundary.criterion_refs == item.criterion_refs), None)
+                    if duplicate:
+                        continue
+                    boundary_id = _id("boundary")
+                    boundaries[boundary_id] = CoverageBoundary(id=boundary_id, kind=item.kind, summary=item.summary, criterion_refs=item.criterion_refs, evidence_memory_ids=evidence, hypothesis_id=item.hypothesis_id)
+            for transition in patch.boundary_transitions:
+                if transition.boundary_id in context_boundary_ids and transition.boundary_id in boundaries:
+                    boundaries[transition.boundary_id].status = transition.status
+                    boundaries[transition.boundary_id].status_reason = transition.reason
+            cursor_row = connection.execute("SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1" % ",".join("?" for _ in evidence_ids), list(evidence_ids)).fetchone()
+            next_watermark = cursor_row["updated_at"] if cursor_row else expected_watermark
+            next_cursor_id = cursor_row["id"] if cursor_row else expected_cursor_id
+            connection.execute("""UPDATE coverage_maps SET revision = revision + 1, source_watermark = ?, source_cursor_id = ?, criteria = ?, boundaries = ?, life_periods = ?, relationship_arcs = ?, behavioral_contexts = ?, updated_at = ? WHERE space_id = ?""", (next_watermark, next_cursor_id, _json(coverage.criteria), _json([item.model_dump() for item in boundaries.values()]), _json(list(dict.fromkeys(coverage.life_periods + patch.life_periods))[:30]), _json(list(dict.fromkeys(coverage.relationship_arcs + patch.relationship_arcs))[:30]), _json(list(dict.fromkeys(coverage.behavioral_contexts + patch.behavioral_contexts))[:30]), _now(), space_id))
+            return True
+
+    def _learning_goal_view(self, row: sqlite3.Row) -> LearningGoalView:
+        return LearningGoalView(id=row["id"], space_id=row["space_id"], prompt=row["prompt"], rationale=row["rationale"], criteria_refs=_loads(row["criteria_refs"], []), boundary_ids=_loads(row["boundary_ids"], []), focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"], status_reason=row["status_reason"], created_at=row["created_at"], updated_at=row["updated_at"])
+
+    def learning_goal_context(self, space_id: str) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            if not row:
+                return None
+            hypotheses = connection.execute("SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)).fetchall()
+            goals = connection.execute("SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
+            return self._coverage_view(row), [self._hypothesis_view(connection, item) for item in hypotheses], [self._learning_goal_view(item) for item in goals if item["status"] == "open"], [self._learning_goal_view(item) for item in goals if item["status"] != "open"][:20]
+
+    def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            if not row or row["revision"] != expected_revision:
+                return False
+            coverage, boundary_ids = self._coverage_view(row), {item.id for item in self._coverage_view(row).boundaries}
+            open_boundary_ids = {item.id for item in self._coverage_view(row).boundaries if item.status == "open"}
+            now = _now()
+            for item in result.upserts:
+                if not set(item.criteria_refs).issubset(coverage.criteria) or not set(item.boundary_ids).issubset(open_boundary_ids):
+                    continue
+                if item.focus_kind != "user":
+                    table = "people" if item.focus_kind == "person" else "relationships"
+                    if not item.focus_id or not connection.execute(f"SELECT 1 FROM {table} WHERE id = ? AND space_id = ?", (item.focus_id, space_id)).fetchone():
+                        continue
+                if item.goal_id and item.goal_id in context_goal_ids:
+                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, criteria_refs = ?, boundary_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, item.goal_id, space_id))
+                elif not item.goal_id:
+                    duplicate = connection.execute("SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND criteria_refs = ? AND boundary_ids = ? AND status = 'open'", (space_id, item.prompt, _json(item.criteria_refs), _json(item.boundary_ids))).fetchone()
+                    if not duplicate:
+                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, criteria_refs, boundary_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id("goal"), space_id, item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, now))
+            for item in result.transitions:
+                if item.goal_id in context_goal_ids:
+                    connection.execute("UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? WHERE id = ? AND space_id = ?", (item.status, item.reason, now, item.goal_id, space_id))
+            return True
+
     def continuity_context(
         self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None:
@@ -2006,6 +2154,21 @@ class SqliteWorldStore:
                 if watermark is not None and row["profile_source_updated_at"] != watermark:
                     user_models.append(row["space_id"])
             return people, relationships, user_models
+
+    def stale_coverage_spaces(self) -> list[str]:
+        with self._connect() as connection:
+            return [
+                row["space_id"] for row in connection.execute(
+                    """SELECT cm.space_id FROM coverage_maps cm WHERE EXISTS (
+                       SELECT 1 FROM memories m WHERE m.space_id = cm.space_id
+                       AND m.basis <> 'inferred' AND (
+                         m.updated_at > COALESCE(cm.source_watermark, '') OR
+                         (m.updated_at = COALESCE(cm.source_watermark, '')
+                          AND m.id > COALESCE(cm.source_cursor_id, ''))
+                       )
+                    )"""
+                ).fetchall()
+            ]
 
     def add_manual_memory(
         self, space_id: str, request: ManualMemoryRequest

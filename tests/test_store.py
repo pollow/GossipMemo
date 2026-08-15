@@ -27,6 +27,11 @@ from gossipmemo.models import (
     ExtractedRelationship,
     SourceRef,
     UserModelReasoningResult,
+    CoverageAuditPatch,
+    CoverageCriterionPatch,
+    CoverageBoundaryUpsert,
+    GoalPlanningResult,
+    LearningGoalUpsert,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
 
@@ -1242,3 +1247,71 @@ def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store
     )
     assert all(memory.id != inferred_id for memory in next_memories)
     assert next_watermark == watermark
+
+
+def test_coverage_map_is_initialized_and_goals_require_map_refs(store):
+    store.ensure_space("personal")
+    coverage, memories, hypotheses, pending = store.coverage_context("personal")
+    assert len(coverage.criteria) == 20
+    assert {item["level"] for item in coverage.criteria.values()} == {"unknown"}
+    assert not memories and not hypotheses and not pending
+
+    memory_id = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="I grew up near the coast.", about_user=True)
+    )
+    coverage, memories, _, _ = store.coverage_context("personal")
+    assert [memory.id for memory in memories] == [memory_id]
+    assert store.apply_coverage_audit(
+        "personal", coverage.source_watermark,
+        coverage.source_cursor_id,
+        CoverageAuditPatch(
+            criteria=[CoverageCriterionPatch(criterion_id="M1", level="grounded", known_state="Early place is known", evidence_memory_ids=[memory_id])],
+            boundary_upserts=[CoverageBoundaryUpsert(kind="blind_spot", summary="Childhood detail remains open", criterion_refs=["M1"])],
+        ),
+        {memory_id}, set(), set(),
+    )
+    updated, _, _, _ = store.coverage_context("personal")
+    assert updated.criteria["M1"]["level"] == "grounded"
+    store.apply_goal_planning(
+        "personal",
+        updated.revision, GoalPlanningResult(upserts=[LearningGoalUpsert(prompt="Would you like to share a coastal memory, or skip it?", rationale="Optional origin context", criteria_refs=["M1"], boundary_ids=[updated.boundaries[0].id])]),
+        set(),
+    )
+    _, _, goals, _ = store.learning_goal_context("personal")
+    assert len(goals) == 1
+
+
+def test_coverage_cursor_handles_equal_timestamps_and_prunes_retracted_evidence(store):
+    ids = [store.add_manual_memory("personal", ManualMemoryRequest(content=f"scene {index}", about_user=True)) for index in range(3)]
+    with store._connect() as connection:
+        connection.execute("UPDATE memories SET updated_at = ? WHERE space_id = ?", ("2026-01-01T00:00:00+00:00", "personal"))
+    seen = []
+    for _ in ids:
+        coverage, memories, _, _ = store.coverage_context("personal", limit=1)
+        seen.extend(memory.id for memory in memories)
+        assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(criteria=[CoverageCriterionPatch(criterion_id="M6", level="grounded", known_state="scene", evidence_memory_ids=[memories[0].id])]), {memories[0].id}, {boundary.id for boundary in coverage.boundaries}, set())
+    assert set(seen) == set(ids)
+    assert store.retract_memory("personal", ids[-1])
+    coverage, memories, _, _ = store.coverage_context("personal")
+    assert ids[-1] in [memory.id for memory in memories]
+    assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(), {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries}, set())
+    updated, _, _, _ = store.coverage_context("personal")
+    assert ids[-1] not in updated.criteria["M6"]["evidence_memory_ids"]
+
+
+def test_goal_planning_uses_coverage_revision_cas(store):
+    store.ensure_space("personal")
+    coverage, _, _, _ = store.coverage_context("personal")
+    assert not store.apply_goal_planning("personal", coverage.revision + 1, GoalPlanningResult(), set())
+
+
+def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
+    first = store.add_manual_memory("personal", ManualMemoryRequest(content="first", about_user=False))
+    second = store.add_manual_memory("personal", ManualMemoryRequest(content="second", about_user=False))
+    with store._connect() as connection:
+        connection.execute("UPDATE memories SET updated_at = ? WHERE id IN (?, ?)", ("2026-02-01T00:00:00+00:00", first, second))
+    coverage, memories, _, _ = store.coverage_context("personal", limit=1)
+    assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(), {memories[0].id}, set(), set())
+    # This models a process restart: stale discovery must notice the second row
+    # even though it shares the persisted timestamp.
+    assert store.stale_coverage_spaces() == ["personal"]

@@ -1,4 +1,4 @@
-from gossipmemo.models import MemoryView, ModelMessage, PersonView, RelationshipView
+from gossipmemo.models import CoverageMapView, MemoryView, ModelMessage, PersonView, RelationshipView
 from gossipmemo.prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
@@ -9,6 +9,7 @@ from gossipmemo.prompts import (
     extraction_prompt,
     person_reasoning_prompt,
     relationship_reasoning_prompt,
+    coverage_audit_prompt,
 )
 
 
@@ -157,6 +158,14 @@ def test_all_prompt_contracts_keep_i18n_rule_compact():
     ):
         assert "language" in prompt and "best matches" in prompt
     assert "language of the question" in QUERY_SYNTHESIS_SYSTEM_PROMPT
+
+
+def test_coverage_prompt_keeps_private_facets_and_choice_boundaries():
+    prompt = coverage_audit_prompt(CoverageMapView(space_id="space"), [], [])
+    assert "sexuality" in prompt
+    assert "shame" in prompt
+    assert "mortality" in prompt
+    assert "never raises a coverage level" in prompt
 
 
 def test_query_synthesis_does_not_treat_unmerged_people_as_distinct_evidence():

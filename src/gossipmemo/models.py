@@ -16,6 +16,29 @@ HypothesisOwnerKind = Literal["user", "person", "relationship"]
 HypothesisStatus = Literal["open", "promoted", "rejected", "superseded", "retired"]
 HypothesisConfidence = Literal["low", "medium", "high"]
 HypothesisEvidenceRole = Literal["support", "counter"]
+CoverageLevel = Literal["unknown", "fragmentary", "grounded", "rich"]
+CoverageBoundaryKind = Literal["edge", "blind_spot", "conflict"]
+CoverageBoundaryStatus = Literal["open", "resolved"]
+LearningGoalStatus = Literal["open", "partial", "answered", "deferred", "retired"]
+
+# These are intentionally prompt-native IDs rather than a normalized rubric
+# table: they are a stable contract for the CoverageAudit and GoalPlanning LLM
+# calls, while each space stores only its current rebuildable assessment.
+COVERAGE_CRITERIA: dict[str, str] = {
+    "M1": "life_chapters", "M2": "everyday_life", "M3": "turning_points",
+    "M4": "people_and_relationship_arcs", "M5": "places_and_context",
+    "M6": "lived_scenes", "M7": "inner_experience", "M8": "themes_and_change",
+    "M9": "unresolved_threads", "P1": "identity_and_self_story",
+    "P2": "values_and_tradeoffs", "P3": "worldview_and_beliefs",
+    "P4": "goals_motives_fears", "P5": "reasoning_and_decisions",
+    "P6": "emotional_patterns", "P7": "social_style_and_boundaries",
+    "P8": "preferences_and_routines", "P9": "voice_and_expression",
+    "P10": "context_and_exceptions", "P11": "skills_and_knowledge",
+}
+
+
+def coverage_skeleton() -> dict[str, dict[str, str]]:
+    return {criterion_id: {"level": "unknown"} for criterion_id in COVERAGE_CRITERIA}
 
 
 class SourceRef(BaseModel):
@@ -242,6 +265,97 @@ class UserReasoningActionsResult(BaseModel):
     """User review never creates inferred Memories directly."""
 
     hypothesis_actions: HypothesisActions | None = None
+
+
+class CoverageCriterionPatch(BaseModel):
+    criterion_id: str
+    level: CoverageLevel
+    known_state: str = ""
+    evidence_memory_ids: list[str] = Field(default_factory=list)
+
+
+class CoverageBoundary(BaseModel):
+    id: str = Field(min_length=1)
+    kind: CoverageBoundaryKind
+    status: CoverageBoundaryStatus = "open"
+    summary: str = Field(min_length=1)
+    criterion_refs: list[str] = Field(default_factory=list)
+    evidence_memory_ids: list[str] = Field(default_factory=list)
+    hypothesis_id: str | None = None
+    status_reason: str | None = None
+
+
+class CoverageBoundaryUpsert(BaseModel):
+    """A new boundary only; storage assigns its trusted ID."""
+
+    kind: CoverageBoundaryKind
+    summary: str = Field(min_length=1)
+    criterion_refs: list[str] = Field(default_factory=list)
+    evidence_memory_ids: list[str] = Field(default_factory=list)
+    hypothesis_id: str | None = None
+
+
+class CoverageBoundaryTransition(BaseModel):
+    boundary_id: str = Field(min_length=1)
+    status: CoverageBoundaryStatus
+    reason: str = Field(min_length=1)
+
+
+class CoverageAuditPatch(BaseModel):
+    criteria: list[CoverageCriterionPatch] = Field(default_factory=list)
+    boundary_upserts: list[CoverageBoundaryUpsert] = Field(default_factory=list)
+    boundary_transitions: list[CoverageBoundaryTransition] = Field(default_factory=list)
+    life_periods: list[str] = Field(default_factory=list)
+    relationship_arcs: list[str] = Field(default_factory=list)
+    behavioral_contexts: list[str] = Field(default_factory=list)
+
+
+class CoverageMapView(BaseModel):
+    space_id: str
+    revision: int = 0
+    source_watermark: str | None = None
+    source_cursor_id: str | None = None
+    criteria: dict[str, dict[str, Any]] = Field(default_factory=coverage_skeleton)
+    boundaries: list[CoverageBoundary] = Field(default_factory=list)
+    life_periods: list[str] = Field(default_factory=list)
+    relationship_arcs: list[str] = Field(default_factory=list)
+    behavioral_contexts: list[str] = Field(default_factory=list)
+
+
+class LearningGoalUpsert(BaseModel):
+    goal_id: str | None = None
+    prompt: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    criteria_refs: list[str] = Field(min_length=1)
+    boundary_ids: list[str] = Field(min_length=1)
+    focus_kind: Literal["user", "person", "relationship"] = "user"
+    focus_id: str | None = None
+
+
+class LearningGoalTransition(BaseModel):
+    goal_id: str = Field(min_length=1)
+    status: Literal["partial", "answered", "deferred", "retired", "open"]
+    reason: str = Field(min_length=1)
+
+
+class GoalPlanningResult(BaseModel):
+    upserts: list[LearningGoalUpsert] = Field(default_factory=list)
+    transitions: list[LearningGoalTransition] = Field(default_factory=list)
+
+
+class LearningGoalView(BaseModel):
+    id: str
+    space_id: str
+    prompt: str
+    rationale: str
+    criteria_refs: list[str] = Field(default_factory=list)
+    boundary_ids: list[str] = Field(default_factory=list)
+    focus_kind: Literal["user", "person", "relationship"] = "user"
+    focus_id: str | None = None
+    status: LearningGoalStatus
+    status_reason: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class QueryRequest(BaseModel):
