@@ -522,7 +522,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     )
                     candidate_fits = self.context_budget.report(
                         self.context_budget.estimate_request(self._digest_request(candidate))
-                    ).fits and len(candidate_ids) <= 512
+                    ).fits and len(candidate_ids) <= 64
                     if current and not candidate_fits:
                         chunks.append(current)
                         current = []
@@ -538,25 +538,44 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             for chunk in chunks:
                 request = self._digest_request(chunk)
                 self.context_budget.check(self.context_budget.estimate_request(request))
-                _, result = await self._structured_messages(
-                    request.messages, ExtractedOwnerEvidenceDigest,
-                )
                 allowed = set().union(
                     *(self._owner_evidence_source_ids(item) for item in chunk)
                 )
-                accepted = [
-                    OwnerEvidenceDigestView.model_validate(item.model_dump(mode="json"))
-                    for item in result.items
-                    if item.source_memory_ids
-                    and set(item.source_memory_ids) <= allowed
-                ]
-                covered = set().union(
-                    *(set(item.source_memory_ids) for item in accepted), set()
-                )
-                if covered != allowed:
-                    raise LLMOutputError(
-                        "owner evidence digest omitted or invented source Memory IDs"
+                semantic_attempt = 0
+                while True:
+                    _, result = await self._structured_messages(
+                        request.messages, ExtractedOwnerEvidenceDigest,
                     )
+                    accepted = [
+                        OwnerEvidenceDigestView.model_validate(
+                            item.model_dump(mode="json")
+                        )
+                        for item in result.items
+                        if item.source_memory_ids
+                        and set(item.source_memory_ids) <= allowed
+                    ]
+                    covered = set().union(
+                        *(set(item.source_memory_ids) for item in accepted), set()
+                    )
+                    if covered == allowed:
+                        break
+                    if semantic_attempt >= self.max_retries:
+                        raise LLMOutputError(
+                            "owner evidence digest omitted or invented source Memory IDs"
+                        )
+                    delay = self._retry_delay(semantic_attempt)
+                    logger.warning(
+                        "llm_output_retry_scheduled",
+                        extra={
+                            "model": self.model,
+                            "attempt": semantic_attempt + 1,
+                            "result_type": "ExtractedOwnerEvidenceDigest",
+                            "reason": "source_memory_ids_mismatch",
+                            "delay_seconds": round(delay, 3),
+                        },
+                    )
+                    await asyncio.sleep(delay)
+                    semantic_attempt += 1
                 output.extend(accepted)
             if not output:
                 raise ValueError("owner evidence digest made no progress")

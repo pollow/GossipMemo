@@ -162,6 +162,52 @@ def test_owner_reasoning_retries_malformed_structured_output() -> None:
     assert calls == 3
 
 
+def test_owner_digest_retries_semantically_incomplete_source_ids() -> None:
+    calls: list[dict] = []
+    digest_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal digest_attempts
+        payload = json.loads(request.content)
+        calls.append(payload)
+        combined = str(payload["messages"])
+        if "Compress evidence only" in combined:
+            digest_attempts += 1
+            ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
+            returned = ids[:-1] if digest_attempts == 1 else ids
+            body = {"items": [{
+                "summary": "bounded evidence",
+                "source_memory_ids": returned,
+            }]}
+        elif "Return only the requested projection" in combined:
+            body = {"profile_card": {"summary": "ok"}}
+        else:
+            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": json.dumps(body)}}]},
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client,
+                context_budget=ContextBudget(5000, 400, 200),
+                max_retries=1, retry_base_seconds=0.001,
+                retry_max_seconds=0.001,
+            )
+            result = await adapter.reason_person(
+                PersonView(id="p", display_name="Bob"),
+                [_memory(f"m{index}", "证据" * 700) for index in range(6)],
+            )
+            assert result.profile_card == {"summary": "ok"}
+
+    asyncio.run(run())
+    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
+    assert len(digest_calls) >= 2
+    assert digest_calls[0]["messages"] == digest_calls[1]["messages"]
+
+
 def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None:
     calls: list[dict] = []
     budget = ContextBudget(6000, 400, 200)
