@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
@@ -335,10 +336,17 @@ class SocialMemoryWorld:
                 "extract", self.model.extract, messages, context, known_people,
                 comparisons,
             )
-            self.store.apply_extraction(
+            people, relationships = self.store.apply_extraction(
                 space_id, batch_id, result,
                 {memory.id for memory in comparisons},
             )
+            # _spawn deduplicates by owner key; this is a minimal debounce for
+            # online extraction without coupling extraction to induction timing.
+            for person_id in people:
+                self._schedule_person_reason(space_id, person_id)
+            for relationship_id in relationships:
+                self._schedule_relationship_reason(space_id, relationship_id)
+            self._schedule_user_model_reason(space_id)
             logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         except Exception as error:
             self.store.fail_extraction(space_id, batch_id, str(error))
@@ -368,6 +376,14 @@ class SocialMemoryWorld:
             self._reason_person(space_id, person_id),
         )
 
+    def _owner_reason_args(self, method: object, modern: tuple[object, ...], legacy_count: int) -> tuple[object, ...]:
+        """Keep pre-two-stage deterministic fakes usable during the seam transition."""
+        parameters = inspect.signature(method).parameters.values()
+        if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
+            return modern
+        positional = [parameter for parameter in parameters if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+        return modern if len(positional) >= len(modern) else modern[:legacy_count]
+
     async def _reason_person(self, space_id: str, person_id: str) -> None:
         # If Extract updates the same Person while an LLM call is in flight,
         # the optimistic watermark check fails and this loop recomputes from the
@@ -379,14 +395,16 @@ class SocialMemoryWorld:
             person, memories, watermark = context
             if not person.stale:
                 return
+            inferred, hypotheses = self.store.owner_review_context(space_id, "person", person_id)
             result = await self.queue.submit(
-                "reason-person", self.model.reason_person, person, memories
+                "reason-person", self.model.reason_person, *self._owner_reason_args(self.model.reason_person, (person, memories, inferred, hypotheses), 2)
             )
             if self.store.apply_person_reasoning(
                 space_id,
                 person_id,
                 watermark,
                 result,
+                {memory.id for memory in inferred}, {hypothesis.id for hypothesis in hypotheses},
             ):
                 return
 
@@ -412,10 +430,12 @@ class SocialMemoryWorld:
             user_model, memories, watermark = context
             if not user_model.stale:
                 return
+            evidence = [memory for memory in memories if memory.basis != "inferred"]
+            inferred, hypotheses = self.store.owner_review_context(space_id, "user", None)
             result = await self.queue.submit(
-                "reason-user-model", self.model.reason_user_model, memories
+                "reason-user-model", self.model.reason_user_model, *self._owner_reason_args(self.model.reason_user_model, (evidence, inferred, hypotheses), 1)
             )
-            if self.store.apply_user_model_reasoning(space_id, watermark, result):
+            if self.store.apply_user_model_reasoning(space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}):
                 return
 
     async def _reason_relationship(
@@ -428,17 +448,18 @@ class SocialMemoryWorld:
             relationship, memories, watermark = context
             if not relationship.stale:
                 return
+            inferred, hypotheses = self.store.owner_review_context(space_id, "relationship", relationship_id)
             result = await self.queue.submit(
                 "reason-relationship",
                 self.model.reason_relationship,
-                relationship,
-                memories,
+                *self._owner_reason_args(self.model.reason_relationship, (relationship, memories, inferred, hypotheses), 2),
             )
             if self.store.apply_relationship_reasoning(
                 space_id,
                 relationship_id,
                 watermark,
                 result,
+                {memory.id for memory in inferred}, {hypothesis.id for hypothesis in hypotheses},
             ):
                 return
 

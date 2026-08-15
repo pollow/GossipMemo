@@ -27,11 +27,17 @@ from .models import (
     MemoryView,
     ModelMessage,
     PersonReasoningResult,
+    PersonProjectionResult,
+    RelationshipProjectionResult,
+    ReasoningActionsResult,
+    UserReasoningActionsResult,
+    HypothesisView,
     PersonView,
     QueryContext,
     RelationshipReasoningResult,
     RelationshipView,
     UserModelReasoningResult,
+    UserModelView,
     ContinuityReasoningResult,
     ContinuityView,
 )
@@ -43,6 +49,9 @@ from .prompts import (
     USER_MODEL_REASONING_SYSTEM_PROMPT,
     extraction_prompt,
     person_reasoning_prompt,
+    owner_reasoning_prefix,
+    projection_stage_prompt,
+    actions_stage_prompt,
     query_synthesis_prompt,
     relationship_reasoning_prompt,
     user_model_reasoning_prompt,
@@ -74,15 +83,18 @@ class LlmModel(Protocol):
     ) -> ExtractionResult: ...
 
     async def reason_person(
-        self, person: PersonView, memories: Sequence[MemoryView]
+        self, person: PersonView, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> PersonReasoningResult: ...
 
     async def reason_relationship(
-        self, relationship: RelationshipView, memories: Sequence[MemoryView]
+        self, relationship: RelationshipView, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> RelationshipReasoningResult: ...
 
     async def reason_user_model(
-        self, memories: Sequence[MemoryView]
+        self, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> UserModelReasoningResult: ...
 
     async def reason_continuity(
@@ -271,36 +283,39 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         return cast(ExtractionResult, content)
 
     async def reason_person(
-        self, person: PersonView, memories: Sequence[MemoryView]
+        self, person: PersonView, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> PersonReasoningResult:
-        content = await self._structured_call(
-            PERSON_REASONING_SYSTEM_PROMPT,
-            person_reasoning_prompt(person, list(memories), self.user_name),
-            PersonReasoningResult,
+        projection, actions = await self._owner_reasoning(
+            PERSON_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(person, list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), PersonProjectionResult,
         )
-        return cast(PersonReasoningResult, content)
+        return PersonReasoningResult(profile_card=projection.profile_card, **actions.model_dump(exclude_none=True))
 
     async def reason_relationship(
-        self, relationship: RelationshipView, memories: Sequence[MemoryView]
+        self, relationship: RelationshipView, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> RelationshipReasoningResult:
-        content = await self._structured_call(
-            RELATIONSHIP_REASONING_SYSTEM_PROMPT,
-            relationship_reasoning_prompt(
-                relationship, list(memories), self.user_name
-            ),
-            RelationshipReasoningResult,
+        projection, actions = await self._owner_reasoning(
+            RELATIONSHIP_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(relationship, list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), RelationshipProjectionResult,
         )
-        return cast(RelationshipReasoningResult, content)
+        return RelationshipReasoningResult(**projection.model_dump(), **actions.model_dump(exclude_none=True))
 
     async def reason_user_model(
-        self, memories: Sequence[MemoryView]
+        self, memories: Sequence[MemoryView],
+        inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     ) -> UserModelReasoningResult:
-        content = await self._structured_call(
-            USER_MODEL_REASONING_SYSTEM_PROMPT,
-            user_model_reasoning_prompt(list(memories), self.user_name),
-            UserModelReasoningResult,
+        projection, actions = await self._owner_reasoning(
+            USER_MODEL_REASONING_SYSTEM_PROMPT, owner_reasoning_prefix(UserModelView(space_id="current"), list(memories), list(inferred_memories), list(hypotheses), user_name=self.user_name), PersonProjectionResult, UserReasoningActionsResult,
         )
-        return cast(UserModelReasoningResult, content)
+        return UserModelReasoningResult(profile_card=projection.profile_card, hypothesis_actions=actions.hypothesis_actions)
+
+    async def _owner_reasoning(self, system_prompt: str, prefix: str, projection_type: type[BaseModel], actions_type: type[BaseModel] = ReasoningActionsResult) -> tuple[BaseModel, BaseModel]:
+        common = [ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=prefix)]
+        first_messages = common + [ChatMessage(role="user", content=projection_stage_prompt() + "\n" + schema_instruction(projection_type))]
+        first = await self._chat_messages(first_messages, structured=True)
+        projection = _parse_model_output(first, projection_type)
+        second = await self._chat_messages(first_messages + [ChatMessage(role="assistant", content=first), ChatMessage(role="user", content=actions_stage_prompt() + "\n" + schema_instruction(actions_type))], structured=True)
+        return projection, _parse_model_output(second, actions_type)
 
     async def reason_continuity(
         self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
@@ -342,12 +357,14 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         *,
         structured: bool,
     ) -> str:
+        return await self._chat_messages([
+            ChatMessage(role="system", content=system_prompt), ChatMessage(role="user", content=user_prompt)
+        ], structured=structured)
+
+    async def _chat_messages(self, messages: list[ChatMessage], *, structured: bool) -> str:
         request = ChatCompletionRequest(
             model=self.model,
-            messages=[
-                ChatMessage(role="system", content=system_prompt),
-                ChatMessage(role="user", content=user_prompt),
-            ],
+            messages=messages,
             temperature=self.temperature,
             response_format={"type": "json_object"} if structured else None,
             max_tokens=self.max_tokens,

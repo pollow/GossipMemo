@@ -16,6 +16,8 @@ from typing import Any, Iterator, Protocol
 from .models import (
     ExtractionResult,
     HypothesisActions,
+    HypothesisView,
+    HypothesisEvidence,
     InferredMemoryActions,
     ManualMemoryRequest,
     MemoryView,
@@ -1154,6 +1156,19 @@ class SqliteWorldStore:
             watermark = self._person_watermark(connection, space_id, person_id)
         return context.people[0], [m for m in context.memories if m.basis != "inferred"], watermark
 
+    def owner_review_context(self, space_id: str, owner_kind: str, owner_id: str | None) -> tuple[list[MemoryView], list[HypothesisView]]:
+        """Comparison-only state captured with an owner reasoning snapshot."""
+        with self._connect() as connection:
+            if owner_kind == "person":
+                clause, params = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)", [owner_id]
+            elif owner_kind == "relationship":
+                clause, params = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)", [owner_id]
+            else:
+                clause, params = "m.about_user = 1", []
+            inferred = connection.execute(f"SELECT m.* FROM memories m WHERE m.space_id = ? AND m.status = 'active' AND m.basis = 'inferred' AND {clause} ORDER BY m.created_at DESC LIMIT 100", [space_id, *params]).fetchall()
+            hypotheses = connection.execute("SELECT * FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ? AND status = 'open' ORDER BY created_at DESC LIMIT 100", (space_id, owner_kind, owner_id)).fetchall()
+            return ([self._memory_view(connection, row, True) for row in inferred], [HypothesisView(id=row['id'], space_id=row['space_id'], owner_kind=row['owner_kind'], owner_id=row['owner_id'], content=row['content'], kind=row['kind'], confidence=row['confidence'], status=row['status'], promoted_memory_id=row['promoted_memory_id'], evidence=[HypothesisEvidence(memory_id=e['memory_id'], role=e['role']) for e in connection.execute('SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?', (row['id'],)).fetchall()], created_at=row['created_at'], updated_at=row['updated_at']) for row in hypotheses])
+
     def relationship_context(
         self, space_id: str, relationship_id: str
     ) -> tuple[RelationshipView, list[MemoryView]] | None:
@@ -1487,6 +1502,8 @@ class SqliteWorldStore:
         person_id: str,
         expected_watermark: str | None,
         result: PersonReasoningResult,
+        context_inferred_memory_ids: set[str] | None = None,
+        context_hypothesis_ids: set[str] | None = None,
     ) -> bool:
         with self._connect() as connection:
             claimed = connection.execute(
@@ -1511,8 +1528,10 @@ class SqliteWorldStore:
             actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
             self._apply_inferred_memory_actions(
                 connection, space_id, "person", person_id,
-                self._person_reasoning_source_ids(connection, space_id, person_id), set(), actions,
+                self._person_reasoning_source_ids(connection, space_id, person_id), context_inferred_memory_ids or set(), actions,
             )
+            if result.hypothesis_actions:
+                self._apply_hypothesis_actions(connection, space_id, "person", person_id, self._person_reasoning_source_ids(connection, space_id, person_id), context_hypothesis_ids or set(), result.hypothesis_actions)
             final_watermark = self._person_watermark(connection, space_id, person_id)
             connection.execute(
                 """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
@@ -1531,6 +1550,8 @@ class SqliteWorldStore:
         relationship_id: str,
         expected_watermark: str | None,
         result: RelationshipReasoningResult,
+        context_inferred_memory_ids: set[str] | None = None,
+        context_hypothesis_ids: set[str] | None = None,
     ) -> bool:
         with self._connect() as connection:
             if self._relationship_watermark(connection, space_id, relationship_id) != expected_watermark:
@@ -1556,8 +1577,10 @@ class SqliteWorldStore:
             actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
             self._apply_inferred_memory_actions(
                 connection, space_id, "relationship", relationship_id,
-                self._relationship_reasoning_source_ids(connection, space_id, relationship_id), set(), actions,
+                self._relationship_reasoning_source_ids(connection, space_id, relationship_id), context_inferred_memory_ids or set(), actions,
             )
+            if result.hypothesis_actions:
+                self._apply_hypothesis_actions(connection, space_id, "relationship", relationship_id, self._relationship_reasoning_source_ids(connection, space_id, relationship_id), context_hypothesis_ids or set(), result.hypothesis_actions)
             final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
             now = _now()
             connection.execute(
@@ -1924,6 +1947,7 @@ class SqliteWorldStore:
     def apply_user_model_reasoning(
         self, space_id: str, expected_watermark: str | None,
         result: UserModelReasoningResult,
+        context_hypothesis_ids: set[str] | None = None,
     ) -> bool:
         with self._connect() as connection:
             if self._user_model_watermark(connection, space_id) != expected_watermark:
@@ -1936,7 +1960,12 @@ class SqliteWorldStore:
                 (_json(result.profile_card), expected_watermark, now, space_id,
                  expected_watermark),
             )
-            return updated.rowcount == 1
+            if updated.rowcount != 1:
+                return False
+            if result.hypothesis_actions:
+                source_ids = {row["id"] for row in connection.execute("SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND about_user = 1 AND basis <> 'inferred'", (space_id,)).fetchall()}
+                self._apply_hypothesis_actions(connection, space_id, "user", None, source_ids, context_hypothesis_ids or set(), result.hypothesis_actions)
+            return True
 
     def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None:
         """Explicitly replace the rebuildable card (used by USER.md import)."""

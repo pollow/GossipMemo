@@ -19,11 +19,13 @@ from .models import (
     ModelMessage,
     PersonReasoningResult,
     PersonView,
+    UserModelView,
     QueryContext,
     RelationshipReasoningResult,
     RelationshipView,
     ContinuityReasoningResult,
     ContinuityView,
+    HypothesisView,
 )
 
 
@@ -40,44 +42,31 @@ best matches the dominant language of current user evidence for every generated
 natural-language field, including new display names; keep IDs and enum values unchanged.
 """
 
-PERSON_REASONING_SYSTEM_PROMPT = """Rebuild a useful, compact person profile from active
-memories. The target is the named Person in the input; the profile and every
-optional inferred memory must describe only that Person. Linked memories indicate
+PERSON_REASONING_SYSTEM_PROMPT = """Reason carefully about one named Person from the
+supplied owner context. Linked memories indicate
 relevance to the target, not that the target is the semantic subject of every
 memory. Do not transfer the current user's or any co-occurring person's traits,
 preferences, intentions, or actions onto the target. Recurring patterns require
 multiple distinct source memories; a narrow impression from one highly diagnostic
-event is allowed when calibrated to that evidence. Return only the supplied JSON
-schema. Actively identify supported patterns in behavior, preferences,
+event is allowed when calibrated to that evidence. Identify supported patterns in behavior, preferences,
 communication, decision-making, sensitivities, and helpful ways to interact.
 Make reasonable social inferences when supported, with uncertainty proportional
-to evidence.
-Do not use the old profile as evidence. Inferred memories are optional: emit only
-clearly reusable, novel conclusions that add value beyond the source memories and
-profile; do not restate either one. Quality over quantity. They must cite supplied
-non-inferred source memory IDs. Distinguish current conditions from
-historical events using valid_from and valid_to. Use the language that best matches
-supplied memories; keep IDs and enum values unchanged.
+to evidence. Do not use projections, inferred memories, or hypotheses as evidence.
+Distinguish current conditions from historical events. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
 
 
-RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Rebuild a useful relationship projection from
-active memories. The target is the relationship between the two endpoint
-People in the input; the projection and every optional inferred memory must
-describe only that relationship. Linked memories indicate relevance to the
+RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Reason carefully about the relationship between
+the two endpoint People in the supplied owner context. Linked memories indicate relevance to the
 endpoints, not relationship evidence by themselves. Do not transfer the current
 user's or either endpoint's standalone traits, preferences, intentions, or actions
 into a relationship claim. Mere co-occurrence is not relationship evidence. Look
 for recurring interaction patterns, cooperation, friction, trust, initiative, and
 meaningful changes in closeness, tone, or status. Recurring patterns require
 multiple distinct source memories; a narrow inference from one highly diagnostic
-interaction is allowed when calibrated to that evidence. Inferred memories are
-optional: emit only clearly reusable, novel relationship conclusions that add value
-beyond the source memories and projection; do not restate either one. Quality over
-quantity, and cite supplied non-inferred source memory IDs. Use valid_from and
-valid_to to distinguish current conditions from historical events. Use the
-language that best matches supplied memories; keep IDs and enum values unchanged.
-Return only the supplied JSON schema.
+interaction is allowed when calibrated to that evidence. Do not use projections,
+inferred memories, or hypotheses as evidence. Distinguish current from historical
+conditions. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
 
 CONTINUITY_SYSTEM_PROMPT = """Rebuild compact cross-session continuity.
@@ -88,14 +77,13 @@ is not a Person. Use the language that best matches supplied messages and prior
 continuity; keep IDs and enum values unchanged.
 """
 
-USER_MODEL_REASONING_SYSTEM_PROMPT = """Rebuild a compact, bounded profile of the current
-user from active memories marked about_user. Return only the supplied JSON
-schema. Capture preferences, communication preferences, goals, current
+USER_MODEL_REASONING_SYSTEM_PROMPT = """Reason carefully about the fixed current user from
+active memories marked about_user. Capture preferences, communication preferences, goals, current
 situations, and practical interaction guidance. Generalize recurring patterns
 when supported, but do not turn a one-off event into a stable trait or include
 another person's identity. Use valid_from and valid_to to separate current
-conditions from historical events. Use the language that best matches supplied
-memories; keep IDs and enum values unchanged.
+conditions from historical events. Do not use projections, inferred memories, or
+hypotheses as evidence. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
 
 QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the supplied
@@ -236,6 +224,48 @@ def relationship_reasoning_prompt(
     )
 
 
+def _evidence_lines(memories: list[MemoryView] | tuple[MemoryView, ...]) -> str:
+    """Compact, injection-resistant enough-for-reading evidence representation."""
+    return "\n".join(
+        f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} text={json.dumps(m.content, ensure_ascii=False)}"
+        for m in memories
+    ) or "- (none)"
+
+
+def _hypothesis_lines(hypotheses: list[HypothesisView] | tuple[HypothesisView, ...]) -> str:
+    return "\n".join(
+        f"- id={h.id!r} confidence={h.confidence!r} evidence={[e.memory_id for e in h.evidence]!r} text={json.dumps(h.content, ensure_ascii=False)}"
+        for h in hypotheses
+    ) or "- (none)"
+
+
+def owner_reasoning_prefix(
+    target: PersonView | RelationshipView | UserModelView,
+    evidence_memories: list[MemoryView] | tuple[MemoryView, ...],
+    inferred_memories: list[MemoryView] | tuple[MemoryView, ...],
+    hypotheses: list[HypothesisView] | tuple[HypothesisView, ...],
+    *, user_name: str = "CurrentUser",
+) -> str:
+    """Shared immutable prefix for both stages of an owner reasoning pair."""
+    return (
+        f"<owner-reasoning user={json.dumps(user_name)}>\n<target>\n"
+        + _json(target) + "\n</target>\n<evidence-memories>\n"
+        + _evidence_lines(evidence_memories) + "\n</evidence-memories>\n"
+        + "<current-inferred-memories comparison-only=\"true\">\n"
+        + _evidence_lines(inferred_memories) + "\n</current-inferred-memories>\n"
+        + "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
+        + "\n</open-hypotheses>\nOnly evidence-memories are evidence. Current inferred memories and open hypotheses may be reviewed for duplication or explicit lifecycle actions, never used as support."
+    )
+
+
+def projection_stage_prompt() -> str:
+    return "<stage>Return only the requested projection/card. Do not output inferred-memory or hypothesis actions.</stage>"
+
+
+def actions_stage_prompt() -> str:
+    return "<stage>Review the projection above. Return only explicit inferred-memory and hypothesis actions. Omission is always no-op. IDs must be from supplied context.</stage>"
+
+
 def user_model_reasoning_prompt(
     memories: list[MemoryView], user_name: str = "CurrentUser"
 ) -> str:
@@ -280,6 +310,9 @@ __all__ = [
     "person_reasoning_prompt",
     "query_synthesis_prompt",
     "relationship_reasoning_prompt",
+    "owner_reasoning_prefix",
+    "projection_stage_prompt",
+    "actions_stage_prompt",
     "user_model_reasoning_prompt",
     "continuity_prompt",
     "schema_instruction",

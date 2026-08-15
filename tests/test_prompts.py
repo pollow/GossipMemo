@@ -101,6 +101,17 @@ def test_reasoning_prompts_allow_useful_social_inference():
     assert "Generalize recurring patterns" in USER_MODEL_REASONING_SYSTEM_PROMPT
 
 
+def test_owner_system_policies_do_not_prescribe_a_stage_output_shape():
+    for prompt in (
+        PERSON_REASONING_SYSTEM_PROMPT,
+        RELATIONSHIP_REASONING_SYSTEM_PROMPT,
+        USER_MODEL_REASONING_SYSTEM_PROMPT,
+    ):
+        assert "Return only" not in prompt
+        assert "JSON schema" not in prompt
+        assert "optional inferred memory" not in prompt
+
+
 def test_person_reasoning_separates_relevance_from_semantic_subject():
     person = PersonView(id="person-a", display_name="Person_A")
     memory = MemoryView(

@@ -16,7 +16,9 @@ from gossipmemo.models import (
     ExtractedMemory,
     MessageInput,
     ModelMessage,
+    MemoryView,
     PersonReasoningResult,
+    PersonView,
     QueryContext,
     QueryRequest,
     ExtractedRelationship,
@@ -484,6 +486,50 @@ def test_openai_compatible_adapter_validates_structured_output():
             assert result.memories[0].basis == "stated"
 
     asyncio.run(scenario())
+
+
+def test_owner_reasoning_uses_an_identical_prefix_for_both_stages():
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        content = '{"profile_card":{"summary":"tea"}}' if len(payloads) == 1 else '{"hypothesis_actions":{"upserts":[],"transitions":[]}}'
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter("http://llm.test/v1", "key", "test-model", client=client)
+            result = await adapter.reason_person(
+                PersonView(id="person_1", display_name="Bob"),
+                [MemoryView(id="memory_1", content="Bob likes tea.", kind="fact", basis="stated", status="active", created_at="2026-08-01T00:00:00+00:00")],
+            )
+            assert result.profile_card == {"summary": "tea"}
+
+    asyncio.run(scenario())
+    first, second = (payload["messages"] for payload in payloads)
+    assert second[:len(first)] == first
+    assert second[len(first)]["role"] == "assistant"
+    assert "<evidence-memories>" in first[1]["content"]
+    assert "comparison-only" in first[1]["content"]
+    assert "inferred_memory_actions" in second[-1]["content"]
+
+
+def test_user_owner_review_schema_excludes_inferred_memory_actions():
+    payloads: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(json.loads(request.content))
+        content = '{"profile_card":{}}' if len(payloads) == 1 else '{"hypothesis_actions":{"upserts":[],"transitions":[]}}'
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
+
+    async def scenario() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter("http://llm.test/v1", "key", "test-model", client=client)
+            await adapter.reason_user_model([])
+
+    asyncio.run(scenario())
+    assert "hypothesis_actions" in payloads[1]["messages"][-1]["content"]
+    assert "inferred_memory_actions" not in payloads[1]["messages"][-1]["content"]
 
 
 def test_openai_compatible_adapter_retries_transient_statuses(monkeypatch):

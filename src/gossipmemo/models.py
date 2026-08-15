@@ -188,12 +188,14 @@ class PersonReasoningResult(BaseModel):
     profile_card: dict[str, Any] = Field(default_factory=dict)
     inferred_memories: list[InferredMemory] = Field(default_factory=list)
     inferred_memory_actions: InferredMemoryActions | None = None
+    hypothesis_actions: HypothesisActions | None = None
 
 
 class UserModelReasoningResult(BaseModel):
     """Bounded, rebuildable profile projection for the current user."""
 
     profile_card: dict[str, Any] = Field(default_factory=dict)
+    hypothesis_actions: HypothesisActions | None = None
 
 
 class ContinuityReasoningResult(BaseModel):
@@ -216,6 +218,30 @@ class RelationshipReasoningResult(BaseModel):
     summary: str = ""
     inferred_memories: list[InferredMemory] = Field(default_factory=list)
     inferred_memory_actions: InferredMemoryActions | None = None
+    hypothesis_actions: HypothesisActions | None = None
+
+
+class PersonProjectionResult(BaseModel):
+    profile_card: dict[str, Any] = Field(default_factory=dict)
+
+
+class RelationshipProjectionResult(BaseModel):
+    facets: list[dict[str, Any]] = Field(default_factory=list)
+    closeness: str | None = None
+    tone: str | None = None
+    status: str = "unknown"
+    summary: str = ""
+
+
+class ReasoningActionsResult(BaseModel):
+    inferred_memory_actions: InferredMemoryActions | None = None
+    hypothesis_actions: HypothesisActions | None = None
+
+
+class UserReasoningActionsResult(BaseModel):
+    """User review never creates inferred Memories directly."""
+
+    hypothesis_actions: HypothesisActions | None = None
 
 
 class QueryRequest(BaseModel):
