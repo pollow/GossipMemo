@@ -9,6 +9,8 @@ callers never need to parse a chat-completions response themselves.
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from types import TracebackType
@@ -46,6 +48,8 @@ from .prompts import (
     continuity_prompt,
     schema_instruction,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable
@@ -301,13 +305,17 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
         try:
+            started = time.perf_counter()
             response = await client.post(
                 self.endpoint,
                 headers=headers,
                 json=request.model_dump(exclude_none=True),
             )
         except httpx.HTTPError as error:
+            logger.exception("llm_call_transport_failed", extra={"model": self.model, "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
             raise LLMRequestError(f"LLM request failed: {error}") from error
+
+        logger.info("llm_call_completed", extra={"model": self.model, "status": response.status_code, "duration_ms": round((time.perf_counter() - started) * 1000, 2), "structured": structured})
 
         if response.is_error:
             detail = _response_detail(response)

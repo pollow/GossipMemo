@@ -33,6 +33,8 @@ class Settings:
     llm_timeout_seconds: float = 120.0
     extraction_batch_size: int = 6
     extraction_batch_timeout_seconds: float = 1800.0
+    logging_level: str = "INFO"
+    logging_format: str = "json"
 
     def __post_init__(self) -> None:
         missing = [
@@ -58,6 +60,18 @@ class Settings:
             )
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("port must be between 1 and 65535")
+        if self.logging_level.upper() not in {
+            "CRITICAL",
+            "ERROR",
+            "WARNING",
+            "INFO",
+            "DEBUG",
+        }:
+            raise ConfigurationError(
+                "logging_level must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG"
+            )
+        if self.logging_format.lower() not in {"json", "text"}:
+            raise ConfigurationError("logging_format must be json or text")
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -80,6 +94,8 @@ class Settings:
             extraction_batch_timeout_seconds=float(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS", "1800")
             ),
+            logging_level=_env("GOSSIPMEMO_LOG_LEVEL", "INFO").upper(),
+            logging_format=_env("GOSSIPMEMO_LOG_FORMAT", "json").lower(),
         )
 
 

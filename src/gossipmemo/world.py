@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .llm import LLMModel
+from .logging import elapsed_ms
 from .models import (
     HealthResponse,
     IngestRequest,
@@ -58,6 +59,8 @@ class SocialMemoryWorld:
         self._induction_task: asyncio.Task[None] | None = None
 
     async def start(self) -> None:
+        logger.info("world_start_begin")
+        started = asyncio.get_running_loop().time()
         self._stopping = False
         self.store.initialize()
         await self.queue.start()
@@ -75,8 +78,18 @@ class SocialMemoryWorld:
         self._induction_task = asyncio.create_task(
             self._induction_loop(), name="gossipmemo-daily-induction"
         )
+        logger.info(
+            "world_start_complete",
+            extra={
+                "pending_extractions": len(self.store.pending_extractions()),
+                "duration_ms": round(
+                    (asyncio.get_running_loop().time() - started) * 1000, 2
+                ),
+            },
+        )
 
     async def stop(self) -> None:
+        started = asyncio.get_running_loop().time()
         self._stopping = True
         if self._induction_task:
             self._induction_task.cancel()
@@ -94,6 +107,7 @@ class SocialMemoryWorld:
         close = getattr(self.model, "aclose", None)
         if close is not None:
             await close()
+        logger.info("world_stop_complete", extra={"duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
 
     def _spawn(
         self,
@@ -118,14 +132,17 @@ class SocialMemoryWorld:
         task.add_done_callback(self._tasks.discard)
 
     async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
+        started = asyncio.get_running_loop().time()
         message_ids = self.store.record_messages(space_id, request.messages)
         self._drain_extraction_batches(space_id)
         if space_id in self.store.pending_continuities(self.continuity_threshold):
             self._schedule_continuity_reason(space_id)
+        logger.info("ingest_completed", extra={"space_id": space_id, "message_count": len(message_ids), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return IngestResponse(message_ids=message_ids)
 
     async def turn(self, space_id: str, request: TurnRequest) -> TurnResponse:
         """Persist this turn first; all enrichment is best-effort and local."""
+        started = asyncio.get_running_loop().time()
         message_ids = self.store.record_messages(space_id, [request.message])
         self._drain_extraction_batches(space_id)
         if space_id in self.store.pending_continuities(self.continuity_threshold):
@@ -153,6 +170,7 @@ class SocialMemoryWorld:
         except Exception:
             context_status = "unavailable"
             logger.exception("turn context preparation failed for %s", space_id)
+        logger.info("turn_completed", extra={"space_id": space_id, "message_count": 1, "known_people": len(known_people), "recalled_memories": len(memory_recall), "context_status": context_status, "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return TurnResponse(
             message_id=message_id,
             known_people=known_people,
@@ -162,6 +180,7 @@ class SocialMemoryWorld:
         )
 
     def _schedule_continuity_reason(self, space_id: str) -> None:
+        logger.info("continuity_scheduled", extra={"space_id": space_id})
         self._spawn(("continuity", space_id, space_id), self._reason_continuity(space_id))
 
     async def _reason_continuity(self, space_id: str) -> None:
@@ -175,6 +194,7 @@ class SocialMemoryWorld:
             result = await self.queue.submit(
                 "reason-continuity", self.model.reason_continuity, continuity, messages
             )
+            logger.info("continuity_extracted", extra={"space_id": space_id, "message_count": len(messages)})
             expected = continuity.through_message_id if continuity else None
             if self.store.apply_continuity_reasoning(space_id, expected, result):
                 continue
@@ -188,6 +208,7 @@ class SocialMemoryWorld:
                 [message_id for message_id, _ in pending[: self.extraction_batch_size]],
             )
             if batch_id:
+                logger.info("extraction_batch_scheduled", extra={"space_id": space_id, "batch_id": batch_id, "message_count": self.extraction_batch_size})
                 self._schedule_extract(space_id, batch_id)
             pending = self.store.unbatched_messages(space_id)
         if pending:
@@ -227,6 +248,7 @@ class SocialMemoryWorld:
         self._flush_tasks[space_id] = task
 
     def _schedule_extract(self, space_id: str, batch_id: str) -> None:
+        logger.info("extraction_scheduled", extra={"space_id": space_id, "batch_id": batch_id})
         self._spawn(
             ("extract", space_id, batch_id),
             self._extract(space_id, batch_id),
@@ -236,12 +258,14 @@ class SocialMemoryWorld:
         messages = self.store.load_batch(space_id, batch_id)
         if not messages:
             return
+        started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
             result = await self.queue.submit("extract", self.model.extract, messages)
             self.store.apply_extraction(
                 space_id, batch_id, result
             )
+            logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         except Exception as error:
             self.store.fail_extraction(space_id, batch_id, str(error))
             logger.exception("extract failed for %s", batch_id)
@@ -371,6 +395,14 @@ class SocialMemoryWorld:
         if self._stopping:
             return
         people, relationships, user_models = self.store.stale_entities()
+        logger.info(
+            "induction_scan_completed",
+            extra={
+                "people": len(people),
+                "relationships": len(relationships),
+                "user_models": len(user_models),
+            },
+        )
         for space_id, person_id in people:
             self._schedule_person_reason(space_id, person_id)
         for space_id, relationship_id in relationships:

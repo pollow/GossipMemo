@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 
 from .models import QueueStatus
+
+logger = logging.getLogger(__name__)
 
 
 T = TypeVar("T")
@@ -47,6 +51,7 @@ class SequentialLLMQueue:
         self._worker = asyncio.create_task(
             self._run(), name="gossipmemo-llm-queue"
         )
+        logger.info("llm_queue_started")
 
     async def submit(
         self,
@@ -69,6 +74,7 @@ class SequentialLLMQueue:
             await self._jobs.put(None)
         await self._worker
         self._worker = None
+        logger.info("llm_queue_stopped")
 
     async def _run(self) -> None:
         while True:
@@ -77,12 +83,16 @@ class SequentialLLMQueue:
                 if job is None:
                     return
                 self._current_label = job.label
+                started = time.perf_counter()
+                logger.info("llm_queue_job_started", extra={"operation": job.label, "pending": self._jobs.qsize()})
                 try:
                     result = await job.operation(*job.args)
                 except Exception as error:
+                    logger.exception("llm_queue_job_failed", extra={"operation": job.label, "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
                     if not job.future.done():
                         job.future.set_exception(error)
                 else:
+                    logger.info("llm_queue_job_completed", extra={"operation": job.label, "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
                     if not job.future.done():
                         job.future.set_result(result)
                 finally:

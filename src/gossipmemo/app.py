@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import secrets
+import logging
+import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator
 
@@ -9,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from .config import Settings
 from .llm import create_llm
+from .logging import configure_logging, elapsed_ms, request_id_context
 from .models import (
     HealthResponse,
     IngestRequest,
@@ -38,15 +42,22 @@ def create_app(
     settings: Settings,
     world: SocialMemoryWorld | None = None,
 ) -> FastAPI:
+    configure_logging(settings.logging_level, settings.logging_format)
     world = world or build_world(settings)
+    logger = logging.getLogger(__name__)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        started = time.perf_counter()
+        logger.info("startup_begin")
         await world.start()
+        logger.info("startup_complete", extra={"duration_ms": elapsed_ms(started)})
         try:
             yield
         finally:
+            started = time.perf_counter()
             await world.stop()
+            logger.info("shutdown_complete", extra={"duration_ms": elapsed_ms(started)})
 
     app = FastAPI(
         title="GossipMemo",
@@ -56,6 +67,41 @@ def create_app(
     )
     app.state.world = world
     app.state.settings = settings
+
+    @app.middleware("http")
+    async def request_logging(request: Request, call_next):
+        supplied = request.headers.get("x-request-id", "").strip()
+        valid = (
+            supplied
+            and len(supplied) <= 128
+            and all(32 <= ord(character) < 127 for character in supplied)
+        )
+        request_id = supplied if valid else str(uuid.uuid4())
+        token = request_id_context.set(request_id)
+        started = time.perf_counter()
+        status_code = 500
+        try:
+            response = await call_next(request)
+            status_code = response.status_code
+            response.headers["X-Request-ID"] = request_id
+            return response
+        except Exception:
+            logger.exception(
+                "http_request_failed",
+                extra={"method": request.method, "path": request.url.path},
+            )
+            raise
+        finally:
+            logger.info(
+                "http_request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status_code,
+                    "duration_ms": elapsed_ms(started),
+                },
+            )
+            request_id_context.reset(token)
 
     @app.exception_handler(AmbiguousPersonError)
     async def ambiguous_person(

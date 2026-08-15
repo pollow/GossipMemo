@@ -48,6 +48,13 @@ when its oldest message has waited 30 minutes. These values can be changed with
 Profile induction runs once per day at local midnight. Startup performs one
 stale-profile catch-up before waiting for the next induction run.
 
+Application logs go to stderr in structured JSON at `INFO` by default. Set
+`GOSSIPMEMO_LOG_LEVEL` to `DEBUG`, `WARNING`, or another standard level, and
+`GOSSIPMEMO_LOG_FORMAT=text` for local development. HTTP requests receive (or
+preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
+counts, status, and durations—not message bodies, bearer tokens, or LLM API
+keys.
+
 ## Smoke test a running server
 
 After starting the server, run:
