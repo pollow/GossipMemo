@@ -333,7 +333,8 @@ def owner_reasoning_prefix(
 def owner_evidence_digest_prompt(memories: list[Any], user_name: str = "CurrentUser") -> str:
     return ("Compress supplied raw evidence only. Preserve chronology, basis, uncertainty, "
             "contradictions, semantic subject, and exact source_memory_ids. Do not infer people, "
-            "traits, or actions; never invent IDs.\n" + _json([
+            "traits, or actions; never invent IDs. Return exactly one digest item covering every "
+            "supplied source ID.\n" + _json([
                 item.model_dump(mode="json") if isinstance(item, BaseModel) else item
                 for item in memories
             ]))

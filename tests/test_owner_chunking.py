@@ -223,7 +223,7 @@ def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
                 # already-validated original ID; the server inherits them.
                 body = {"items": [{
                     "summary": "reduced",
-                    "source_memory_ids": ids[:1],
+                    "source_memory_ids": ["forged"],
                 }]}
             else:
                 groups = [ids[index:index + 2] for index in range(0, len(ids), 2)]

@@ -552,6 +552,20 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     _, result = await self._structured_messages(
                         request.messages, ExtractedOwnerEvidenceDigest,
                     )
+                    if recursive and result.items:
+                        # Reduce inputs already passed strict raw-ID
+                        # validation. Ignore any model-copied IDs here and
+                        # deterministically inherit the trusted server union.
+                        accepted = [OwnerEvidenceDigestView(
+                            summary="\n".join(
+                                item.summary for item in result.items
+                            )[:600],
+                            source_memory_ids=sorted(allowed),
+                            basis="compressed",
+                            uncertainty="",
+                            semantic_subject="",
+                        )]
+                        break
                     accepted = [
                         OwnerEvidenceDigestView.model_validate(
                             item.model_dump(mode="json")
@@ -563,19 +577,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     covered = set().union(
                         *(set(item.source_memory_ids) for item in accepted), set()
                     )
-                    if recursive and accepted:
-                        # These inputs already passed strict raw-ID validation.
-                        # The server carries their provenance union through the
-                        # reduce layer instead of asking the model to retype a
-                        # large mechanical ID list on every recursive pass.
-                        accepted = [OwnerEvidenceDigestView(
-                            summary="\n".join(item.summary for item in accepted)[:600],
-                            source_memory_ids=sorted(allowed),
-                            basis="compressed",
-                            uncertainty="",
-                            semantic_subject="",
-                        )]
-                        break
                     if covered == allowed:
                         break
                     if semantic_attempt >= self.max_retries:
