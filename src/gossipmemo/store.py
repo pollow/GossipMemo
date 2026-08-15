@@ -96,6 +96,14 @@ class WorldStore(Protocol):
 
     def load_batch(self, space_id: str, batch_id: str) -> list[ModelMessage]: ...
 
+    def load_extraction_context(
+        self, space_id: str, batch_id: str, limit: int = 2
+    ) -> list[ModelMessage]: ...
+
+    def load_known_people(
+        self, space_id: str, messages: list[ModelMessage]
+    ) -> list[dict[str, Any]]: ...
+
     def apply_extraction(
         self, space_id: str, batch_id: str, result: ExtractionResult
     ) -> tuple[set[str], set[str]]: ...
@@ -389,6 +397,104 @@ class SqliteWorldStore:
                 )
                 for row in rows
             ]
+
+    def load_extraction_context(
+        self, space_id: str, batch_id: str, limit: int = 2
+    ) -> list[ModelMessage]:
+        """Load recent same-conversation messages preceding an extraction batch."""
+        if limit <= 0:
+            return []
+        with self._connect() as connection:
+            batch_rows = connection.execute(
+                """SELECT source_provider, source_conversation_key
+                   FROM messages
+                   WHERE space_id = ? AND extraction_batch_id = ?
+                     AND extraction_state != 'completed'
+                     AND source_provider != ''
+                     AND source_conversation_key IS NOT NULL
+                     AND source_conversation_key != ''
+                   GROUP BY source_provider, source_conversation_key""",
+                (space_id, batch_id),
+            ).fetchall()
+            selected: list[sqlite3.Row] = []
+            for batch_row in batch_rows:
+                first_batch_row = connection.execute(
+                    """SELECT MIN(rowid) AS first_rowid FROM messages
+                       WHERE space_id = ? AND extraction_batch_id = ?
+                         AND source_provider = ?
+                         AND source_conversation_key = ?""",
+                    (
+                        space_id,
+                        batch_id,
+                        batch_row["source_provider"],
+                        batch_row["source_conversation_key"],
+                    ),
+                ).fetchone()
+                if first_batch_row is None or first_batch_row["first_rowid"] is None:
+                    continue
+                selected.extend(
+                    connection.execute(
+                        """SELECT rowid AS message_rowid, * FROM messages
+                       WHERE space_id = ? AND source_provider = ?
+                         AND source_conversation_key = ?
+                         AND rowid < ?
+                       ORDER BY rowid DESC LIMIT ?""",
+                        (
+                            space_id,
+                            batch_row["source_provider"],
+                            batch_row["source_conversation_key"],
+                            first_batch_row["first_rowid"],
+                            limit,
+                        ),
+                    ).fetchall()
+                )
+            selected.sort(key=lambda row: row["message_rowid"])
+            return [
+                ModelMessage(
+                    id=row["id"],
+                    space_id=row["space_id"],
+                    author=row["author"],
+                    content=row["content"],
+                    occurred_at=row["occurred_at"],
+                    source_provider=row["source_provider"],
+                    source_conversation_key=row["source_conversation_key"],
+                    source_item_id=row["source_item_id"],
+                    source_metadata=_loads(row["source_metadata"], {}),
+                )
+                for row in selected
+            ]
+
+    def load_known_people(
+        self, space_id: str, messages: list[ModelMessage]
+    ) -> list[dict[str, Any]]:
+        """Return matching active people with their complete alias catalogs."""
+        if not messages:
+            return []
+        matched = self.match_people_in_text(
+            space_id, "\n".join(message.content for message in messages)
+        )
+        if not matched:
+            return []
+        person_ids = [person.id for person in matched]
+        placeholders = ",".join("?" for _ in person_ids)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""SELECT p.id, p.display_name, a.value AS alias
+                   FROM people p JOIN person_aliases a ON a.person_id = p.id
+                   WHERE p.space_id = ? AND p.status = 'active'
+                     AND p.id IN ({placeholders})
+                   ORDER BY p.display_name, a.value""",
+                (space_id, *person_ids),
+            ).fetchall()
+        catalog: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = catalog.setdefault(
+                row["id"],
+                {"id": row["id"], "display_name": row["display_name"], "aliases": []},
+            )
+            if row["alias"] not in item["aliases"]:
+                item["aliases"].append(row["alias"])
+        return list(catalog.values())
 
     def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None:
         with self._connect() as connection:

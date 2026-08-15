@@ -107,6 +107,8 @@ def _json(value: Any) -> str:
 def extraction_prompt(
     messages: list[ModelMessage],
     policy: str = "balanced",
+    context: list[ModelMessage] | tuple[ModelMessage, ...] = (),
+    known_people: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
@@ -129,7 +131,10 @@ def extraction_prompt(
     return (
         f"Use the server's {policy} extraction policy for the whole batch.\n"
         f"{policy_text[policy]}\n"
-        "Extract the messages together as one conversational context.\n"
+        "Extract the messages together as one conversational context. Recent "
+        "context is provided only to resolve references and conversational meaning; "
+        "it is not evidence and must not produce memories. Only the New messages may "
+        "produce memories.\n"
         "The user/assistant author role is context and never a Person. List every "
         "Person referenced by a memory in its `people` refs; express who said or "
         "did what in the memory content itself. Preserve reported claims as "
@@ -137,7 +142,14 @@ def extraction_prompt(
         "current user; the current user is not a Person and must never appear in "
         "`people`. "
         "Record valid_from/valid_to when the message gives a time bound.\n\n"
-        "Messages:\n"
+        "Recent context (context only):\n"
+        + _json(list(context))
+        + "\n\nKnown people (identity hints only):\n"
+        + _json(list(known_people))
+        + "\nReuse a known person's canonical display_name when the messages refer "
+        "to them. If the messages explicitly introduce a new short name, return "
+        "it in that person's `aliases` field.\n"
+        + "\n\nNew messages (the only evidence allowed to produce memories):\n"
         + _json(messages)
     )
 

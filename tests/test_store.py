@@ -14,6 +14,7 @@ from gossipmemo.models import (
     ManualMemoryRequest,
     ExtractedMemory,
     MessageInput,
+    ModelMessage,
     PersonReasoningResult,
     QueryRequest,
     ExtractedRelationship,
@@ -77,6 +78,81 @@ def test_record_messages_is_idempotent_by_key_and_source_identity(store):
     assert _rows(store, "SELECT content FROM messages WHERE id = ?", (first,))[0][
         "content"
     ] == _message().content
+
+
+def test_known_person_context_supports_later_alias_update(store):
+    ids = store.record_messages("personal", [_message(content="Alex Wang")])
+    batch_id = _batch(store, ids[0])
+    store.apply_extraction(
+        "personal",
+        batch_id,
+        ExtractionResult(
+            people=[ExtractedPerson(ref="alex", display_name="Alex Wang")]
+        ),
+    )
+    original_person_id = _rows(store, "SELECT id FROM people")[0]["id"]
+    messages = [
+        # ModelMessage is deliberately used here to represent an extraction target.
+        ModelMessage(
+            id="target",
+            space_id="personal",
+            author="user",
+            content="以后管 Alex Wang 叫 AW",
+            occurred_at="2026-08-09T12:00:00+00:00",
+            source_provider="agent_chat",
+        )
+    ]
+    catalog = store.load_known_people("personal", messages)
+    assert catalog == [
+        {
+            "id": original_person_id,
+            "display_name": "Alex Wang",
+            "aliases": ["Alex Wang"],
+        }
+    ]
+
+    alias_message_id = store.record_messages(
+        "personal", [_message(content="以后管 Alex Wang 叫 AW")]
+    )[0]
+    store.apply_extraction(
+        "personal",
+        _batch(store, alias_message_id),
+        ExtractionResult(
+            people=[
+                ExtractedPerson(
+                    ref="alex", display_name="Alex Wang", aliases=["AW"]
+                )
+            ]
+        ),
+    )
+
+    assert len(_rows(store, "SELECT id FROM people")) == 1
+    assert store.match_people_in_text("personal", "AW")[0].id == original_person_id
+
+
+def test_load_extraction_context_is_recent_per_conversation(store):
+    def msg(content: str, conversation: str | None) -> MessageInput:
+        return MessageInput(
+            author="user", content=content,
+            source=SourceRef(provider="agent_chat", conversation_key=conversation),
+        )
+
+    store.record_messages(
+        "personal",
+        [
+            msg("old-1", "chat"),
+            msg("old-2", "chat"),
+            msg("old-3", "chat"),
+            msg("other", "other-chat"),
+            msg("no-context", None),
+        ],
+    )
+    batch_ids = store.record_messages(
+        "personal", [msg("target-1", "chat"), msg("target-2", "chat")]
+    )
+    batch_id = _batch(store, *batch_ids)
+    context = store.load_extraction_context("personal", batch_id)
+    assert [item.content for item in context] == ["old-2", "old-3"]
 
 
 def test_record_messages_idempotency_is_atomic_across_concurrent_callers(store):
@@ -308,8 +384,8 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     class FakeModel:
         configured = True
 
-        async def extract(self, message):
-            del message
+        async def extract(self, message, context=(), known_people=()):
+            del message, context, known_people
             return ExtractionResult(
                 people=[ExtractedPerson(ref="bob", display_name="Bob")],
                 memories=[

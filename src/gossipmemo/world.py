@@ -317,10 +317,14 @@ class SocialMemoryWorld:
         messages = self.store.load_batch(space_id, batch_id)
         if not messages:
             return
+        context = self.store.load_extraction_context(space_id, batch_id)
+        known_people = self.store.load_known_people(space_id, messages + context)
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
-            result = await self.queue.submit("extract", self.model.extract, messages)
+            result = await self.queue.submit(
+                "extract", self.model.extract, messages, context, known_people
+            )
             self.store.apply_extraction(
                 space_id, batch_id, result
             )

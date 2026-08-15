@@ -109,7 +109,8 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         def __init__(self):
             self.extractions = 0
 
-        async def extract(self, messages):
+        async def extract(self, messages, context=(), known_people=()):
+            del context, known_people
             self.extractions += 1
             return ExtractionResult(
                 memories=[

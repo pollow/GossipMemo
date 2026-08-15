@@ -36,6 +36,24 @@ def test_extraction_prompt_applies_batch_policy_and_dates():
     )
 
 
+def test_extraction_prompt_separates_recent_context_from_new_evidence():
+    prompt = extraction_prompt(
+        [message("new")],
+        context=[message("old")],
+        known_people=[
+            {
+                "id": "person_1",
+                "display_name": "Alex Wang",
+                "aliases": ["Alex Wang"],
+            }
+        ],
+    )
+    assert "Recent context (context only)" in prompt
+    assert "Alex Wang" in prompt
+    assert "canonical display_name" in prompt
+    assert "New messages (the only evidence allowed to produce memories)" in prompt
+
+
 def test_reasoning_prompts_allow_useful_social_inference():
     assert "patterns" in PERSON_REASONING_SYSTEM_PROMPT
     assert "social inferences" in PERSON_REASONING_SYSTEM_PROMPT

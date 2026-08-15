@@ -34,8 +34,8 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 class FakeModel:
     configured = True
 
-    async def extract(self, message):
-        del message
+    async def extract(self, message, context=(), known_people=()):
+        del message, context, known_people
         return ExtractionResult()
 
     async def reason_person(self, person, memories):
@@ -226,7 +226,8 @@ def test_extraction_batches_default_to_six_messages(tmp_path):
     calls: list[int] = []
 
     class BatchModel(FakeModel):
-        async def extract(self, messages):
+        async def extract(self, messages, context=(), known_people=()):
+            del context, known_people
             calls.append(len(messages))
             return ExtractionResult()
 
@@ -261,7 +262,8 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
     calls: list[int] = []
 
     class BatchModel(FakeModel):
-        async def extract(self, messages):
+        async def extract(self, messages, context=(), known_people=()):
+            del context, known_people
             calls.append(len(messages))
             return ExtractionResult()
 
