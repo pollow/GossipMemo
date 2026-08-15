@@ -1787,7 +1787,7 @@ class SqliteWorldStore:
 
     def continuity_context(
         self, space_id: str, limit: int = 32,
-        max_message_chars: int = 8000, max_total_chars: int = 48000,
+        max_message_chars: int | None = None, max_total_chars: int | None = None,
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -1811,10 +1811,13 @@ class SqliteWorldStore:
             messages: list[ModelMessage] = []
             total_chars = 0
             for item in rows:
-                remaining = max_total_chars - total_chars
-                if remaining <= 0:
+                if max_total_chars is not None and total_chars >= max_total_chars:
                     break
-                content = item["content"][:min(max_message_chars, remaining)]
+                content = item["content"]
+                if max_message_chars is not None:
+                    content = content[:max_message_chars]
+                if max_total_chars is not None:
+                    content = content[:max_total_chars - total_chars]
                 messages.append(ModelMessage(
                     id=item["id"], space_id=item["space_id"], author=item["author"],
                     content=content, occurred_at=item["occurred_at"],

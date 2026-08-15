@@ -46,6 +46,8 @@ from .models import (
     CoverageAuditPatch,
     CoverageMapView,
     GoalPlanningResult,
+    GoalPlanningCandidates,
+    LearningGoalCandidate,
     LearningGoalView,
 )
 from .prompts import (
@@ -69,6 +71,9 @@ from .prompts import (
     continuity_prompt,
     coverage_audit_prompt,
     goal_planning_prompt,
+    goal_candidate_prompt,
+    goal_reconciliation_prompt,
+    goal_candidate_reduction_prompt,
     schema_instruction,
 )
 
@@ -566,34 +571,340 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     async def reason_continuity(
         self, continuity: ContinuityView | None, messages: Sequence[ModelMessage]
     ) -> ContinuityReasoningResult:
-        content = await self._structured_call(
-            CONTINUITY_SYSTEM_PROMPT,
-            continuity_prompt(continuity, list(messages)),
-            ContinuityReasoningResult,
+        source = list(messages)
+        if not source:
+            raise ValueError("continuity requires at least one message")
+        request_for = lambda prior, chunk: self._structured_request(
+            CONTINUITY_SYSTEM_PROMPT, continuity_prompt(prior, chunk), ContinuityReasoningResult
         )
-        return cast(ContinuityReasoningResult, content)
+        normal = request_for(continuity, source)
+        if self.context_budget.report(self.context_budget.estimate_request(normal)).fits:
+            raw = await self._chat_messages(normal.messages, structured=True)
+            return _parse_model_output(raw, ContinuityReasoningResult)
+        # Reserve room for the streamed typed prior, not merely the initial
+        # empty/null continuity object.
+        chunk_prior = ContinuityView(
+            text=(continuity.text if continuity and continuity.text else "summary"),
+            related_person_ids=(continuity.related_person_ids if continuity and continuity.related_person_ids else ["person"]),
+            through_message_id=(continuity.through_message_id if continuity and continuity.through_message_id else "continuity"),
+        )
+        chunks = self._greedy_chunks(source, lambda chunk: request_for(chunk_prior, chunk))
+        # A small normal update deliberately remains one call.  Large updates
+        # stream typed summaries forward; only the caller persists the final one.
+        prior = continuity
+        result: ContinuityReasoningResult | None = None
+        for chunk in chunks:
+            prior = self._fit_continuity_prior(prior, chunk, request_for)
+            request = request_for(prior, chunk)
+            raw = await self._chat_messages(request.messages, structured=True)
+            result = _parse_model_output(raw, ContinuityReasoningResult)
+            prior = ContinuityView(**result.model_dump())
+        assert result is not None
+        return result.model_copy(update={"through_message_id": source[-1].id})
 
     async def audit_coverage(
         self, coverage: CoverageMapView, memories: Sequence[MemoryView],
         hypotheses: Sequence[HypothesisView] = (),
     ) -> CoverageAuditPatch:
-        content = await self._structured_call(
+        normal = self._structured_request(COVERAGE_AUDIT_SYSTEM_PROMPT, coverage_audit_prompt(coverage, list(memories), list(hypotheses)), CoverageAuditPatch)
+        if self.context_budget.report(self.context_budget.estimate_request(normal)).fits:
+            raw = await self._chat_messages(normal.messages, structured=True)
+            return _parse_model_output(raw, CoverageAuditPatch)
+        bounded_coverage, bounded_hypotheses = self._bounded_coverage_context(coverage, hypotheses)
+        request_for = lambda chunk: self._structured_request(
             COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(coverage, list(memories), list(hypotheses)),
+            coverage_audit_prompt(bounded_coverage, chunk, bounded_hypotheses),
             CoverageAuditPatch,
         )
-        return cast(CoverageAuditPatch, content)
+        patches: list[CoverageAuditPatch] = []
+        for chunk in self._greedy_chunks(list(memories), request_for):
+            request = request_for(chunk)
+            raw = await self._chat_messages(request.messages, structured=True)
+            patches.append(self._filter_coverage_patch(
+                _parse_model_output(raw, CoverageAuditPatch),
+                {memory.id for memory in chunk},
+            ))
+        return CoverageAuditPatch(
+            criteria=[item for patch in patches for item in patch.criteria],
+            boundary_upserts=[item for patch in patches for item in patch.boundary_upserts],
+            boundary_transitions=[item for patch in patches for item in patch.boundary_transitions],
+            life_periods=[item for patch in patches for item in patch.life_periods],
+            relationship_arcs=[item for patch in patches for item in patch.relationship_arcs],
+            behavioral_contexts=[item for patch in patches for item in patch.behavioral_contexts],
+        )
 
     async def plan_learning_goals(
         self, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
         open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
     ) -> GoalPlanningResult:
-        content = await self._structured_call(
+        normal = self._structured_request(
             GOAL_PLANNING_SYSTEM_PROMPT,
             goal_planning_prompt(coverage, list(hypotheses), list(open_goals), list(recent_closed_goals)),
             GoalPlanningResult,
         )
-        return cast(GoalPlanningResult, content)
+        if self.context_budget.report(self.context_budget.estimate_request(normal)).fits:
+            return cast(GoalPlanningResult, await self._structured_call(
+                GOAL_PLANNING_SYSTEM_PROMPT,
+                goal_planning_prompt(coverage, list(hypotheses), list(open_goals), list(recent_closed_goals)), GoalPlanningResult,
+            ))
+
+        bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed = self._bounded_goal_context(
+            coverage, hypotheses, open_goals, recent_closed_goals,
+        )
+        candidate_request = lambda chunk: self._structured_request(
+            GOAL_PLANNING_SYSTEM_PROMPT,
+            goal_candidate_prompt(bounded_coverage, chunk, bounded_open, bounded_closed),
+            GoalPlanningCandidates,
+        )
+        candidates: list[LearningGoalCandidate] = []
+        # Candidate passes cover every original hypothesis; only the final
+        # reconciliation uses the complete ID-preserving bounded map.
+        for chunk in self._greedy_chunks(list(hypotheses) or [None], lambda items: candidate_request([item for item in items if item is not None])):
+            request = candidate_request([item for item in chunk if item is not None])
+            raw = await self._chat_messages(request.messages, structured=True)
+            candidates.extend(self._filter_goal_candidates(
+                _parse_model_output(raw, GoalPlanningCandidates).candidates,
+                coverage, hypotheses,
+            ))
+        final_request = self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_reconciliation_prompt(bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed, candidates), GoalPlanningResult)
+        previous_size: int | None = None
+        for _ in range(3):
+            if self.context_budget.report(self.context_budget.estimate_request(final_request)).fits:
+                break
+            chunks = self._greedy_chunks(candidates, lambda items: self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_candidate_reduction_prompt(items), GoalPlanningCandidates))
+            reduced: list[LearningGoalCandidate] = []
+            for chunk in chunks:
+                request = self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_candidate_reduction_prompt(chunk), GoalPlanningCandidates)
+                raw = await self._chat_messages(request.messages, structured=True)
+                reduced.extend(self._filter_goal_candidates(
+                    _parse_model_output(raw, GoalPlanningCandidates).candidates,
+                    coverage, hypotheses,
+                ))
+            size = self.context_budget.estimate_text(str([item.model_dump() for item in reduced]))
+            if not reduced or previous_size is not None and size >= previous_size:
+                raise ValueError("learning-goal candidate reduction made no progress")
+            previous_size, candidates = size, reduced
+            final_request = self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_reconciliation_prompt(bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed, candidates), GoalPlanningResult)
+        else:
+            raise ValueError("learning-goal candidate reduction made no progress within 3 rounds")
+        self.context_budget.check(self.context_budget.estimate_request(final_request))
+        raw = await self._chat_messages(final_request.messages, structured=True)
+        return _parse_model_output(raw, GoalPlanningResult)
+
+    def _structured_request(self, system_prompt: str, user_prompt: str, result_type: type[BaseModel]) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model=self.model,
+            messages=[ChatMessage(role="system", content=system_prompt + "\n\n" + schema_instruction(result_type)), ChatMessage(role="user", content=user_prompt)],
+            temperature=self.temperature, response_format={"type": "json_object"}, max_tokens=self.max_tokens,
+        )
+
+    def _greedy_chunks(self, items: Sequence[Any], request_for: Any) -> list[list[Any]]:
+        """Split by exact serialized request size, including CJK and schemas."""
+        chunks: list[list[Any]] = []
+        current: list[Any] = []
+        for item in items:
+            pieces = self._split_oversized_item(item, request_for)
+            for piece in pieces:
+                candidate = [*current, piece]
+                if current and not self.context_budget.report(self.context_budget.estimate_request(request_for(candidate))).fits:
+                    chunks.append(current)
+                    current = []
+                current.append(piece)
+                self.context_budget.check(self.context_budget.estimate_request(request_for(current)))
+        if current:
+            chunks.append(current)
+        return chunks
+
+    def _split_oversized_item(self, item: Any, request_for: Any) -> list[Any]:
+        if self.context_budget.report(self.context_budget.estimate_request(request_for([item]))).fits:
+            return [item]
+        content = getattr(item, "content", None)
+        if not isinstance(content, str) or not content:
+            raise ValueError("single context item exceeds input budget")
+        lo, hi = 1, len(content)
+        while lo < hi:
+            middle = (lo + hi + 1) // 2
+            candidate = item.model_copy(update={"content": content[:middle]})
+            if self.context_budget.report(self.context_budget.estimate_request(request_for([candidate]))).fits:
+                lo = middle
+            else:
+                hi = middle - 1
+        if lo < 1:
+            raise ValueError("single context item exceeds input budget")
+        return [item.model_copy(update={"content": content[index:index + lo]}) for index in range(0, len(content), lo)]
+
+    def _fit_continuity_prior(self, prior: ContinuityView | None, chunk: list[ModelMessage], request_for: Any) -> ContinuityView | None:
+        if prior is None or self.context_budget.report(self.context_budget.estimate_request(request_for(prior, chunk))).fits:
+            return prior
+        text = prior.text
+        lo, hi = 0, len(text)
+        while lo < hi:
+            middle = (lo + hi + 1) // 2
+            candidate = prior.model_copy(update={"text": text[:middle]})
+            if self.context_budget.report(self.context_budget.estimate_request(request_for(candidate, chunk))).fits:
+                lo = middle
+            else:
+                hi = middle - 1
+        candidate = prior.model_copy(update={"text": text[:lo]})
+        self.context_budget.check(self.context_budget.estimate_request(request_for(candidate, chunk)))
+        return candidate
+
+    def _bounded_coverage_context(self, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView]) -> tuple[CoverageMapView, list[HypothesisView]]:
+        # Bound comparison-only hypotheses and boundary prose before evidence is
+        # added. IDs remain present whenever scaffold space permits it.
+        def fits(
+            candidate_coverage: CoverageMapView,
+            candidate_hypotheses: Sequence[HypothesisView],
+        ) -> bool:
+            request = self._structured_request(
+                COVERAGE_AUDIT_SYSTEM_PROMPT,
+                coverage_audit_prompt(
+                    candidate_coverage, [], list(candidate_hypotheses)
+                ),
+                CoverageAuditPatch,
+            )
+            return self.context_budget.report(self.context_budget.estimate_request(request)).fits
+
+        if fits(coverage, hypotheses):
+            return coverage, list(hypotheses)
+        skeleton_hypotheses = [
+            item.model_copy(update={"content": "", "evidence": []})
+            for item in hypotheses
+        ]
+        if fits(coverage, skeleton_hypotheses):
+            return coverage, skeleton_hypotheses
+
+        bounded = self._coverage_skeleton(coverage)
+        if not fits(bounded, []):
+            raise ValueError("coverage prompt scaffolding exceeds context budget")
+        chosen: list[HypothesisView] = []
+        for hypothesis in hypotheses:
+            skeleton = hypothesis.model_copy(update={"content": "", "evidence": []})
+            if fits(bounded, [*chosen, skeleton]):
+                chosen.append(skeleton)
+        return bounded, chosen
+
+    def _bounded_goal_context(self, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView], open_goals: Sequence[LearningGoalView], closed_goals: Sequence[LearningGoalView]) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]]:
+        # Goal planning has different schemas and prompt scaffolding than a
+        # coverage audit, so its minimum-fit proof must use its own requests.
+        def fits(
+            candidate_coverage: CoverageMapView,
+            candidate_hypotheses: Sequence[HypothesisView],
+            candidate_open: Sequence[LearningGoalView],
+            candidate_closed: Sequence[LearningGoalView],
+        ) -> bool:
+            candidate = self._structured_request(
+                GOAL_PLANNING_SYSTEM_PROMPT,
+                goal_candidate_prompt(
+                    candidate_coverage, list(candidate_hypotheses),
+                    list(candidate_open), list(candidate_closed),
+                ),
+                GoalPlanningCandidates,
+            )
+            final = self._structured_request(
+                GOAL_PLANNING_SYSTEM_PROMPT,
+                goal_reconciliation_prompt(
+                    candidate_coverage, list(candidate_hypotheses),
+                    list(candidate_open), list(candidate_closed), [],
+                ),
+                GoalPlanningResult,
+            )
+            return all(
+                self.context_budget.report(
+                    self.context_budget.estimate_request(request)
+                ).fits
+                for request in (candidate, final)
+            )
+
+        skeleton_hypotheses = [
+            item.model_copy(update={"content": "", "evidence": []})
+            for item in hypotheses
+        ]
+        skeleton_open = [
+            goal.model_copy(update={"prompt": "", "rationale": ""})
+            for goal in open_goals
+        ]
+        skeleton_closed = [
+            goal.model_copy(update={"prompt": "", "rationale": ""})
+            for goal in closed_goals
+        ]
+        if fits(coverage, skeleton_hypotheses, skeleton_open, skeleton_closed):
+            return coverage, skeleton_hypotheses, skeleton_open, skeleton_closed
+
+        bounded_coverage = self._coverage_skeleton(coverage)
+        if not fits(bounded_coverage, [], [], []):
+            raise ValueError("learning-goal minimum skeleton exceeds context budget")
+
+        bounded_hypotheses: list[HypothesisView] = []
+        bounded_open: list[LearningGoalView] = []
+        bounded_closed: list[LearningGoalView] = []
+        # Lifecycle IDs have priority; omitted comparison state is always no-op.
+        for item in skeleton_open:
+            if fits(
+                bounded_coverage, bounded_hypotheses,
+                [*bounded_open, item], bounded_closed,
+            ):
+                bounded_open.append(item)
+        for item in skeleton_hypotheses:
+            if fits(
+                bounded_coverage, [*bounded_hypotheses, item],
+                bounded_open, bounded_closed,
+            ):
+                bounded_hypotheses.append(item)
+        for item in skeleton_closed:
+            if fits(
+                bounded_coverage, bounded_hypotheses,
+                bounded_open, [*bounded_closed, item],
+            ):
+                bounded_closed.append(item)
+        return bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed
+
+    @staticmethod
+    def _coverage_skeleton(coverage: CoverageMapView) -> CoverageMapView:
+        criteria = {
+            identifier: {
+                "level": value.get("level", "unknown"),
+                "known_state": str(value.get("known_state", ""))[:800],
+                "evidence_memory_ids": list(value.get("evidence_memory_ids", []))[:32],
+            }
+            for identifier, value in coverage.criteria.items()
+        }
+        boundaries = [
+            item.model_copy(update={
+                "summary": item.summary[:600],
+                "evidence_memory_ids": item.evidence_memory_ids[:32],
+            })
+            for item in coverage.boundaries
+        ]
+        return coverage.model_copy(update={
+            "criteria": criteria,
+            "boundaries": boundaries,
+            "life_periods": [str(item)[:600] for item in coverage.life_periods[:30]],
+            "relationship_arcs": [str(item)[:600] for item in coverage.relationship_arcs[:30]],
+            "behavioral_contexts": [str(item)[:600] for item in coverage.behavioral_contexts[:30]],
+        })
+
+    @staticmethod
+    def _filter_coverage_patch(patch: CoverageAuditPatch, evidence_ids: set[str]) -> CoverageAuditPatch:
+        return CoverageAuditPatch(
+            criteria=[item.model_copy(update={"evidence_memory_ids": [identifier for identifier in item.evidence_memory_ids if identifier in evidence_ids]}) for item in patch.criteria],
+            boundary_upserts=[item.model_copy(update={"evidence_memory_ids": [identifier for identifier in item.evidence_memory_ids if identifier in evidence_ids]}) for item in patch.boundary_upserts],
+            boundary_transitions=patch.boundary_transitions,
+            life_periods=patch.life_periods, relationship_arcs=patch.relationship_arcs, behavioral_contexts=patch.behavioral_contexts,
+        )
+
+    @staticmethod
+    def _filter_goal_candidates(candidates: Sequence[LearningGoalCandidate], coverage: CoverageMapView, hypotheses: Sequence[HypothesisView]) -> list[LearningGoalCandidate]:
+        criteria = set(coverage.criteria)
+        boundaries = {item.id for item in coverage.boundaries if item.status == "open"}
+        # Focus IDs are deliberately restricted to the IDs visible in the
+        # current planning context; persistence remains the final authority.
+        accepted: list[LearningGoalCandidate] = []
+        for item in candidates:
+            if not set(item.criteria_refs).issubset(criteria) or not set(item.boundary_ids).issubset(boundaries):
+                continue
+            accepted.append(item)
+        return accepted
 
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():

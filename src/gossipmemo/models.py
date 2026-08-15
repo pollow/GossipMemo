@@ -376,6 +376,21 @@ class GoalPlanningResult(BaseModel):
     transitions: list[LearningGoalTransition] = Field(default_factory=list)
 
 
+class LearningGoalCandidate(BaseModel):
+    """A non-mutating proposal used while planning cannot fit in one request."""
+
+    prompt: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    criteria_refs: list[str] = Field(min_length=1)
+    boundary_ids: list[str] = Field(min_length=1)
+    focus_kind: Literal["user", "person", "relationship"] = "user"
+    focus_id: str | None = None
+
+
+class GoalPlanningCandidates(BaseModel):
+    candidates: list[LearningGoalCandidate] = Field(default_factory=list)
+
+
 class LearningGoalView(BaseModel):
     id: str
     space_id: str

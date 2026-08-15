@@ -275,7 +275,15 @@ class SocialMemoryWorld:
 
     async def _reason_continuity(self, space_id: str) -> None:
         while not self._stopping:
-            context = self.store.continuity_context(space_id)
+            # Production adapters own request-aware chunking.  Keep the
+            # historical bounded seam only for minimal deterministic fakes
+            # that cannot expose a ContextBudget.
+            if hasattr(self.model, "context_budget"):
+                context = self.store.continuity_context(space_id)
+            else:
+                context = self.store.continuity_context(
+                    space_id, max_message_chars=8000, max_total_chars=48000,
+                )
             if not context:
                 return
             continuity, messages = context
