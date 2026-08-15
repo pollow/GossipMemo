@@ -674,6 +674,8 @@ class SqliteWorldStore:
             evidence=evidence,
             created_at=row["created_at"],
             about_user=bool(row["about_user"]),
+            valid_from=row["valid_from"],
+            valid_to=row["valid_to"],
         )
 
     def _person_watermark(self, connection: sqlite3.Connection, space_id: str, person_id: str) -> str | None:

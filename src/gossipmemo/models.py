@@ -156,6 +156,8 @@ class MemoryView(BaseModel):
     evidence: list[dict[str, Any]] = Field(default_factory=list)
     created_at: str
     about_user: bool = False
+    valid_from: str | None = None
+    valid_to: str | None = None
 
 
 class PersonView(BaseModel):

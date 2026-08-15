@@ -167,6 +167,27 @@ def test_extraction_persists_about_user_flag(store):
     assert row["about_user"] == 1
 
 
+def test_memory_view_preserves_temporal_bounds_in_read_and_user_model_context(store):
+    receipt = store.record_messages("personal", [_message()])[0]
+    store.apply_extraction(
+        "personal", _batch(store, receipt),
+        ExtractionResult(memories=[ExtractedMemory(
+            content="I am traveling this week.", basis="stated", about_user=True,
+            valid_from="2026-08-10", valid_to="2026-08-16",
+        )]),
+    )
+
+    context = store.read("personal", QueryRequest(question="traveling"))
+    assert [(memory.valid_from, memory.valid_to) for memory in context.memories] == [
+        ("2026-08-10", "2026-08-16")
+    ]
+    user_context = store.user_model_context("personal")
+    assert user_context is not None
+    assert [(memory.valid_from, memory.valid_to) for memory in user_context[1]] == [
+        ("2026-08-10", "2026-08-16")
+    ]
+
+
 def test_user_model_reads_active_about_user_memories_and_uses_watermark(store):
     about_id = store.add_manual_memory(
         "personal", ManualMemoryRequest(content="I like tea.", about_user=True)
