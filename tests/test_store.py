@@ -792,6 +792,49 @@ def test_same_alias_for_two_people_is_ambiguous_not_merged(store):
         )
 
 
+def test_automatic_ambiguous_person_link_is_skipped_but_memory_completes(store):
+    store.apply_extraction(
+        "personal", _batch(store, store.record_messages("personal", [_message()])[0]),
+        ExtractionResult(people=[
+            ExtractedPerson(ref="one", display_name="One", aliases=["Alex"]),
+            ExtractedPerson(ref="two", display_name="Two", aliases=["Alex"]),
+        ]),
+    )
+    message_id = store.record_messages("personal", [_message(content="Alex called.")])[0]
+    batch_id = _batch(store, message_id)
+    store.apply_extraction(
+        "personal", batch_id,
+        ExtractionResult(
+            people=[ExtractedPerson(ref="alex", display_name="Alex")],
+            memories=[ExtractedMemory(content="Alex called.", basis="reported", people=["Alex"])],
+        ),
+    )
+    assert _rows(store, "SELECT extraction_state FROM messages WHERE id = ?", (message_id,))[0][0] == "completed"
+    assert _rows(store, "SELECT COUNT(*) AS n FROM memories")[0]["n"] == 1
+    assert _rows(store, "SELECT COUNT(*) AS n FROM memory_people")[0]["n"] == 0
+    assert _rows(store, "SELECT COUNT(*) AS n FROM people")[0]["n"] == 2
+
+
+def test_automatic_known_person_ids_resolve_relationships(store):
+    a = store.add_manual_memory("personal", ManualMemoryRequest(content="A exists.", people=["A"]))
+    del a
+    b = store.add_manual_memory("personal", ManualMemoryRequest(content="B exists.", people=["B"]))
+    del b
+    people = _rows(store, "SELECT id, display_name FROM people ORDER BY display_name")
+    ids = {row["display_name"]: row["id"] for row in people}
+    message_id = store.record_messages("personal", [_message(content="A and B.")])[0]
+    store.apply_extraction(
+        "personal", _batch(store, message_id),
+        ExtractionResult(memories=[ExtractedMemory(
+            content="A and B.", basis="observed", people=[ids["A"], ids["B"]],
+            relationships=[ExtractedRelationship(person_a_ref=ids["A"], person_b_ref=ids["B"])],
+        )]),
+    )
+    relationship = _rows(store, "SELECT * FROM relationships")[0]
+    assert {relationship["person_a_id"], relationship["person_b_id"]} == {ids["A"], ids["B"]}
+    assert _rows(store, "SELECT COUNT(*) AS n FROM memory_relationships")[0]["n"] == 1
+
+
 def test_manual_memory_retract_updates_memory_people_once(
     store,
 ):

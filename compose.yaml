@@ -11,7 +11,7 @@ services:
     environment:
       GOSSIPMEMO_DATABASE_PATH: /data/gossipmemo.db
     volumes:
-      - gossipmemo-data:/data
+      - ${GOSSIPMEMO_DATA_DIR:-./data}:/data
     read_only: true
     tmpfs:
       - /tmp
@@ -31,6 +31,3 @@ services:
       start_period: 10s
       retries: 3
     restart: unless-stopped
-
-volumes:
-  gossipmemo-data:

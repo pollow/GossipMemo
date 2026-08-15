@@ -196,7 +196,7 @@ class SocialMemoryWorld:
         # Wait for induction spawned by the imported Memories as well.
         while any(
             key[1] == space_id
-            and key[0] in {"continuity", "person", "relationship", "user-model"}
+            and key[0] in {"continuity", "person", "relationship", "user-model", "coverage", "goal-planning"}
             for key in self._scheduled
         ):
             tasks = tuple(self._tasks)
@@ -267,7 +267,7 @@ class SocialMemoryWorld:
             if not context:
                 return
             continuity, messages = context
-            if len(messages) < self.continuity_threshold:
+            if not messages:
                 return
             result = await self.queue.submit(
                 "reason-continuity", self.model.reason_continuity, continuity, messages

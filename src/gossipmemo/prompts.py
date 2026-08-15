@@ -229,8 +229,12 @@ def extraction_prompt(
         + _json(list(context))
         + "\n\nKnown people (identity hints only):\n"
         + _json(list(known_people))
-        + "\nReuse a known person's canonical display_name when the messages refer "
-        "to them. If the messages explicitly introduce a new short name, return "
+        + "\nIn natural-language memory content and generated display fields, use "
+        "a known person's canonical display_name when the messages refer to them. "
+        "In every ExtractedMemory.people and ExtractedRelationship.person_a_ref/"
+        "person_b_ref, use the supplied stable Person `id` (never a display_name "
+        "or alias). "
+        "If the messages explicitly introduce a new short name, return "
         "it in that person's `aliases` field. Omit a known person unless a new "
         "memory references them or the messages explicitly add an alias. Do not "
         "echo the known-people list.\n"

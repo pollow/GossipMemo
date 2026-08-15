@@ -720,14 +720,15 @@ class SqliteWorldStore:
                 _normalized(person.display_name) for person in result.people
             )
             for person in result.people:
-                person_id = self._create_person(
-                    connection,
-                    space_id,
-                    person.display_name,
-                    reuse_unique_name=(
-                        extracted_name_counts[_normalized(person.display_name)] == 1
-                    ),
-                )
+                try:
+                    person_id = self._create_person(
+                        connection, space_id, person.display_name,
+                        reuse_unique_name=(extracted_name_counts[_normalized(person.display_name)] == 1),
+                    )
+                except AmbiguousPersonError:
+                    # Do not abort the batch or create another guessed same-name
+                    # person; the memory itself is still durable evidence.
+                    continue
                 people_by_ref[person.ref] = person_id
                 for alias in person.aliases:
                     connection.execute(
@@ -744,6 +745,17 @@ class SqliteWorldStore:
                             _normalized(alias),
                         ),
                     )
+
+            def resolve_extracted_person(reference: str) -> str | None:
+                """Resolve model refs without letting ambiguous aliases abort extraction."""
+                person_id = people_by_ref.get(reference)
+                if person_id:
+                    return person_id
+                try:
+                    found = self._find_person(connection, space_id, reference)
+                except AmbiguousPersonError:
+                    return None
+                return found["id"] if found else None
 
             now = _now()
             comparison_rows: dict[str, sqlite3.Row] = {}
@@ -778,16 +790,13 @@ class SqliteWorldStore:
             for candidate in result.memories:
                 people_ids: set[str] = set()
                 for reference in candidate.people:
-                    person_id = people_by_ref.get(reference)
-                    if not person_id:
-                        person = self._find_person(connection, space_id, reference)
-                        person_id = person["id"] if person else None
+                    person_id = resolve_extracted_person(reference)
                     if person_id:
                         people_ids.add(person_id)
                 relationship_ids: set[str] = set()
                 for relationship in candidate.relationships:
-                    a = people_by_ref.get(relationship.person_a_ref)
-                    b = people_by_ref.get(relationship.person_b_ref)
+                    a = resolve_extracted_person(relationship.person_a_ref)
+                    b = resolve_extracted_person(relationship.person_b_ref)
                     if a and b:
                         existing = connection.execute(
                             """SELECT id FROM relationships WHERE space_id = ?
@@ -850,10 +859,7 @@ class SqliteWorldStore:
                     ),
                 )
                 for reference in candidate.people:
-                    person_id = people_by_ref.get(reference)
-                    if not person_id:
-                        found = self._find_person(connection, space_id, reference)
-                        person_id = found["id"] if found else None
+                    person_id = resolve_extracted_person(reference)
                     if not person_id:
                         continue
                     connection.execute(
@@ -866,8 +872,8 @@ class SqliteWorldStore:
                     affected_people.add(person_id)
 
                 for relationship in candidate.relationships:
-                    person_a_id = people_by_ref.get(relationship.person_a_ref)
-                    person_b_id = people_by_ref.get(relationship.person_b_ref)
+                    person_a_id = resolve_extracted_person(relationship.person_a_ref)
+                    person_b_id = resolve_extracted_person(relationship.person_b_ref)
                     if not person_a_id or not person_b_id:
                         continue
                     relationship_id = self._ensure_relationship(
@@ -1777,7 +1783,8 @@ class SqliteWorldStore:
             return True
 
     def continuity_context(
-        self, space_id: str
+        self, space_id: str, limit: int = 32,
+        max_message_chars: int = 8000, max_total_chars: int = 48000,
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -1794,18 +1801,27 @@ class SqliteWorldStore:
                 after = 0
             else:
                 after = row["through_message_rowid"]
-            messages = connection.execute(
+            rows = connection.execute(
                 "SELECT * FROM messages WHERE space_id = ? AND rowid > ? "
-                "ORDER BY rowid", (space_id, after)
+                "ORDER BY rowid LIMIT ?", (space_id, after, limit)
             ).fetchall()
-            return continuity, [ModelMessage(
-                id=item["id"], space_id=item["space_id"], author=item["author"],
-                content=item["content"], occurred_at=item["occurred_at"],
-                source_provider=item["source_provider"],
-                source_conversation_key=item["source_conversation_key"],
-                source_item_id=item["source_item_id"],
-                source_metadata=_loads(item["source_metadata"], {}),
-            ) for item in messages]
+            messages: list[ModelMessage] = []
+            total_chars = 0
+            for item in rows:
+                remaining = max_total_chars - total_chars
+                if remaining <= 0:
+                    break
+                content = item["content"][:min(max_message_chars, remaining)]
+                messages.append(ModelMessage(
+                    id=item["id"], space_id=item["space_id"], author=item["author"],
+                    content=content, occurred_at=item["occurred_at"],
+                    source_provider=item["source_provider"],
+                    source_conversation_key=item["source_conversation_key"],
+                    source_item_id=item["source_item_id"],
+                    source_metadata=_loads(item["source_metadata"], {}),
+                ))
+                total_chars += len(content)
+            return continuity, messages
 
     def pending_continuities(self, threshold: int = 20) -> list[str]:
         with self._connect() as connection:

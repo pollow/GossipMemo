@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
@@ -7,9 +8,12 @@ import pytest
 
 from gossipmemo.imports import load_chat_messages
 from gossipmemo.models import (
+    CoverageAuditPatch,
+    CoverageCriterionPatch,
     ContinuityReasoningResult,
     ExtractionResult,
     ExtractedMemory,
+    GoalPlanningResult,
     ManualMemoryRequest,
     MessageInput,
     SourceRef,
@@ -108,6 +112,8 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
 
         def __init__(self):
             self.extractions = 0
+            self.coverage_audits = 0
+            self.goal_plans = 0
 
         async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
             del context, known_people, comparison_memories
@@ -134,6 +140,30 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 text="Imported conversation",
                 through_message_id=messages[-1].id,
             )
+
+        async def audit_coverage(self, coverage, memories, hypotheses=()):
+            del coverage, hypotheses
+            # Make it observable that import waits for induction spawned by
+            # extraction instead of returning as soon as messages complete.
+            await asyncio.sleep(0.01)
+            self.coverage_audits += 1
+            return CoverageAuditPatch(
+                criteria=[
+                    CoverageCriterionPatch(
+                        criterion_id="P8",
+                        level="fragmentary",
+                        known_state="A preference is known.",
+                        evidence_memory_ids=[memories[0].id],
+                    )
+                ]
+            )
+
+        async def plan_learning_goals(
+            self, coverage, hypotheses, open_goals, recent_closed_goals
+        ):
+            del coverage, hypotheses, open_goals, recent_closed_goals
+            self.goal_plans += 1
+            return GoalPlanningResult()
 
         async def aclose(self):
             return None
@@ -172,6 +202,8 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         assert first == {"messages": 2, "extracted": 2}
         assert second == first
         assert model.extractions == 1
+        assert model.coverage_audits == 1
+        assert model.goal_plans == 1
         assert store.user_model_context("personal")[0].profile_card == {
             "summary": "Likes tea"
         }
@@ -184,7 +216,5 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 "SELECT DISTINCT extraction_state FROM messages"
             ).fetchall()
         assert [row[0] for row in states] == ["completed"]
-
-    import asyncio
 
     asyncio.run(scenario())

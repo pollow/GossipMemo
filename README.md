@@ -19,7 +19,8 @@ docker compose up --build
 
 The server listens on `http://localhost:8765`. Its health endpoint is
 `GET /healthz`; interactive OpenAPI documentation is available at `/docs`.
-SQLite data is stored in the `gossipmemo-data` Docker volume.
+SQLite data is stored in `./data/gossipmemo.db` by default. Set
+`GOSSIPMEMO_DATA_DIR` to use another host directory.
 
 Useful container commands:
 
@@ -34,15 +35,15 @@ docker compose run --rm \
 ```
 
 The import bind mount is read-only by design; make sure the host file is
-readable by the container's non-root user. The named database volume is owned
-by the fixed `gossipmemo` user (UID 10001). For a host directory bind mount at
-`/data`, create it first and grant it to UID 10001, for example:
-`mkdir -p ./gossipmemo-data && sudo chown 10001:10001 ./gossipmemo-data`, then
-replace the named volume with `./gossipmemo-data:/data`.
+readable by the container's non-root user. The bind directory must be owned by
+the fixed `gossipmemo` user (UID 10001), for example:
+`mkdir -p ./data && sudo chown 10001:10001 ./data`.
+For NAS moves, stop the service before replacing the database, then scp
+`./data/gossipmemo.db` and restore UID 10001 ownership. Only one server process
+may open a GossipMemo SQLite file.
 
-Only one server process should open a GossipMemo SQLite file. Do not add
-multiple Uvicorn workers: the local LLM queue is deliberately process-local and
-sequential.
+Do not add multiple Uvicorn workers: the local LLM queue is deliberately
+process-local and sequential.
 
 ## Run from source
 
