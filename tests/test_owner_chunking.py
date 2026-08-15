@@ -130,6 +130,38 @@ def test_owner_stage_two_checks_actual_first_completion_before_second_http() -> 
     assert calls == 1
 
 
+def test_owner_reasoning_retries_malformed_structured_output() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            content = '{"profile_card" "malformed"}'
+        elif calls == 2:
+            content = '{"profile_card":{"summary":"ok"}}'
+        else:
+            content = '{"hypothesis_actions":{"upserts":[],"transitions":[]}}'
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": content}}]},
+        )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client,
+                max_retries=1, retry_base_seconds=0.001,
+                retry_max_seconds=0.001,
+            )
+            result = await adapter.reason_person(
+                PersonView(id="p", display_name="Bob"), [],
+            )
+            assert result.profile_card == {"summary": "ok"}
+
+    asyncio.run(run())
+    assert calls == 3
+
+
 def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None:
     calls: list[dict] = []
     budget = ContextBudget(6000, 400, 200)

@@ -362,10 +362,20 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             first_messages = common + [ChatMessage(role="user", content=projection_stage_prompt() + "\n" + schema_instruction(projection_type))]
             if not self._owner_stage2_fits(first_messages, actions_type):
                 raise ValueError("owner evidence digest did not fit context budget")
-        first = await self._chat_messages(first_messages, structured=True)
-        projection = _parse_model_output(first, projection_type)
-        second = await self._chat_messages(first_messages + [ChatMessage(role="assistant", content=first), ChatMessage(role="user", content=actions_stage_prompt() + "\n" + schema_instruction(actions_type))], structured=True)
-        return projection, _parse_model_output(second, actions_type)
+        first, projection = await self._structured_messages(
+            first_messages, projection_type,
+        )
+        _, actions = await self._structured_messages(
+            first_messages + [
+                ChatMessage(role="assistant", content=first),
+                ChatMessage(
+                    role="user",
+                    content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+                ),
+            ],
+            actions_type,
+        )
+        return projection, actions
 
     def _owner_first_messages(
         self, system_prompt: str, target: BaseModel, evidence: Sequence[Any],
@@ -528,8 +538,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             for chunk in chunks:
                 request = self._digest_request(chunk)
                 self.context_budget.check(self.context_budget.estimate_request(request))
-                raw = await self._chat_messages(request.messages, structured=True)
-                result = _parse_model_output(raw, ExtractedOwnerEvidenceDigest)
+                _, result = await self._structured_messages(
+                    request.messages, ExtractedOwnerEvidenceDigest,
+                )
                 allowed = set().union(
                     *(self._owner_evidence_source_ids(item) for item in chunk)
                 )
@@ -579,8 +590,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         )
         normal = request_for(continuity, source)
         if self.context_budget.report(self.context_budget.estimate_request(normal)).fits:
-            raw = await self._chat_messages(normal.messages, structured=True)
-            return _parse_model_output(raw, ContinuityReasoningResult)
+            _, result = await self._structured_messages(
+                normal.messages, ContinuityReasoningResult,
+            )
+            return result
         # Reserve room for the streamed typed prior, not merely the initial
         # empty/null continuity object.
         chunk_prior = ContinuityView(
@@ -596,8 +609,9 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         for chunk in chunks:
             prior = self._fit_continuity_prior(prior, chunk, request_for)
             request = request_for(prior, chunk)
-            raw = await self._chat_messages(request.messages, structured=True)
-            result = _parse_model_output(raw, ContinuityReasoningResult)
+            _, result = await self._structured_messages(
+                request.messages, ContinuityReasoningResult,
+            )
             prior = ContinuityView(**result.model_dump())
         assert result is not None
         return result.model_copy(update={"through_message_id": source[-1].id})
@@ -608,8 +622,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     ) -> CoverageAuditPatch:
         normal = self._structured_request(COVERAGE_AUDIT_SYSTEM_PROMPT, coverage_audit_prompt(coverage, list(memories), list(hypotheses)), CoverageAuditPatch)
         if self.context_budget.report(self.context_budget.estimate_request(normal)).fits:
-            raw = await self._chat_messages(normal.messages, structured=True)
-            return _parse_model_output(raw, CoverageAuditPatch)
+            _, result = await self._structured_messages(
+                normal.messages, CoverageAuditPatch,
+            )
+            return result
         bounded_coverage, bounded_hypotheses = self._bounded_coverage_context(coverage, hypotheses)
         request_for = lambda chunk: self._structured_request(
             COVERAGE_AUDIT_SYSTEM_PROMPT,
@@ -619,9 +635,11 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         patches: list[CoverageAuditPatch] = []
         for chunk in self._greedy_chunks(list(memories), request_for):
             request = request_for(chunk)
-            raw = await self._chat_messages(request.messages, structured=True)
+            _, result = await self._structured_messages(
+                request.messages, CoverageAuditPatch,
+            )
             patches.append(self._filter_coverage_patch(
-                _parse_model_output(raw, CoverageAuditPatch),
+                result,
                 {memory.id for memory in chunk},
             ))
         return CoverageAuditPatch(
@@ -661,9 +679,11 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         # reconciliation uses the complete ID-preserving bounded map.
         for chunk in self._greedy_chunks(list(hypotheses) or [None], lambda items: candidate_request([item for item in items if item is not None])):
             request = candidate_request([item for item in chunk if item is not None])
-            raw = await self._chat_messages(request.messages, structured=True)
+            _, result = await self._structured_messages(
+                request.messages, GoalPlanningCandidates,
+            )
             candidates.extend(self._filter_goal_candidates(
-                _parse_model_output(raw, GoalPlanningCandidates).candidates,
+                result.candidates,
                 coverage, hypotheses,
             ))
         final_request = self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_reconciliation_prompt(bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed, candidates), GoalPlanningResult)
@@ -675,9 +695,11 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             reduced: list[LearningGoalCandidate] = []
             for chunk in chunks:
                 request = self._structured_request(GOAL_PLANNING_SYSTEM_PROMPT, goal_candidate_reduction_prompt(chunk), GoalPlanningCandidates)
-                raw = await self._chat_messages(request.messages, structured=True)
+                _, result = await self._structured_messages(
+                    request.messages, GoalPlanningCandidates,
+                )
                 reduced.extend(self._filter_goal_candidates(
-                    _parse_model_output(raw, GoalPlanningCandidates).candidates,
+                    result.candidates,
                     coverage, hypotheses,
                 ))
             size = self.context_budget.estimate_text(str([item.model_dump() for item in reduced]))
@@ -688,8 +710,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         else:
             raise ValueError("learning-goal candidate reduction made no progress within 3 rounds")
         self.context_budget.check(self.context_budget.estimate_request(final_request))
-        raw = await self._chat_messages(final_request.messages, structured=True)
-        return _parse_model_output(raw, GoalPlanningResult)
+        _, result = await self._structured_messages(
+            final_request.messages, GoalPlanningResult,
+        )
+        return result
 
     def _structured_request(self, system_prompt: str, user_prompt: str, result_type: type[BaseModel]) -> ChatCompletionRequest:
         return ChatCompletionRequest(
@@ -897,8 +921,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     def _filter_goal_candidates(candidates: Sequence[LearningGoalCandidate], coverage: CoverageMapView, hypotheses: Sequence[HypothesisView]) -> list[LearningGoalCandidate]:
         criteria = set(coverage.criteria)
         boundaries = {item.id for item in coverage.boundaries if item.status == "open"}
-        # Focus IDs are deliberately restricted to the IDs visible in the
-        # current planning context; persistence remains the final authority.
+        # Persistence remains the authority for focus Person/Relationship IDs.
         accepted: list[LearningGoalCandidate] = []
         for item in candidates:
             if not set(item.criteria_refs).issubset(criteria) or not set(item.boundary_ids).issubset(boundaries):
@@ -920,14 +943,44 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self,
         system_prompt: str,
         user_prompt: str,
-        result_type: type[BaseModel],
-    ) -> BaseModel:
-        content = await self._chat(
-            system_prompt + "\n\n" + schema_instruction(result_type),
-            user_prompt,
-            structured=True,
+        result_type: type[_ResultT],
+    ) -> _ResultT:
+        _, result = await self._structured_messages(
+            [
+                ChatMessage(
+                    role="system",
+                    content=system_prompt + "\n\n" + schema_instruction(result_type),
+                ),
+                ChatMessage(role="user", content=user_prompt),
+            ],
+            result_type,
         )
-        return _parse_model_output(content, result_type)
+        return result
+
+    async def _structured_messages(
+        self, messages: list[ChatMessage], result_type: type[_ResultT],
+    ) -> tuple[str, _ResultT]:
+        """Retry transient malformed structured output with the same request."""
+        attempt = 0
+        while True:
+            content = await self._chat_messages(messages, structured=True)
+            try:
+                return content, _parse_model_output(content, result_type)
+            except LLMOutputError:
+                if attempt >= self.max_retries:
+                    raise
+                delay = self._retry_delay(attempt)
+                logger.warning(
+                    "llm_output_retry_scheduled",
+                    extra={
+                        "model": self.model,
+                        "attempt": attempt + 1,
+                        "result_type": result_type.__name__,
+                        "delay_seconds": round(delay, 3),
+                    },
+                )
+                await asyncio.sleep(delay)
+                attempt += 1
 
     async def _chat(
         self,
