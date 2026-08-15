@@ -112,6 +112,25 @@ uv run python scripts/smoke_test.py --skip-ingest
 `GOSSIPMEMO_BASE_URL`, `GOSSIPMEMO_API_KEY`, and `GOSSIPMEMO_SPACE_ID` are also
 accepted from the environment.
 
+## Evaluate real-conversation fixtures
+
+`scripts/eval_real_conversations.py` runs text fixtures through the complete
+extraction, projection-induction, and query-synthesis workflow using isolated
+SQLite databases. It never writes to the configured production database. The
+fixture format and built-in cases are documented by `--help`.
+
+```bash
+UV_CACHE_DIR=/tmp/gossipmemo-uv-cache \
+  uv run --env-file .env python scripts/eval_real_conversations.py \
+  gossipmemo_test_data.txt --case fixture-01 \
+  --report /tmp/gossipmemo-real-eval-report.json
+```
+
+Omit `--case` to run all independent and cross-session cases. Repeat `--case`
+to select several. Add `--database-dir /private/path` to retain the case
+databases for inspection; the directory, databases, and JSON report are given
+private filesystem permissions because fixtures may contain sensitive text.
+
 ## Minimal Python SDK usage
 
 ```python
