@@ -10,7 +10,7 @@ from gossipmemo.prompts import (
 )
 
 
-def message(message_id: str, policy: str) -> ModelMessage:
+def message(message_id: str) -> ModelMessage:
     return ModelMessage(
         id=message_id,
         space_id="space",
@@ -18,21 +18,18 @@ def message(message_id: str, policy: str) -> ModelMessage:
         content="I had coffee today.",
         occurred_at="2026-08-14T12:00:00+00:00",
         source_provider="test",
-        extraction_policy=policy,
     )
 
 
-def test_extraction_prompt_applies_policy_per_message_and_dates():
+def test_extraction_prompt_applies_batch_policy_and_dates():
     prompt = extraction_prompt(
         [
-            message("m-conservative", "conservative"),
-            message("m-comprehensive", "comprehensive"),
-        ]
+            message("m-conservative"),
+            message("m-comprehensive"),
+        ], "comprehensive"
     )
 
-    assert "each message's extraction policy independently" in prompt
-    assert "Message m-conservative (conservative)" in prompt
-    assert "Message m-comprehensive (comprehensive)" in prompt
+    assert "server's comprehensive extraction policy for the whole batch" in prompt
     assert "occurred_at" in EXTRACTION_SYSTEM_PROMPT
     assert "never use an inferred basis for extraction" in " ".join(
         EXTRACTION_SYSTEM_PROMPT.split()

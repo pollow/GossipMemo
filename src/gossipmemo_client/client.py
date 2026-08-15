@@ -296,7 +296,6 @@ class GossipMemo(_ClientCommon):
         source: Any = None,
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
-        extraction_policy: str | None = None,
     ) -> Any:
         """Persist one or more messages and queue background extraction."""
 
@@ -308,7 +307,6 @@ class GossipMemo(_ClientCommon):
                 source,
                 occurred_at,
                 idempotency_key,
-                extraction_policy,
             )
         ):
             raise ValueError("pass either messages or single-message fields, not both")
@@ -323,7 +321,6 @@ class GossipMemo(_ClientCommon):
                 "source": source,
                 "occurred_at": occurred_at,
                 "idempotency_key": idempotency_key,
-                "extraction_policy": extraction_policy,
             }
         elif isinstance(messages, str):
             messages = {
@@ -332,7 +329,6 @@ class GossipMemo(_ClientCommon):
                 "source": source,
                 "occurred_at": occurred_at,
                 "idempotency_key": idempotency_key,
-                "extraction_policy": extraction_policy,
             }
         return self._request(
             "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
@@ -553,7 +549,6 @@ class AsyncGossipMemo(_ClientCommon):
         source: Any = None,
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
-        extraction_policy: str | None = None,
     ) -> Any:
         if messages is not None and not isinstance(messages, str) and any(
             value is not None
@@ -563,7 +558,6 @@ class AsyncGossipMemo(_ClientCommon):
                 source,
                 occurred_at,
                 idempotency_key,
-                extraction_policy,
             )
         ):
             raise ValueError("pass either messages or single-message fields, not both")
@@ -578,7 +572,6 @@ class AsyncGossipMemo(_ClientCommon):
                 "source": source,
                 "occurred_at": occurred_at,
                 "idempotency_key": idempotency_key,
-                "extraction_policy": extraction_policy,
             }
         elif isinstance(messages, str):
             messages = {
@@ -587,7 +580,6 @@ class AsyncGossipMemo(_ClientCommon):
                 "source": source,
                 "occurred_at": occurred_at,
                 "idempotency_key": idempotency_key,
-                "extraction_policy": extraction_policy,
             }
         return await self._request(
             "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}

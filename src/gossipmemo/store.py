@@ -276,8 +276,8 @@ class SqliteWorldStore:
                             id, space_id, author, content,
                             occurred_at, ingested_at, source_provider,
                             source_conversation_key, source_item_id, source_metadata,
-                            idempotency_key, extraction_policy
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            idempotency_key
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             message_id,
@@ -291,7 +291,6 @@ class SqliteWorldStore:
                             message.source.item_id,
                             _json(message.source.metadata),
                             message.idempotency_key,
-                            message.extraction_policy,
                         ),
                     )
                 except sqlite3.IntegrityError:
@@ -387,7 +386,6 @@ class SqliteWorldStore:
                     source_conversation_key=row["source_conversation_key"],
                     source_item_id=row["source_item_id"],
                     source_metadata=_loads(row["source_metadata"], {}),
-                    extraction_policy=row["extraction_policy"],
                 )
                 for row in rows
             ]
@@ -1093,7 +1091,6 @@ class SqliteWorldStore:
                 source_conversation_key=item["source_conversation_key"],
                 source_item_id=item["source_item_id"],
                 source_metadata=_loads(item["source_metadata"], {}),
-                extraction_policy=item["extraction_policy"],
             ) for item in messages]
 
     def pending_continuities(self, threshold: int = 20) -> list[str]:

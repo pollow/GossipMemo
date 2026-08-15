@@ -235,7 +235,6 @@ last_extraction_error: null
 | `source_conversation_key` | 可选的 thread/channel/conversation 坐标，不是 Memory scope |
 | `source_item_id` | 外部系统中的稳定消息 ID |
 | `source_metadata` | 来源特有信息 |
-| `extraction_policy` | `conservative \| balanced \| comprehensive`；控制本条消息的抽取粒度，默认 `balanced` |
 | `extraction_state` | `pending \| completed \| failed`；用于恢复本地非持久 queue |
 | `extraction_attempts` | 已尝试 Extract 的次数 |
 | `extracted_at` | Extract 成功完成时间；即使产生零条 Memory 也必须记录 |

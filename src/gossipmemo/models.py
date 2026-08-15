@@ -12,7 +12,6 @@ def utc_now() -> datetime:
 
 MemoryBasis = Literal["stated", "observed", "reported", "inferred", "manual"]
 MemoryKind = Literal["fact", "event", "preference", "plan", "situation", "impression"]
-ExtractionPolicy = Literal["conservative", "balanced", "comprehensive"]
 
 
 class SourceRef(BaseModel):
@@ -28,7 +27,6 @@ class MessageInput(BaseModel):
     content: str = Field(min_length=1)
     occurred_at: datetime = Field(default_factory=utc_now)
     source: SourceRef = Field(default_factory=SourceRef)
-    extraction_policy: ExtractionPolicy = "balanced"
 
     @field_validator("occurred_at")
     @classmethod
@@ -254,4 +252,3 @@ class ModelMessage(BaseModel):
     source_conversation_key: str | None = None
     source_item_id: str | None = None
     source_metadata: dict[str, Any] = Field(default_factory=dict)
-    extraction_policy: ExtractionPolicy = "balanced"

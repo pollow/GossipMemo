@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 
 class ConfigurationError(RuntimeError):
@@ -33,6 +34,9 @@ class Settings:
     llm_timeout_seconds: float = 120.0
     extraction_batch_size: int = 6
     extraction_batch_timeout_seconds: float = 1800.0
+    extraction_policy: Literal[
+        "conservative", "balanced", "comprehensive"
+    ] = "balanced"
     logging_level: str = "INFO"
     logging_format: str = "json"
 
@@ -57,6 +61,14 @@ class Settings:
         if self.extraction_batch_timeout_seconds <= 0:
             raise ConfigurationError(
                 "extraction_batch_timeout_seconds must be greater than zero"
+            )
+        if self.extraction_policy not in {
+            "conservative",
+            "balanced",
+            "comprehensive",
+        }:
+            raise ConfigurationError(
+                "extraction_policy must be conservative, balanced, or comprehensive"
             )
         if not 1 <= self.port <= 65535:
             raise ConfigurationError("port must be between 1 and 65535")
@@ -94,6 +106,7 @@ class Settings:
             extraction_batch_timeout_seconds=float(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS", "1800")
             ),
+            extraction_policy=_env("GOSSIPMEMO_EXTRACTION_POLICY", "balanced"),
             logging_level=_env("GOSSIPMEMO_LOG_LEVEL", "INFO").upper(),
             logging_format=_env("GOSSIPMEMO_LOG_FORMAT", "json").lower(),
         )

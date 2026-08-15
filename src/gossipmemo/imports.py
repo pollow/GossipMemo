@@ -107,7 +107,6 @@ def _message(
             "occurred_at",
             "source",
             "idempotency_key",
-            "extraction_policy",
         }
     }
     metadata.update(source_metadata)
@@ -124,7 +123,6 @@ def _message(
                 item_id=str(item_id),
                 metadata=metadata,
             ),
-            extraction_policy=item.get("extraction_policy", "balanced"),
         )
     except ValidationError as error:
         raise ValueError(f"{label} is invalid: {error.errors()[0]['msg']}") from error

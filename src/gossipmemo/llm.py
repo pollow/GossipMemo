@@ -168,6 +168,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         temperature: float | None = 0.0,
         max_tokens: int | None = None,
         headers: Mapping[str, str] | None = None,
+        extraction_policy: str = "balanced",
     ) -> None:
         normalized_base = base_url.strip().rstrip("/")
         if not normalized_base:
@@ -180,6 +181,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             raise ValueError("LLM timeout must be greater than zero")
         if max_tokens is not None and max_tokens < 1:
             raise ValueError("LLM max_tokens must be greater than zero")
+        if extraction_policy not in {"conservative", "balanced", "comprehensive"}:
+            raise ValueError(
+                "extraction_policy must be conservative, balanced, or comprehensive"
+            )
 
         self.base_url = normalized_base
         self.api_key = api_key.strip()
@@ -187,6 +192,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.extraction_policy = extraction_policy
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -200,6 +206,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             api_key=settings.llm_api_key,
             model=settings.llm_model,
             timeout=settings.llm_timeout_seconds,
+            extraction_policy=settings.extraction_policy,
         )
 
     @property
@@ -215,7 +222,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     async def extract(self, messages: Sequence[ModelMessage]) -> ExtractionResult:
         content = await self._structured_call(
             EXTRACTION_SYSTEM_PROMPT,
-            extraction_prompt(list(messages)),
+            extraction_prompt(list(messages), self.extraction_policy),
             ExtractionResult,
         )
         return cast(ExtractionResult, content)

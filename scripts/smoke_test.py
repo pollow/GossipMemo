@@ -34,11 +34,6 @@ def parser() -> argparse.ArgumentParser:
         default=os.getenv("GOSSIPMEMO_SPACE_ID", "smoke-test"),
         help="Use 'personal' to test your normal Space (default: smoke-test).",
     )
-    result.add_argument(
-        "--policy",
-        choices=("conservative", "balanced", "comprehensive"),
-        default="balanced",
-    )
     result.add_argument("--timeout", type=float, default=180.0)
     result.add_argument(
         "--skip-ingest",
@@ -52,7 +47,7 @@ def run(args: argparse.Namespace) -> None:
     run_id = uuid.uuid4().hex[:10]
     print(
         f"Testing {args.base_url} in Space {args.space!r} "
-        f"(run {run_id}, policy {args.policy})"
+        f"(run {run_id})"
     )
 
     with GossipMemo(
@@ -81,7 +76,6 @@ def run(args: argparse.Namespace) -> None:
                     "metadata": {"test_run": run_id},
                 },
                 idempotency_key=f"{run_id}:gossip-1",
-                extraction_policy=args.policy,
             )
             show("ingest result", result)
 

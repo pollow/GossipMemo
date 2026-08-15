@@ -85,7 +85,6 @@ CREATE TABLE IF NOT EXISTS messages (
     source_item_id TEXT,
     source_metadata TEXT NOT NULL DEFAULT '{}',
     idempotency_key TEXT,
-    extraction_policy TEXT NOT NULL DEFAULT 'balanced',
     extraction_batch_id TEXT REFERENCES extraction_batches(id),
     extraction_state TEXT NOT NULL DEFAULT 'pending',
     extraction_attempts INTEGER NOT NULL DEFAULT 0,

@@ -104,7 +104,10 @@ def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str)
 
 
-def extraction_prompt(messages: list[ModelMessage]) -> str:
+def extraction_prompt(
+    messages: list[ModelMessage],
+    policy: str = "balanced",
+) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
     policy_text = {
@@ -121,16 +124,11 @@ def extraction_prompt(messages: list[ModelMessage]) -> str:
             "evidence, including isolated details that may reveal a later pattern."
         ),
     }
-    policy_lines = "\n".join(
-        f"- Message {message.id} ({message.extraction_policy}): "
-        f"{policy_text[message.extraction_policy]}"
-        for message in messages
-    )
+    if policy not in policy_text:
+        raise ValueError(f"unknown extraction policy: {policy}")
     return (
-        "Apply each message's extraction policy independently; do not promote "
-        "the whole batch to the most permissive policy.\n"
-        + policy_lines
-        + "\n"
+        f"Use the server's {policy} extraction policy for the whole batch.\n"
+        f"{policy_text[policy]}\n"
         "Extract the messages together as one conversational context.\n"
         "The user/assistant author role is context and never a Person. List every "
         "Person referenced by a memory in its `people` refs; express who said or "

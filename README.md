@@ -62,7 +62,9 @@ immutable `Settings` value.
 Extraction batches wait for 6 messages by default. A partial batch is flushed
 when its oldest message has waited 30 minutes. These values can be changed with
 `GOSSIPMEMO_EXTRACTION_BATCH_SIZE` and
-`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`.
+`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`. The server applies one global
+`GOSSIPMEMO_EXTRACTION_POLICY` (`conservative`, `balanced`, or `comprehensive`)
+to every extraction batch; the default is `balanced`.
 
 Profile induction runs once per day at local midnight. Startup performs one
 stale-profile catch-up before waiting for the next induction run.
@@ -103,7 +105,6 @@ automatic ingest/query, and the manual memory, supersede, and retract flow.
 Useful options:
 
 ```bash
-uv run python scripts/smoke_test.py --policy conservative
 uv run python scripts/smoke_test.py --space personal
 uv run python scripts/smoke_test.py --skip-ingest
 ```
@@ -122,7 +123,6 @@ result = memory.ingest(
     content="Alice told me Bob may be preparing to leave.",
     author="user",
     source={"provider": "hermes", "conversation_key": "chat-1", "item_id": "turn-1"},
-    extraction_policy="balanced",  # or conservative / comprehensive
 )
 print(result["message_ids"])
 
