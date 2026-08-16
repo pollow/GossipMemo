@@ -30,8 +30,12 @@ class _Job(Generic[T]):
     future: asyncio.Future[T]
 
 
-class SequentialLLMQueue:
-    """Run accepted LLM calls one at a time, in submission order.
+class ReasonerCallQueue:
+    """Run accepted reasoner model-calls one at a time, in submission order.
+
+    A queued job is one reasoner's model call, not one HTTP request: the
+    adapter may internally issue 2..N provider requests (chunking, retries)
+    while a single job occupies the queue.
 
     This is deliberately not a durable job system. Message processing state in
     SQLite is the recovery source; restarting the server simply re-enqueues
@@ -111,8 +115,9 @@ class SequentialLLMQueue:
         )
 
 
-# A short compatibility spelling for callers created during the first draft.
-LLMQueue = SequentialLLMQueue
+# Compatibility spellings for callers created before the rename.
+SequentialLLMQueue = ReasonerCallQueue
+LLMQueue = ReasonerCallQueue
 
 
-__all__ = ["LLMQueue", "QueueStoppedError", "SequentialLLMQueue"]
+__all__ = ["LLMQueue", "QueueStoppedError", "ReasonerCallQueue", "SequentialLLMQueue"]

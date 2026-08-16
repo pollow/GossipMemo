@@ -557,7 +557,6 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
 
     class FakeModel:
         configured = True
-        context_budget = None
 
         async def extract(self, message, context=(), known_people=(), comparison_memories=()):
             del message, context, known_people, comparison_memories

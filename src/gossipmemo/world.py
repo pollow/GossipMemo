@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -23,7 +23,16 @@ from .models import (
     TurnRequest,
     TurnResponse,
 )
-from .queue import SequentialLLMQueue
+from .queue import ReasonerCallQueue
+from .reasoners import (
+    PersonReasoner,
+    Reasoner,
+    RelationshipReasoner,
+    build_continuity_reasoner,
+    build_coverage_reasoner,
+    build_learning_goals_reasoner,
+    build_user_model_reasoner,
+)
 from .reasoning import DEFAULT_REASONING_PIPELINE, FunctionStage, ReasoningPipeline
 from .store import SqliteWorldStore
 
@@ -43,7 +52,7 @@ class SocialMemoryWorld:
         self,
         store: SqliteWorldStore,
         model: LLMModel,
-        queue: SequentialLLMQueue | None = None,
+        queue: ReasonerCallQueue | None = None,
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
@@ -52,20 +61,24 @@ class SocialMemoryWorld:
     ) -> None:
         self.store = store
         self.model = model
-        self.queue = queue or SequentialLLMQueue()
+        self.queue = queue or ReasonerCallQueue()
         self.extraction_batch_size = extraction_batch_size
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self.induction_interval_seconds = induction_interval_seconds
         self.continuity_threshold = continuity_threshold
-        runners = {
-            "person": self._run_person_stage,
-            "relationship": self._run_relationship_stage,
-            "user_model": self._run_user_model_stage,
-            "coverage": self._run_coverage_stage,
-            "learning_goals": self._run_learning_goals_stage,
+        reasoners: dict[str, Reasoner] = {
+            "person": PersonReasoner(self.store, self.model, self.queue),
+            "relationship": RelationshipReasoner(self.store, self.model, self.queue),
+            "user_model": build_user_model_reasoner(self.store, self.model, self.queue),
+            "coverage": build_coverage_reasoner(self.store, self.model, self.queue),
+            "learning_goals": build_learning_goals_reasoner(self.store, self.model, self.queue),
         }
+        self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model, self.queue)
         self.reasoning_pipeline = ReasoningPipeline(
-            [FunctionStage(name, runners[name]) for name in reasoning_pipeline_order]
+            [
+                FunctionStage(name, self._stage_runner(reasoners[name]))
+                for name in reasoning_pipeline_order
+            ]
         )
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
@@ -283,26 +296,21 @@ class SocialMemoryWorld:
             context_status=context_status,
         )
 
+    def _stage_runner(self, reasoner: Reasoner) -> Callable[[str], Coroutine[Any, Any, None]]:
+        # The driver owns this loop and the `_stopping` check; the reasoner
+        # owns everything inside one `attempt` (load, call, commit).
+        async def run(space_id: str) -> None:
+            while not self._stopping and await reasoner.attempt(space_id):
+                pass
+
+        return run
+
     def _schedule_continuity_reason(self, space_id: str) -> None:
         logger.info("continuity_scheduled", extra={"space_id": space_id})
-        self._spawn(("continuity", space_id, space_id), self._reason_continuity(space_id))
-
-    async def _reason_continuity(self, space_id: str) -> None:
-        while not self._stopping:
-            context = self.store.continuity_context(space_id, limit=None)
-            if not context:
-                return
-            continuity, messages = context
-            if not messages:
-                return
-            result = await self.queue.submit(
-                "reason-continuity", self.model.reason_continuity, continuity, messages
-            )
-            logger.info("continuity_extracted", extra={"space_id": space_id, "message_count": len(messages)})
-            expected = continuity.through_message_id if continuity else None
-            if self.store.apply_continuity_reasoning(space_id, expected, result):
-                continue
-            return
+        self._spawn(
+            ("continuity", space_id, space_id),
+            self._stage_runner(self._continuity_reasoner)(space_id),
+        )
 
     def _drain_extraction_batches(self, space_id: str) -> None:
         pending = self.store.unbatched_messages(space_id)
@@ -404,136 +412,6 @@ class SocialMemoryWorld:
             ("reasoning-pipeline", space_id, space_id),
             self.reasoning_pipeline.run_until_caught_up(space_id),
         )
-
-    async def _run_person_stage(self, space_id: str) -> None:
-        while not self._stopping:
-            people, _, _ = self.store.stale_entities()
-            targets = [(sid, pid) for sid, pid in people if sid == space_id]
-            if not targets:
-                return
-            for _, person_id in targets:
-                await self._reason_person(space_id, person_id)
-
-    async def _run_relationship_stage(self, space_id: str) -> None:
-        while not self._stopping:
-            _, relationships, _ = self.store.stale_entities()
-            targets = [(sid, rid) for sid, rid in relationships if sid == space_id]
-            if not targets:
-                return
-            for _, relationship_id in targets:
-                await self._reason_relationship(space_id, relationship_id)
-
-    async def _run_user_model_stage(self, space_id: str) -> None:
-        while not self._stopping:
-            _, _, user_models = self.store.stale_entities()
-            if space_id not in user_models:
-                return
-            await self._reason_user_model(space_id)
-
-    async def _run_coverage_stage(self, space_id: str) -> None:
-        if not self._stopping and space_id in self.store.stale_coverage_spaces():
-            await self._reason_coverage(space_id)
-
-    async def _run_learning_goals_stage(self, space_id: str) -> None:
-        await self._plan_learning_goals(space_id)
-
-    async def _reason_person(self, space_id: str, person_id: str) -> None:
-        # If Extract updates the same Person while an LLM call is in flight,
-        # the optimistic watermark check fails and this loop recomputes from the
-        # latest snapshot without taking a lock.
-        while not self._stopping:
-            context = self.store.person_context(space_id, person_id)
-            if not context:
-                return
-            person, memories, watermark = context
-            if not person.stale:
-                return
-            inferred, hypotheses = self.store.owner_review_context(space_id, "person", person_id)
-            result = await self.queue.submit(
-                "reason-person", self.model.reason_person, person, memories, inferred, hypotheses
-            )
-            if self.store.apply_person_reasoning(
-                space_id,
-                person_id,
-                watermark,
-                result,
-                {memory.id for memory in inferred}, {hypothesis.id for hypothesis in hypotheses},
-            ):
-                return
-
-    async def _reason_coverage(self, space_id: str) -> None:
-        """Audit all bounded chunks before a single goal-planning pass."""
-        while not self._stopping:
-            context = self.store.coverage_context(space_id, limit=None)
-            if not context:
-                return
-            coverage, memories, hypotheses, pending = context
-            if not memories:
-                return
-            result = await self.queue.submit(
-                "audit-coverage", self.model.audit_coverage, coverage, memories, hypotheses
-            )
-            if not self.store.apply_coverage_audit(
-                space_id, coverage.source_watermark, coverage.source_cursor_id, result,
-                {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries},
-                {hypothesis.id for hypothesis in hypotheses},
-            ):
-                continue
-            if pending:
-                continue
-            return
-
-    async def _plan_learning_goals(self, space_id: str) -> None:
-        context = self.store.learning_goal_context(space_id)
-        if not context:
-            return
-        coverage, hypotheses, open_goals, closed_goals = context
-        result = await self.queue.submit(
-            "plan-learning-goals", self.model.plan_learning_goals,
-            coverage, hypotheses, open_goals, closed_goals,
-        )
-        self.store.apply_goal_planning(space_id, coverage.revision, result, {goal.id for goal in open_goals} | {goal.id for goal in closed_goals})
-
-    async def _reason_user_model(self, space_id: str) -> None:
-        while not self._stopping:
-            context = self.store.user_model_context(space_id)
-            if not context:
-                return
-            user_model, memories, watermark = context
-            if not user_model.stale:
-                return
-            evidence = [memory for memory in memories if memory.basis != "inferred"]
-            inferred, hypotheses = self.store.owner_review_context(space_id, "user", None)
-            result = await self.queue.submit(
-                "reason-user-model", self.model.reason_user_model, evidence, inferred, hypotheses
-            )
-            if self.store.apply_user_model_reasoning(space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}):
-                return
-
-    async def _reason_relationship(
-        self, space_id: str, relationship_id: str
-    ) -> None:
-        while not self._stopping:
-            context = self.store.relationship_context(space_id, relationship_id)
-            if not context:
-                return
-            relationship, memories, watermark = context
-            if not relationship.stale:
-                return
-            inferred, hypotheses = self.store.owner_review_context(space_id, "relationship", relationship_id)
-            result = await self.queue.submit(
-                "reason-relationship",
-                self.model.reason_relationship,
-                relationship, memories, inferred, hypotheses,
-            )
-            if self.store.apply_relationship_reasoning(
-                space_id,
-                relationship_id,
-                watermark,
-                result,
-                {memory.id for memory in inferred}, {hypothesis.id for hypothesis in hypotheses},
-            ):
-                return
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
         context = self.store.read(space_id, request)

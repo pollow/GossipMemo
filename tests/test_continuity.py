@@ -59,7 +59,6 @@ def test_continuity_uses_rowid_watermark_and_filters_person_refs(tmp_path: Path)
 
 class _ContinuityModel:
     configured = True
-    context_budget = None
 
     def __init__(self):
         self.calls = 0

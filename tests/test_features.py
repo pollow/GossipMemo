@@ -36,7 +36,6 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 class FakeModel:
     configured = True
-    context_budget = None
 
     async def extract(self, message, context=(), known_people=(), comparison_memories=()):
         del message, context, known_people, comparison_memories
