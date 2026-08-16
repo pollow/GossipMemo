@@ -95,6 +95,21 @@ def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
     assert "never save their restatements, summaries, analyses, or advice" in prompt
 
 
+def test_extraction_prompt_requires_stable_specific_person_identity():
+    prompt = extraction_prompt([message("identity")], user_name="Deus")
+
+    assert "one concrete human whose identity is distinguishable" in prompt
+    assert "evidence-supported durable identity anchor" in prompt
+    assert "uniquely and temporally determined" in prompt
+    assert "grammatical anaphor" in prompt
+    assert "unbounded group or category" in prompt
+    assert "most stable, specific, neutral canonical label" in prompt
+    assert "Do not create separate identities" in prompt
+    assert "synonymous wording" in prompt
+    assert "leave its `people` refs empty" in prompt
+    assert "identity uncertainty alone is not a reason to discard" in prompt
+
+
 def test_reasoning_prompts_allow_useful_social_inference():
     assert "patterns" in PERSON_REASONING_SYSTEM_PROMPT
     assert "social inferences" in PERSON_REASONING_SYSTEM_PROMPT
