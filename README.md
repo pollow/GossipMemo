@@ -1,12 +1,19 @@
 # GossipMemo
 
-GossipMemo is a local-first social memory server for agents. It keeps raw
-messages, durable memories, people, and relationships separate so an agent can
-remember who said what about whom without treating gossip as objectively true.
+GossipMemo is a local-first social memory server for agents, built as a
+supplement for self-hosted personal assistants. It models the people in your
+life and your relationships with them, and it keeps track of *how* it knows
+each thing — what you stated first-hand, what someone else reported to you, and
+what the system merely inferred.
 
-The first version runs as one FastAPI process with a SQLite volume and a single
-FIFO queue for all LLM calls. Hermes connects over HTTP through the included
-Python SDK and memory-provider plugin; GossipMemo does not run inside Hermes.
+That provenance distinction is the point. A memory layer that flattens "Bob is
+leaving the company" and "Alice thinks Bob may be leaving" into one fact will
+eventually make an agent assert the second as if it were the first. GossipMemo
+keeps the basis attached to every record, so hedged and second-hand claims stay
+hedged and second-hand all the way to the prompt.
+
+It runs as one FastAPI process over a SQLite volume, with a single FIFO queue
+in front of all LLM calls, and ships with a Hermes memory-provider plugin.
 
 ## Run with Docker
 
@@ -19,31 +26,7 @@ docker compose up --build
 
 The server listens on `http://localhost:8765`. Its health endpoint is
 `GET /healthz`; interactive OpenAPI documentation is available at `/docs`.
-SQLite data is stored in `./data/gossipmemo.db` by default. Set
-`GOSSIPMEMO_DATA_DIR` to use another host directory.
-
-Useful container commands:
-
-```bash
-docker compose up -d --build       # start the single server process
-docker compose ps                  # show health status
-docker compose logs -f gossipmemo  # follow JSON application logs
-curl -fsS http://127.0.0.1:8765/healthz
-docker compose run --rm \
-  -v "$PWD/export.jsonl:/imports/export.jsonl:ro" \
-  gossipmemo gossipmemo import --space personal --chat /imports/export.jsonl
-```
-
-The import bind mount is read-only by design; make sure the host file is
-readable by the container's non-root user. The bind directory must be owned by
-the fixed `gossipmemo` user (UID 10001), for example:
-`mkdir -p ./data && sudo chown 10001:10001 ./data`.
-For NAS moves, stop the service before replacing the database, then scp
-`./data/gossipmemo.db` and restore UID 10001 ownership. Only one server process
-may open a GossipMemo SQLite file.
-
-Do not add multiple Uvicorn workers: the local LLM queue is deliberately
-process-local and sequential.
+Set `GOSSIPMEMO_DATA_DIR` in `.env` to bind mount a host directory for db.
 
 ## Run from source
 
@@ -54,6 +37,8 @@ cp .env.example .env
 uv run --env-file .env gossipmemo serve
 ```
 
+## Config
+
 Server startup is strict: `GOSSIPMEMO_LLM_BASE_URL`,
 `GOSSIPMEMO_LLM_MODEL`, and `GOSSIPMEMO_LLM_API_KEY` must all be non-empty.
 There is no default provider URL or no-LLM query fallback. Configuration is
@@ -61,7 +46,7 @@ read once at process initialization and passed to the server modules as one
 immutable `Settings` value.
 
 `GOSSIPMEMO_USER_NAME` names the fixed current user in LLM prompts (default:
-`CurrentUser`). The current user is not stored as a `Person`.
+`CurrentUser`).
 
 Extraction batches wait for 6 messages by default. A partial batch is flushed
 when its oldest message has waited 30 minutes. These values can be changed with
@@ -76,12 +61,12 @@ and delay cap with `GOSSIPMEMO_LLM_MAX_RETRIES`,
 `GOSSIPMEMO_LLM_RETRY_BASE_SECONDS`, and
 `GOSSIPMEMO_LLM_RETRY_MAX_SECONDS`; defaults are 5, 1 second, and 30 seconds.
 
-LLM requests use a conservative context budget: the default 65,536-token window
-reserves 8,192 output tokens and 4,096 safety tokens. Configure these with
+LLM requests use a conservative context budget: the default 64k-token window
+reserves 8k output tokens and 4k safety tokens. Configure these with
 `GOSSIPMEMO_LLM_CONTEXT_WINDOW_TOKENS`, `GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS`,
 and `GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS`. Requests that exceed the usable
 input budget fail before any provider HTTP call. Reasoning catch-up runs through
-the internal ordered pipeline, keeping each stage's implementation independent.
+the internal ordered pipeline.
 
 Profile induction runs once per day at local midnight. Startup performs one
 stale-profile catch-up before waiting for the next induction run.
@@ -192,23 +177,140 @@ never blocks a chat turn. After completion Hermes asynchronously ingests the
 assistant reply, reusing the user's idempotency key to avoid duplicate user
 messages.
 
-## Architecture
+## How it works
 
-The external `SocialMemoryWorld` interface has three behaviors:
+### The write path is asynchronous
+
+Writing a message is synchronous and durable. Everything that turns messages
+into semantic memory happens later, off the request path.
 
 ```text
-ingest(messages)  -> durably record and queue extraction
-query(request)    -> retrieve and synthesize social context
-apply(change)     -> manual memory and corrections
+POST /ingest ─→ Message persisted (idempotent) ─→ returns {"status": "accepted"}
+                     │
+                     │  once 6 messages accumulate, or the oldest has waited 30 min
+                     ↓
+                extraction (LLM) ─→ Memory  (content, kind, basis, people, about_user)
+                     │
+                     ├─→ marks the touched Person / Relationship / UserModel stale
+                     │
+                     ↓
+                reasoning pipeline ─→ refreshed cards, inferred Memories,
+                     ↑                 Hypotheses, CoverageMap, LearningGoals
+                     │  at startup for whatever is stale, then daily at local midnight
+                     │
+                continuity reasoner ─→ rolling continuity text
+                                        every ~20 new messages
 ```
 
-SQLite is the first canonical-store Adapter. The first version combines FTS5
-with structured Person/Relationship filters; embeddings are intentionally
-deferred. Retrieval indexes are regenerable projections, not part of the
-Memory entity.
-See [data_schema.md](data_schema.md) and [design.md](design.md) for the model and
-processing decisions. See [glossary.md](glossary.md) for the canonical domain
-and design vocabulary.
+Two consequences worth planning around: a Memory is not queryable the instant
+you ingest it, and a Person card can lag a Memory by up to a day. The batch
+size and timeout are tunable (`GOSSIPMEMO_EXTRACTION_BATCH_SIZE`,
+`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`); the induction schedule is not.
+
+Raw Messages are durable evidence and are never rewritten. Memories are the
+durable semantic record, and support active, retracted, and superseded states,
+so a correction never erases history. Everything else — Person cards,
+Relationship cards, the UserModel, continuity, coverage — is a **regenerable
+projection** over active Memories. Deleting the projections and rebuilding them
+loses nothing.
+
+### The reasoners
+
+Each reasoner is one LLM call type with one owned output. They are independent;
+none of them reads another's card.
+
+| Reasoner | Runs when | Maintains |
+| --- | --- | --- |
+| **Extraction** | 6 new messages, or 30 min after the oldest | Memories and People from raw text: content, `kind`, `basis`, linked People, `about_user`, validity window, explicit supersedes |
+| **Person** | that Person is stale | The Person `profile_card`, plus inferred Memories and Hypotheses about them |
+| **Relationship** | that Relationship is stale | `facets`, `closeness`, `tone`, `status`, `summary`, plus inferred Memories and Hypotheses |
+| **UserModel** | the space's UserModel is stale | The space-level user `profile_card`, plus Hypotheses about the user |
+| **Continuity** | ~20 new messages | A short rolling continuity text, the related Person IDs, and the last covered message |
+| **Coverage audit** | new Memories since the last audit | The CoverageMap: per-criterion coverage levels, open/closed knowledge boundaries, life periods, relationship arcs, behavioral contexts |
+| **Learning goals** | after each coverage audit | LearningGoals: an askable prompt, its rationale, the boundaries it would close, and its status |
+
+The first five run as one ordered pipeline per space — Person, Relationship,
+UserModel, Coverage, LearningGoals — so a card is refreshed before anything
+audits what it still lacks. Continuity runs on its own message-count trigger.
+
+Person, Relationship, and UserModel reasoning is two-staged: a projection call
+rewrites the card, then an epistemic review call decides what to infer and what
+to merely suspect. That split is what keeps *inference* out of the card:
+
+- An **inferred Memory** is a conclusion the system is willing to state, stored
+  as a real Memory with `basis = inferred` and links back to the source
+  Memories it was derived from. It can be retracted later by the same reasoner.
+- A **Hypothesis** is a suspicion that has not earned that status. It carries a
+  confidence level and supporting/contradicting evidence, and stays out of the
+  cards until it is promoted, rejected, superseded, or retired.
+
+Freshness is watermark-based: a card is stale when a related Memory has a newer
+`updated_at`. That covers additions, retractions, and supersedes with one
+mechanism, so no reasoner needs an invalidation hook.
+
+Extraction reads only its own batch. It will infer that "don't change the specs
+right before next month's release again" means the speaker dislikes late scope
+changes, but it will not conclude that the speaker resists change in general —
+that requires history, and belongs to reasoning.
+
+### What the agent actually receives
+
+Reads never call an LLM. Alias matching is deterministic, recall is SQLite FTS5
+over structured Person filters, and the cards are already built. Latency is
+predictable and does not depend on a provider being up.
+
+`GET /v1/spaces/{space_id}/context` returns a versioned bundle:
+
+```json
+{
+  "version": "...",
+  "user_model": { "profile_card": {}, "stale": false },
+  "continuity": { "text": "...", "related_person_ids": ["..."] },
+  "people":   [ { "id": "...", "display_name": "...", "profile_card": {} } ],
+  "guidance": { "items": [] }
+}
+```
+
+`people` holds the cards for the People the continuity text refers to — not
+every Person in the space.
+
+`POST /v1/spaces/{space_id}/turns` is the turn-oriented facade. It persists one
+user message and returns, in the same response:
+
+- `known_people` — People activated by deterministic alias matching on the
+  message text
+- `memory_recall` — a few relevant active `about_user` Memories, via FTS
+- `guidance` — see below
+- `context_update` — the current bundle, **only** when the caller's
+  `context_version` is stale, so a warm caller pays nothing
+- `context_status` — `available` or `unavailable`; enrichment is best-effort
+  and a failure here never blocks the turn
+
+`guidance` is how the system asks for what it is missing. It carries **at most
+one open Hypothesis and at most one open or partial LearningGoal**, selected
+deterministically: recency first, with character-bigram overlap against the
+message as a tie-break (bigrams so that CJK and unspaced text still rank). The
+CoverageMap itself never leaves the server — only the one question it justifies.
+The agent is free to weave that question into its reply or ignore it.
+
+An empty bundle is a valid cold-start result. The current session's raw messages
+carry continuity while long-term memory accumulates.
+
+`POST /v1/spaces/{space_id}/query` is the one synchronous LLM path: it
+retrieves People, Relationships, and Memories and synthesizes a written answer.
+Agents in a chat loop should prefer `turns`; `query` is for asking the store a
+question directly.
+
+### Storage
+
+SQLite is the first canonical-store adapter, combining FTS5 with structured
+Person/Relationship filters; embeddings are intentionally deferred. Retrieval
+indexes are regenerable projections, not part of the Memory entity. A single
+process is a product invariant — SQLite plus the in-process FIFO LLM queue —
+so there is deliberately no worker-count option.
+
+See [data_schema.md](data_schema.md) for the table-level model and
+[glossary.md](glossary.md) for the canonical vocabulary.
 
 ## License
 
