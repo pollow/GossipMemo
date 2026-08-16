@@ -12,3 +12,4 @@ build/
 gossipmemo_test_data.txt
 data/*.db
 data/*.db-*
+local_docs/
