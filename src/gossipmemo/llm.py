@@ -13,10 +13,12 @@ import json
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Mapping, Sequence
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, contextmanager
+from contextvars import ContextVar
 from types import TracebackType
-from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Iterator, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -152,6 +154,128 @@ class LLMOutputError(LLMError):
     """Raised when model content cannot validate as the requested result."""
 
 
+# Strict priority tiers for outbound provider requests. Lower numbers run
+# first; there is no aging or anti-starvation, by design (see ProviderGate).
+TIER_FOREGROUND = 1  # synthesize: the only synchronous, HTTP-response-blocking call.
+TIER_FRESHNESS = 2  # extraction, continuity.
+TIER_BACKGROUND = 3  # person, relationship, user_model, coverage, learning_goals.
+
+# Set at each reasoner boundary via `llm_call_tier`; internal call sites
+# (~15 of them across owner-reasoning, chunking, and digesting) inherit the
+# active tier through the contextvar instead of threading a parameter.
+_call_tier: ContextVar[int] = ContextVar("gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
+
+
+@contextmanager
+def llm_call_tier(tier: int) -> Iterator[None]:
+    """Mark every provider request issued in this scope with `tier`.
+
+    Unset scopes (fakes, tests, call sites that never opt in) default to
+    ``TIER_BACKGROUND``, matching the spec's "safe default" requirement.
+    """
+
+    token = _call_tier.set(tier)
+    try:
+        yield
+    finally:
+        _call_tier.reset(token)
+
+
+class ProviderGate:
+    """Global single-permit priority gate for outbound provider requests.
+
+    One queued job used to be a whole reasoner call; the real choke point is
+    one provider HTTP request. Callers `acquire()` immediately before the
+    transport-retry loop and `release()` once it returns (success or final
+    failure) -- holding the permit across `asyncio.sleep` backoff is
+    deliberate, so a 429/5xx/transport backoff blocks every other caller,
+    too. Semantic-retry loops (malformed structured output) live outside
+    `_chat_messages` and never acquire this gate.
+
+    Concurrency is hardcoded to 1 -- there is intentionally no config knob.
+    Priority is strict FIFO within a tier: no aging, no quota. During a large
+    backfill, extraction is meant to fully drain before induction runs.
+    """
+
+    def __init__(self) -> None:
+        self._locked = False
+        self._waiters: dict[int, deque[tuple[asyncio.Future[None], str]]] = {
+            TIER_FOREGROUND: deque(), TIER_FRESHNESS: deque(), TIER_BACKGROUND: deque(),
+        }
+        self._unavailable_until: float | None = None
+        self._current_tier: int | None = None
+        self._current_label: str | None = None
+
+    @property
+    def waiting(self) -> int:
+        return sum(len(queue) for queue in self._waiters.values())
+
+    @property
+    def in_flight(self) -> bool:
+        return self._locked
+
+    @property
+    def current_label(self) -> str | None:
+        return self._current_label
+
+    @property
+    def current_tier(self) -> int | None:
+        return self._current_tier
+
+    async def acquire(self, tier: int, label: str) -> None:
+        await self._wait_out_shared_backoff()
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        self._waiters[tier].append((future, label))
+        self._dispatch()
+        try:
+            await future
+        except asyncio.CancelledError:
+            try:
+                self._waiters[tier].remove((future, label))
+            except ValueError:
+                # Already granted the permit; hand it to the next waiter.
+                if future.done() and not future.cancelled():
+                    self.release()
+            raise
+
+    def release(self) -> None:
+        self._current_tier = None
+        self._current_label = None
+        self._locked = False
+        self._dispatch()
+
+    def mark_unavailable_until(self, deadline: float) -> None:
+        """Publish a shared Retry-After deadline so every caller waits it out."""
+
+        if self._unavailable_until is None or deadline > self._unavailable_until:
+            self._unavailable_until = deadline
+
+    def _dispatch(self) -> None:
+        if self._locked:
+            return
+        for tier in (TIER_FOREGROUND, TIER_FRESHNESS, TIER_BACKGROUND):
+            queue = self._waiters[tier]
+            if not queue:
+                continue
+            future, label = queue.popleft()
+            self._locked = True
+            self._current_tier = tier
+            self._current_label = label
+            if not future.done():
+                future.set_result(None)
+            return
+
+    async def _wait_out_shared_backoff(self) -> None:
+        while self._unavailable_until is not None:
+            loop = asyncio.get_running_loop()
+            delay = self._unavailable_until - loop.time()
+            if delay <= 0:
+                self._unavailable_until = None
+                return
+            await asyncio.sleep(delay)
+
+
 class ChatMessage(BaseModel):
     """Minimal OpenAI-compatible chat message used in request payloads."""
 
@@ -265,6 +389,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
+        self._gate = ProviderGate()
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "OpenAICompatibleAdapter":
@@ -291,6 +416,12 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     @property
     def configured(self) -> bool:
         return True
+
+    @property
+    def gate(self) -> ProviderGate:
+        """The process-global provider backpressure gate for this adapter."""
+
+        return self._gate
 
     @property
     def endpoint(self) -> str:
@@ -973,11 +1104,12 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():
             raise ValueError("query question must not be empty")
-        content = await self._chat(
-            QUERY_SYNTHESIS_SYSTEM_PROMPT,
-            query_synthesis_prompt(question, context),
-            structured=False,
-        )
+        with llm_call_tier(TIER_FOREGROUND):
+            content = await self._chat(
+                QUERY_SYNTHESIS_SYSTEM_PROMPT,
+                query_synthesis_prompt(question, context),
+                structured=False,
+            )
         return content.strip()
 
     async def _structured_call(
@@ -1049,77 +1181,96 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         headers = {"Accept": "application/json", **self._headers}
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
-        attempt = 0
-        while True:
-            started = time.perf_counter()
-            try:
-                response = await client.post(
-                    self.endpoint,
-                    headers=headers,
-                    json=request.model_dump(exclude_none=True),
-                )
-            except httpx.TransportError as error:
-                if attempt >= self.max_retries:
-                    logger.exception(
-                        "llm_call_transport_failed",
+
+        tier = _call_tier.get()
+        label = f"tier{tier}-{'structured' if structured else 'chat'}"
+        # Serialize at the single provider request, not the whole reasoner
+        # call. Holding the gate across this entire retry loop -- including
+        # its `asyncio.sleep` backoff -- is deliberate global backpressure:
+        # while the provider is unavailable, no other request goes out
+        # either. Semantic-retry loops for malformed structured output live
+        # outside this method and never touch the gate.
+        await self._gate.acquire(tier, label)
+        try:
+            attempt = 0
+            while True:
+                started = time.perf_counter()
+                try:
+                    response = await client.post(
+                        self.endpoint,
+                        headers=headers,
+                        json=request.model_dump(exclude_none=True),
+                    )
+                except httpx.TransportError as error:
+                    if attempt >= self.max_retries:
+                        logger.exception(
+                            "llm_call_transport_failed",
+                            extra={
+                                "model": self.model,
+                                "attempt": attempt + 1,
+                                "duration_ms": round(
+                                    (time.perf_counter() - started) * 1000, 2
+                                ),
+                            },
+                        )
+                        raise LLMRequestError(f"LLM request failed: {error}") from error
+                    delay = self._retry_delay(attempt)
+                    self._gate.mark_unavailable_until(
+                        asyncio.get_running_loop().time() + delay
+                    )
+                    logger.warning(
+                        "llm_call_retry_scheduled",
                         extra={
                             "model": self.model,
                             "attempt": attempt + 1,
-                            "duration_ms": round(
-                                (time.perf_counter() - started) * 1000, 2
-                            ),
+                            "reason": type(error).__name__,
+                            "delay_seconds": round(delay, 3),
                         },
                     )
-                    raise LLMRequestError(f"LLM request failed: {error}") from error
-                delay = self._retry_delay(attempt)
-                logger.warning(
-                    "llm_call_retry_scheduled",
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+
+                logger.info(
+                    "llm_call_completed",
                     extra={
                         "model": self.model,
-                        "attempt": attempt + 1,
-                        "reason": type(error).__name__,
-                        "delay_seconds": round(delay, 3),
-                    },
-                )
-                await asyncio.sleep(delay)
-                attempt += 1
-                continue
-
-            logger.info(
-                "llm_call_completed",
-                extra={
-                    "model": self.model,
-                    "status": response.status_code,
-                    "attempt": attempt + 1,
-                    "duration_ms": round(
-                        (time.perf_counter() - started) * 1000, 2
-                    ),
-                    "structured": structured,
-                },
-            )
-
-            if not response.is_error:
-                break
-            if _retryable_status(response.status_code) and attempt < self.max_retries:
-                delay = self._retry_delay(
-                    attempt, _retry_after_seconds(response.headers.get("Retry-After"))
-                )
-                logger.warning(
-                    "llm_call_retry_scheduled",
-                    extra={
-                        "model": self.model,
-                        "attempt": attempt + 1,
                         "status": response.status_code,
-                        "delay_seconds": round(delay, 3),
+                        "attempt": attempt + 1,
+                        "duration_ms": round(
+                            (time.perf_counter() - started) * 1000, 2
+                        ),
+                        "structured": structured,
                     },
                 )
-                await asyncio.sleep(delay)
-                attempt += 1
-                continue
-            detail = _response_detail(response)
-            raise LLMRequestError(
-                f"LLM request failed with HTTP {response.status_code}: {detail}"
-            )
+
+                if not response.is_error:
+                    break
+                if _retryable_status(response.status_code) and attempt < self.max_retries:
+                    delay = self._retry_delay(
+                        attempt, _retry_after_seconds(response.headers.get("Retry-After"))
+                    )
+                    self._gate.mark_unavailable_until(
+                        asyncio.get_running_loop().time() + delay
+                    )
+                    logger.warning(
+                        "llm_call_retry_scheduled",
+                        extra={
+                            "model": self.model,
+                            "attempt": attempt + 1,
+                            "status": response.status_code,
+                            "delay_seconds": round(delay, 3),
+                        },
+                    )
+                    await asyncio.sleep(delay)
+                    attempt += 1
+                    continue
+                detail = _response_detail(response)
+                raise LLMRequestError(
+                    f"LLM request failed with HTTP {response.status_code}: {detail}"
+                )
+        finally:
+            self._gate.release()
 
         try:
             payload = response.json()
@@ -1260,5 +1411,10 @@ __all__ = [
     "LLMRequestError",
     "LlmModel",
     "OpenAICompatibleAdapter",
+    "ProviderGate",
+    "TIER_BACKGROUND",
+    "TIER_FOREGROUND",
+    "TIER_FRESHNESS",
     "create_llm",
+    "llm_call_tier",
 ]
