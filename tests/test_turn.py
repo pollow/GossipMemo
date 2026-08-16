@@ -12,12 +12,17 @@ from gossipmemo.models import (
     MessageInput,
     TurnRequest,
 )
+from gossipmemo.llm import ProviderGate
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
 
 class _NoopModel:
     configured = False
+    gate = ProviderGate()
+
+    async def aclose(self):
+        return None
 
     async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
         del context, known_people, comparison_memories

@@ -23,30 +23,43 @@ TIER_BACKGROUND = 3  # person, relationship, user_model, coverage, learning_goal
 # active tier through the contextvar instead of threading a parameter.
 _call_tier: ContextVar[int] = ContextVar("gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
 
+# Carried alongside the tier, set at the same reasoner boundary, so
+# `ProviderGate.current_label` can report a human-readable job name
+# ("reason-person", "extract", ...) instead of a tier-derived placeholder.
+_call_label: ContextVar[str | None] = ContextVar("gossipmemo_llm_call_label", default=None)
+
 
 def current_call_tier() -> int:
     return _call_tier.get()
 
 
+def current_call_label() -> str | None:
+    return _call_label.get()
+
+
 @contextmanager
-def llm_call_tier(tier: int) -> Iterator[None]:
-    """Mark every provider request issued in this scope with `tier`.
+def llm_call_tier(tier: int, label: str | None = None) -> Iterator[None]:
+    """Mark every provider request issued in this scope with `tier`/`label`.
 
     Unset scopes (fakes, tests, call sites that never opt in) default to
-    ``TIER_BACKGROUND``, matching the spec's "safe default" requirement.
+    ``TIER_BACKGROUND`` and a `None` label, matching the spec's "safe
+    default" requirement.
     """
 
-    token = _call_tier.set(tier)
+    tier_token = _call_tier.set(tier)
+    label_token = _call_label.set(label)
     try:
         yield
     finally:
-        _call_tier.reset(token)
+        _call_tier.reset(tier_token)
+        _call_label.reset(label_token)
 
 
 __all__ = [
     "TIER_BACKGROUND",
     "TIER_FOREGROUND",
     "TIER_FRESHNESS",
+    "current_call_label",
     "current_call_tier",
     "llm_call_tier",
 ]

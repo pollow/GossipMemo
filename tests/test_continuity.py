@@ -17,6 +17,7 @@ from gossipmemo.models import (
     QueryRequest,
     RelationshipReasoningResult,
 )
+from gossipmemo.llm import ProviderGate
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
@@ -59,9 +60,13 @@ def test_continuity_uses_rowid_watermark_and_filters_person_refs(tmp_path: Path)
 
 class _ContinuityModel:
     configured = True
+    gate = ProviderGate()
 
     def __init__(self):
         self.calls = 0
+
+    async def aclose(self):
+        return None
 
     async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
         del context, known_people, comparison_memories

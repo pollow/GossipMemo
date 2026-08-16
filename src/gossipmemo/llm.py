@@ -24,7 +24,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import Settings
 from .context_budget import ContextBudget
-from .priority import TIER_BACKGROUND, TIER_FOREGROUND, TIER_FRESHNESS, _call_tier, llm_call_tier
+from .priority import (
+    TIER_BACKGROUND,
+    TIER_FOREGROUND,
+    TIER_FRESHNESS,
+    _call_label,
+    _call_tier,
+    llm_call_tier,
+)
 from .models import (
     ExtractionResult,
     MemoryView,
@@ -94,6 +101,11 @@ class LlmModel(Protocol):
 
     @property
     def configured(self) -> bool: ...
+
+    @property
+    def gate(self) -> ProviderGate: ...
+
+    async def aclose(self) -> None: ...
 
     async def extract(
         self,
@@ -1077,7 +1089,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     async def synthesize(self, question: str, context: QueryContext) -> str:
         if not question.strip():
             raise ValueError("query question must not be empty")
-        with llm_call_tier(TIER_FOREGROUND):
+        with llm_call_tier(TIER_FOREGROUND, "query"):
             content = await self._chat(
                 QUERY_SYNTHESIS_SYSTEM_PROMPT,
                 query_synthesis_prompt(question, context),
@@ -1156,7 +1168,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
 
         tier = _call_tier.get()
-        label = f"tier{tier}-{'structured' if structured else 'chat'}"
+        label = _call_label.get() or f"tier{tier}-{'structured' if structured else 'chat'}"
         # Serialize at the single provider request, not the whole reasoner
         # call. Holding the gate across this entire retry loop -- including
         # its `asyncio.sleep` backoff -- is deliberate global backpressure:

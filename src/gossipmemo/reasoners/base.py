@@ -65,8 +65,8 @@ class DescriptorReasoner:
         context = self._load_context(space_id)
         if not context:
             return False
-        _label, method, args = self._call(space_id, context)
-        with llm_call_tier(self._tier):
+        label, method, args = self._call(space_id, context)
+        with llm_call_tier(self._tier, label):
             result = await method(*args)
         applied = self._apply(space_id, context, result)
         return self._continue_when(context, result, applied)

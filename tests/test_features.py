@@ -27,7 +27,7 @@ from gossipmemo.models import (
     SupersedeRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import LLMRequestError, OpenAICompatibleAdapter
+from gossipmemo.llm import LLMRequestError, OpenAICompatibleAdapter, ProviderGate
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
@@ -36,6 +36,10 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 class FakeModel:
     configured = True
+    gate = ProviderGate()
+
+    async def aclose(self):
+        return None
 
     async def extract(self, message, context=(), known_people=(), comparison_memories=()):
         del message, context, known_people, comparison_memories

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import pytest
 
 from gossipmemo.imports import load_chat_messages
+from gossipmemo.llm import ProviderGate
 from gossipmemo.models import (
     CoverageAuditPatch,
     CoverageCriterionPatch,
@@ -109,6 +110,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
 ):
     class FakeModel:
         configured = True
+        gate = ProviderGate()
 
         def __init__(self):
             self.extractions = 0
@@ -224,6 +226,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
 def test_import_reports_background_reasoning_failure(tmp_path):
     class FailingModel:
         configured = True
+        gate = ProviderGate()
 
         async def reason_person(self, person, memories, inferred=(), hypotheses=()):
             del person, memories, inferred, hypotheses

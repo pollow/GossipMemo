@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..models import MemoryView, PersonView
+from ..priority import TIER_BACKGROUND, llm_call_tier
 from ..prompts import _json
 from ..store import WorldStore
 
@@ -74,7 +75,8 @@ class PersonReasoner:
         if not person.stale:
             return more_targets
         inferred, hypotheses = self.store.owner_review_context(space_id, "person", person_id)
-        result = await self.model.reason_person(person, memories, inferred, hypotheses)
+        with llm_call_tier(TIER_BACKGROUND, "reason-person"):
+            result = await self.model.reason_person(person, memories, inferred, hypotheses)
         applied = self.store.apply_person_reasoning(
             space_id,
             person_id,

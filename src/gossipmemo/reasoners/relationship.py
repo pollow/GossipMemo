@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from ..models import MemoryView, RelationshipView
+from ..priority import TIER_BACKGROUND, llm_call_tier
 from ..prompts import _json
 from ..store import WorldStore
 
@@ -72,9 +73,10 @@ class RelationshipReasoner:
         if not relationship.stale:
             return more_targets
         inferred, hypotheses = self.store.owner_review_context(space_id, "relationship", relationship_id)
-        result = await self.model.reason_relationship(
-            relationship, memories, inferred, hypotheses,
-        )
+        with llm_call_tier(TIER_BACKGROUND, "reason-relationship"):
+            result = await self.model.reason_relationship(
+                relationship, memories, inferred, hypotheses,
+            )
         applied = self.store.apply_relationship_reasoning(
             space_id,
             relationship_id,

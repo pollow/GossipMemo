@@ -523,10 +523,15 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     )
     from gossipmemo.app import create_app
     from gossipmemo.config import Settings
+    from gossipmemo.llm import ProviderGate
     from gossipmemo.world import SocialMemoryWorld
 
     class FakeModel:
         configured = True
+        gate = ProviderGate()
+
+        async def aclose(self):
+            return None
 
         async def extract(self, message, context=(), known_people=(), comparison_memories=()):
             del message, context, known_people, comparison_memories

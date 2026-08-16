@@ -131,9 +131,7 @@ class SocialMemoryWorld:
         self._flush_tasks.clear()
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
-        close = getattr(self.model, "aclose", None)
-        if close is not None:
-            await close()
+        await self.model.aclose()
         logger.info("world_stop_complete", extra={"duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
 
     def _spawn(
@@ -373,7 +371,7 @@ class SocialMemoryWorld:
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
-            with llm_call_tier(TIER_FRESHNESS):
+            with llm_call_tier(TIER_FRESHNESS, "extract"):
                 result = await self.model.extract(
                     messages, context, known_people, comparisons,
                 )
@@ -454,17 +452,12 @@ class SocialMemoryWorld:
             self._schedule_reasoning_pipeline(space_id)
 
     def health(self) -> HealthResponse:
-        # Fakes used in tests need not expose a gate; report an idle queue
-        # when one is absent instead of requiring every LlmModel to have one.
-        gate = getattr(self.model, "gate", None)
-        if gate is None:
-            queue_status = QueueStatus(pending=0, running=False, current_label=None)
-        else:
-            queue_status = QueueStatus(
-                pending=gate.waiting,
-                running=gate.in_flight,
-                current_label=gate.current_label,
-            )
+        gate = self.model.gate
+        queue_status = QueueStatus(
+            pending=gate.waiting,
+            running=gate.in_flight,
+            current_label=gate.current_label,
+        )
         return HealthResponse(
             llm_configured=self.model.configured,
             queue=queue_status,

@@ -9,6 +9,7 @@ import pytest
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
+from gossipmemo.llm import ProviderGate
 from gossipmemo.models import ManualMemoryRequest
 from gossipmemo.store import PersonMergeError, SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
@@ -198,6 +199,7 @@ def test_merge_http_endpoint_and_status_mapping(tmp_path: Path):
 
 class _NoopModel:
     configured = False
+    gate = ProviderGate()
 
     async def aclose(self):
         return None
