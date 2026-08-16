@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from ..models import MemoryView, RelationshipView
 from ..prompts import _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 
 if TYPE_CHECKING:
@@ -55,10 +54,9 @@ class RelationshipReasoner:
 
     name = "relationship"
 
-    def __init__(self, store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> None:
+    def __init__(self, store: WorldStore, model: LlmModel) -> None:
         self.store = store
         self.model = model
-        self.queue = queue
 
     async def attempt(self, space_id: str) -> bool:
         _, relationships, _ = self.store.stale_entities()
@@ -74,9 +72,7 @@ class RelationshipReasoner:
         if not relationship.stale:
             return more_targets
         inferred, hypotheses = self.store.owner_review_context(space_id, "relationship", relationship_id)
-        result = await self.queue.submit(
-            "reason-relationship",
-            self.model.reason_relationship,
+        result = await self.model.reason_relationship(
             relationship, memories, inferred, hypotheses,
         )
         applied = self.store.apply_relationship_reasoning(

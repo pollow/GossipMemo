@@ -6,7 +6,7 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .llm import LLMModel
+from .llm import TIER_FRESHNESS, LLMModel, llm_call_tier
 from .logging import elapsed_ms
 from .models import (
     ContextBundle,
@@ -19,11 +19,11 @@ from .models import (
     MessageInput,
     QueryRequest,
     QueryResponse,
+    QueueStatus,
     SupersedeRequest,
     TurnRequest,
     TurnResponse,
 )
-from .queue import ReasonerCallQueue
 from .reasoners import (
     PersonReasoner,
     Reasoner,
@@ -43,16 +43,16 @@ logger = logging.getLogger(__name__)
 class SocialMemoryWorld:
     """Deep social-memory module used by HTTP callers and tests.
 
-    The queue and persistence details are internal implementation. Ingest is
-    intentionally eventual: it durably records Message inputs, then returns
-    after their Extract work has entered the local FIFO queue.
+    Persistence details are internal implementation. Ingest is intentionally
+    eventual: it durably records Message inputs, then returns after their
+    Extract work has been scheduled as a background task. Provider-side
+    serialization and priority live in `llm.ProviderGate`, not here.
     """
 
     def __init__(
         self,
         store: SqliteWorldStore,
         model: LLMModel,
-        queue: ReasonerCallQueue | None = None,
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
@@ -61,19 +61,18 @@ class SocialMemoryWorld:
     ) -> None:
         self.store = store
         self.model = model
-        self.queue = queue or ReasonerCallQueue()
         self.extraction_batch_size = extraction_batch_size
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self.induction_interval_seconds = induction_interval_seconds
         self.continuity_threshold = continuity_threshold
         reasoners: dict[str, Reasoner] = {
-            "person": PersonReasoner(self.store, self.model, self.queue),
-            "relationship": RelationshipReasoner(self.store, self.model, self.queue),
-            "user_model": build_user_model_reasoner(self.store, self.model, self.queue),
-            "coverage": build_coverage_reasoner(self.store, self.model, self.queue),
-            "learning_goals": build_learning_goals_reasoner(self.store, self.model, self.queue),
+            "person": PersonReasoner(self.store, self.model),
+            "relationship": RelationshipReasoner(self.store, self.model),
+            "user_model": build_user_model_reasoner(self.store, self.model),
+            "coverage": build_coverage_reasoner(self.store, self.model),
+            "learning_goals": build_learning_goals_reasoner(self.store, self.model),
         }
-        self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model, self.queue)
+        self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
         self.reasoning_pipeline = ReasoningPipeline(
             [
                 FunctionStage(name, self._stage_runner(reasoners[name]))
@@ -93,7 +92,6 @@ class SocialMemoryWorld:
         self._stopping = False
         self._background_errors.clear()
         self.store.initialize()
-        await self.queue.start()
         unbatched_spaces: set[str] = set()
         for space_id, batch_id, _ in self.store.pending_extractions():
             if batch_id:
@@ -131,7 +129,6 @@ class SocialMemoryWorld:
         if flush_tasks:
             await asyncio.gather(*flush_tasks, return_exceptions=True)
         self._flush_tasks.clear()
-        await self.queue.stop()
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
         close = getattr(self.model, "aclose", None)
@@ -376,10 +373,10 @@ class SocialMemoryWorld:
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
-            result = await self.queue.submit(
-                "extract", self.model.extract, messages, context, known_people,
-                comparisons,
-            )
+            with llm_call_tier(TIER_FRESHNESS):
+                result = await self.model.extract(
+                    messages, context, known_people, comparisons,
+                )
             self.store.apply_extraction(
                 space_id, batch_id, result,
                 {memory.id for memory in comparisons},
@@ -415,9 +412,9 @@ class SocialMemoryWorld:
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
         context = self.store.read(space_id, request)
-        answer = await self.queue.submit(
-            "query", self.model.synthesize, request.question, context
-        )
+        # `synthesize` is the only synchronous, HTTP-response-blocking call;
+        # it sets the foreground gate tier itself in llm.py.
+        answer = await self.model.synthesize(request.question, context)
         return QueryResponse(answer=answer, **context.model_dump())
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
@@ -457,7 +454,18 @@ class SocialMemoryWorld:
             self._schedule_reasoning_pipeline(space_id)
 
     def health(self) -> HealthResponse:
+        # Fakes used in tests need not expose a gate; report an idle queue
+        # when one is absent instead of requiring every LlmModel to have one.
+        gate = getattr(self.model, "gate", None)
+        if gate is None:
+            queue_status = QueueStatus(pending=0, running=False, current_label=None)
+        else:
+            queue_status = QueueStatus(
+                pending=gate.waiting,
+                running=gate.in_flight,
+                current_label=gate.current_label,
+            )
         return HealthResponse(
             llm_configured=self.model.configured,
-            queue=self.queue.status(),
+            queue=queue_status,
         )

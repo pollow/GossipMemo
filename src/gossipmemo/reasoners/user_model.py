@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from ..models import MemoryView
 from ..prompts import _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 from .base import DescriptorReasoner
 
@@ -33,7 +32,7 @@ def user_model_reasoning_prompt(
     )
 
 
-def build_user_model_reasoner(store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> DescriptorReasoner:
+def build_user_model_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
     def load_context(space_id: str):
         _, _, user_models = store.stale_entities()
         if space_id not in user_models:
@@ -58,7 +57,7 @@ def build_user_model_reasoner(store: WorldStore, model: LlmModel, queue: Reasone
             space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}
         )
 
-    return DescriptorReasoner("user_model", queue, load_context, call, apply)
+    return DescriptorReasoner("user_model", load_context, call, apply)
 
 
 __all__ = [

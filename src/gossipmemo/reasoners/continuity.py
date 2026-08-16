@@ -10,9 +10,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from ..priority import TIER_FRESHNESS
 from ..models import ContinuityView, ModelMessage
 from ..prompts import _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 from .base import DescriptorReasoner
 
@@ -42,7 +42,7 @@ def continuity_prompt(
     )
 
 
-def build_continuity_reasoner(store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> DescriptorReasoner:
+def build_continuity_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
     def load_context(space_id: str):
         context = store.continuity_context(space_id, limit=None)
         if not context:
@@ -67,7 +67,9 @@ def build_continuity_reasoner(store: WorldStore, model: LlmModel, queue: Reasone
         # (someone else updated continuity concurrently) means give up.
         return applied
 
-    return DescriptorReasoner("continuity", queue, load_context, call, apply, continue_when)
+    return DescriptorReasoner(
+        "continuity", load_context, call, apply, continue_when, tier=TIER_FRESHNESS,
+    )
 
 
 __all__ = ["CONTINUITY_SYSTEM_PROMPT", "build_continuity_reasoner", "continuity_prompt"]

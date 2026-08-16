@@ -15,16 +15,16 @@ import random
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, contextmanager
-from contextvars import ContextVar
+from contextlib import AbstractAsyncContextManager
 from types import TracebackType
-from typing import Any, Iterator, Literal, Protocol, TypeVar, cast, runtime_checkable
+from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .config import Settings
 from .context_budget import ContextBudget
+from .priority import TIER_BACKGROUND, TIER_FOREGROUND, TIER_FRESHNESS, _call_tier, llm_call_tier
 from .models import (
     ExtractionResult,
     MemoryView,
@@ -152,33 +152,6 @@ class LLMProtocolError(LLMError):
 
 class LLMOutputError(LLMError):
     """Raised when model content cannot validate as the requested result."""
-
-
-# Strict priority tiers for outbound provider requests. Lower numbers run
-# first; there is no aging or anti-starvation, by design (see ProviderGate).
-TIER_FOREGROUND = 1  # synthesize: the only synchronous, HTTP-response-blocking call.
-TIER_FRESHNESS = 2  # extraction, continuity.
-TIER_BACKGROUND = 3  # person, relationship, user_model, coverage, learning_goals.
-
-# Set at each reasoner boundary via `llm_call_tier`; internal call sites
-# (~15 of them across owner-reasoning, chunking, and digesting) inherit the
-# active tier through the contextvar instead of threading a parameter.
-_call_tier: ContextVar[int] = ContextVar("gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
-
-
-@contextmanager
-def llm_call_tier(tier: int) -> Iterator[None]:
-    """Mark every provider request issued in this scope with `tier`.
-
-    Unset scopes (fakes, tests, call sites that never opt in) default to
-    ``TIER_BACKGROUND``, matching the spec's "safe default" requirement.
-    """
-
-    token = _call_tier.set(tier)
-    try:
-        yield
-    finally:
-        _call_tier.reset(token)
 
 
 class ProviderGate:

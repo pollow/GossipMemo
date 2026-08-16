@@ -12,8 +12,9 @@ eventually make an agent assert the second as if it were the first. GossipMemo
 keeps the basis attached to every record, so hedged and second-hand claims stay
 hedged and second-hand all the way to the prompt.
 
-It runs as one FastAPI process over a SQLite volume, with a single FIFO queue
-in front of all LLM calls, and ships with a Hermes memory-provider plugin.
+It runs as one FastAPI process over a SQLite volume, with a single-permit
+priority gate in front of all outbound LLM provider requests, and ships with
+a Hermes memory-provider plugin.
 
 ## Run with Docker
 
@@ -306,8 +307,8 @@ question directly.
 SQLite is the first canonical-store adapter, combining FTS5 with structured
 Person/Relationship filters; embeddings are intentionally deferred. Retrieval
 indexes are regenerable projections, not part of the Memory entity. A single
-process is a product invariant — SQLite plus the in-process FIFO LLM queue —
-so there is deliberately no worker-count option.
+process is a product invariant — SQLite plus the in-process, single-permit
+provider gate — so there is deliberately no worker-count option.
 
 See [data_schema.md](data_schema.md) for the table-level model and
 [glossary.md](glossary.md) for the canonical vocabulary.

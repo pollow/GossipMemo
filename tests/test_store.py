@@ -510,36 +510,6 @@ def test_memory_fts_triggers_track_insert_update_and_delete(store):
     )
 
 
-def test_local_llm_queue_is_fifo_and_continues_after_job_error():
-    from gossipmemo.queue import LLMQueue
-
-    async def scenario():
-        queue = LLMQueue()
-        started: list[int] = []
-
-        async def work(value: int) -> int:
-            started.append(value)
-            await asyncio.sleep(0)
-            return value
-
-        await queue.start()
-        futures = [queue.submit(f"work-{value}", work, value) for value in range(4)]
-        assert await asyncio.gather(*futures) == [0, 1, 2, 3]
-        assert started == [0, 1, 2, 3]
-
-        async def fail() -> None:
-            raise ValueError("expected job failure")
-
-        failed = asyncio.create_task(queue.submit("fail", fail))
-        next_job = asyncio.create_task(queue.submit("after-failure", work, 4))
-        with pytest.raises(ValueError, match="expected job failure"):
-            await failed
-        assert await next_job == 4
-        await queue.stop()
-
-    asyncio.run(scenario())
-
-
 def test_fastapi_lifespan_ingest_wait_and_query(store):
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")

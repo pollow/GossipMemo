@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from ..models import CoverageMapView, HypothesisView, LearningGoalCandidate, LearningGoalView
 from ..prompts import COVERAGE_METHOD, COVERAGE_RUBRIC, _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 from .base import DescriptorReasoner
 
@@ -81,7 +80,7 @@ def goal_candidate_reduction_prompt(candidates: list[LearningGoalCandidate]) -> 
     )
 
 
-def build_learning_goals_reasoner(store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> DescriptorReasoner:
+def build_learning_goals_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
     """Single pass, no retry loop."""
 
     def load_context(space_id: str):
@@ -106,7 +105,7 @@ def build_learning_goals_reasoner(store: WorldStore, model: LlmModel, queue: Rea
     def continue_when(context, result, applied: bool) -> bool:
         return False
 
-    return DescriptorReasoner("learning_goals", queue, load_context, call, apply, continue_when)
+    return DescriptorReasoner("learning_goals", load_context, call, apply, continue_when)
 
 
 __all__ = [

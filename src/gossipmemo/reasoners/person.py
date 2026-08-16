@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from ..models import MemoryView, PersonView
 from ..prompts import _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 
 if TYPE_CHECKING:
@@ -57,10 +56,9 @@ class PersonReasoner:
 
     name = "person"
 
-    def __init__(self, store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> None:
+    def __init__(self, store: WorldStore, model: LlmModel) -> None:
         self.store = store
         self.model = model
-        self.queue = queue
 
     async def attempt(self, space_id: str) -> bool:
         people, _, _ = self.store.stale_entities()
@@ -76,9 +74,7 @@ class PersonReasoner:
         if not person.stale:
             return more_targets
         inferred, hypotheses = self.store.owner_review_context(space_id, "person", person_id)
-        result = await self.queue.submit(
-            "reason-person", self.model.reason_person, person, memories, inferred, hypotheses
-        )
+        result = await self.model.reason_person(person, memories, inferred, hypotheses)
         applied = self.store.apply_person_reasoning(
             space_id,
             person_id,

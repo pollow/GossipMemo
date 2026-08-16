@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 
 from ..models import CoverageMapView, HypothesisView, MemoryView
 from ..prompts import COVERAGE_METHOD, COVERAGE_RUBRIC, _evidence_lines, _hypothesis_lines, _json
-from ..queue import ReasonerCallQueue
 from ..store import WorldStore
 from .base import DescriptorReasoner
 
@@ -38,7 +37,7 @@ def coverage_audit_prompt(
     )
 
 
-def build_coverage_reasoner(store: WorldStore, model: LlmModel, queue: ReasonerCallQueue) -> DescriptorReasoner:
+def build_coverage_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
     """Audit all bounded chunks before a single goal-planning pass."""
 
     def load_context(space_id: str):
@@ -68,7 +67,7 @@ def build_coverage_reasoner(store: WorldStore, model: LlmModel, queue: ReasonerC
         _, _, _, pending = context
         return pending
 
-    return DescriptorReasoner("coverage", queue, load_context, call, apply, continue_when)
+    return DescriptorReasoner("coverage", load_context, call, apply, continue_when)
 
 
 __all__ = ["COVERAGE_AUDIT_SYSTEM_PROMPT", "build_coverage_reasoner", "coverage_audit_prompt"]
