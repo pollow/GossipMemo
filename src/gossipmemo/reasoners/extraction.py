@@ -1,16 +1,34 @@
-"""Extraction prompts.
+"""Extraction reasoner and its prompt.
 
-Extraction itself stays outside the `Reasoner` abstraction (see
-`SocialMemoryWorld._extract`); this module only co-locates its prompt text
-with the rest of the extraction-specific handling.
+Batch *creation* (bucketing raw messages, the 30-minute partial-flush timer,
+the ingest-time trigger) stays in `world.py`; that is scheduling, the
+driver's job. This reasoner only consumes pending batches: each `attempt`
+runs the single oldest pending batch for a space through to completion or
+failure and reports whether another batch remains.
+
+ACCEPTED INTENTIONAL CHANGE: batches used to run as one spawned task each,
+concurrently. Driven as a reasoner they now drain sequentially per space.
+Provider requests were already serialized by `ProviderGate`, so this is a
+scheduling change, not a semantic one, and it matches the intended
+"extraction drains before induction" priority (`TIER_FRESHNESS`).
 """
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import logging
+from typing import TYPE_CHECKING, Any
 
 from ..models import MemoryView, ModelMessage
+from ..priority import TIER_FRESHNESS, llm_call_tier
 from ..prompts import _json
+from ..store import WorldStore
+from .base import Reasoner
+
+if TYPE_CHECKING:
+    from ..llm import LlmModel
+
+logger = logging.getLogger(__name__)
 
 EXTRACTION_SYSTEM_PROMPT = """Extract useful, provenance-aware memories from the messages.
 Return only the supplied JSON schema. Keep the original meaning, speaker, and
@@ -116,4 +134,71 @@ def extraction_prompt(
     )
 
 
-__all__ = ["EXTRACTION_SYSTEM_PROMPT", "extraction_prompt"]
+class _ExtractionReasoner:
+    """Run one pending extraction batch per attempt.
+
+    Unlike the descriptor-shaped reasoners, a failed model call or apply
+    must not propagate: it is recorded on the batch (`fail_extraction`) and
+    logged, matching the pre-existing behavior of `SocialMemoryWorld._extract`.
+    """
+
+    name = "extraction"
+
+    def __init__(self, store: WorldStore, model: LlmModel) -> None:
+        self.store = store
+        self.model = model
+
+    async def attempt(self, space_id: str) -> bool:
+        pending = [
+            batch_id
+            for sid, batch_id, _ in self.store.pending_extractions()
+            if sid == space_id and batch_id is not None
+        ]
+        if not pending:
+            return False
+        batch_id = pending[0]
+        more_batches = len(pending) > 1
+        messages = self.store.load_batch(space_id, batch_id)
+        if not messages:
+            return more_batches
+        context = self.store.load_extraction_context(space_id, batch_id)
+        known_people = self.store.load_known_people(space_id, messages + context)
+        comparisons = self.store.load_extraction_comparisons(space_id, batch_id)
+        started = asyncio.get_running_loop().time()
+        self.store.mark_extraction_attempt(space_id, batch_id)
+        try:
+            with llm_call_tier(TIER_FRESHNESS, "extract"):
+                result = await self.model.extract(
+                    messages, context, known_people, comparisons,
+                )
+            self.store.apply_extraction(
+                space_id, batch_id, result,
+                {memory.id for memory in comparisons},
+            )
+            logger.info(
+                "extraction_completed",
+                extra={
+                    "space_id": space_id,
+                    "batch_id": batch_id,
+                    "message_count": len(messages),
+                    "duration_ms": round(
+                        (asyncio.get_running_loop().time() - started) * 1000, 2
+                    ),
+                },
+            )
+        except Exception as error:
+            self.store.fail_extraction(space_id, batch_id, str(error))
+            logger.exception("extract failed for %s", batch_id)
+            # Stop this drain rather than immediately re-picking the same
+            # batch (still 'failed', not 'completed') off `pending_extractions`
+            # in a tight retry loop; the next external trigger (ingest,
+            # continuity threshold, startup) resumes draining.
+            return False
+        return more_batches
+
+
+def build_extraction_reasoner(store: WorldStore, model: LlmModel) -> Reasoner:
+    return _ExtractionReasoner(store, model)
+
+
+__all__ = ["EXTRACTION_SYSTEM_PROMPT", "build_extraction_reasoner", "extraction_prompt"]

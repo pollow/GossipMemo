@@ -6,8 +6,8 @@ commit, so it has no `Reasoner`; this module only co-locates its prompt.
 
 from __future__ import annotations
 
-from ..models import QueryContext
-from ..prompts import _json
+from .models import QueryContext
+from .prompts import _json
 
 QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the supplied
 social-memory context. Return concise plain text only (no JSON wrapper or code

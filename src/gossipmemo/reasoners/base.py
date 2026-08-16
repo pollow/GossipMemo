@@ -40,16 +40,22 @@ class DescriptorReasoner:
     `tier`. `continue_when` defaults to "retry only on a watermark
     conflict."
 
-    A reasoner whose continue-logic does not fit this shape (for example one
-    that must enumerate several stale targets per attempt) implements the
-    `Reasoner` protocol directly instead of using this descriptor.
+    `call` may also return `None` to skip both the model call and `apply` --
+    for example when a reasoner enumerating several candidate targets finds
+    that its chosen target vanished or is no longer stale but other targets
+    remain. `attempt` then calls `continue_when(context, None, False)`
+    directly, so `continue_when` alone decides whether another attempt is
+    warranted.
     """
 
     def __init__(
         self,
         name: str,
         load_context: Callable[[str], Any],
-        call: Callable[[str, Any], tuple[str, Callable[..., Awaitable[Any]], tuple[Any, ...]]],
+        call: Callable[
+            [str, Any],
+            tuple[str, Callable[..., Awaitable[Any]], tuple[Any, ...]] | None,
+        ],
         apply: Callable[[str, Any, Any], bool],
         continue_when: Callable[[Any, Any, bool], bool] | None = None,
         tier: int = TIER_BACKGROUND,
@@ -65,7 +71,10 @@ class DescriptorReasoner:
         context = self._load_context(space_id)
         if not context:
             return False
-        label, method, args = self._call(space_id, context)
+        call = self._call(space_id, context)
+        if call is None:
+            return self._continue_when(context, None, False)
+        label, method, args = call
         with llm_call_tier(self._tier, label):
             result = await method(*args)
         applied = self._apply(space_id, context, result)

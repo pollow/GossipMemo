@@ -66,13 +66,13 @@ from .prompts import (
     projection_stage_prompt,
     schema_instruction,
 )
+from .query import QUERY_SYNTHESIS_SYSTEM_PROMPT, query_synthesis_prompt
 from .reasoners import (
     CONTINUITY_SYSTEM_PROMPT,
     COVERAGE_AUDIT_SYSTEM_PROMPT,
     EXTRACTION_SYSTEM_PROMPT,
     GOAL_PLANNING_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
-    QUERY_SYNTHESIS_SYSTEM_PROMPT,
     RELATIONSHIP_REASONING_SYSTEM_PROMPT,
     USER_MODEL_REASONING_SYSTEM_PROMPT,
     continuity_prompt,
@@ -83,7 +83,6 @@ from .reasoners import (
     goal_planning_prompt,
     goal_reconciliation_prompt,
     person_reasoning_prompt,
-    query_synthesis_prompt,
     relationship_reasoning_prompt,
     user_model_reasoning_prompt,
 )

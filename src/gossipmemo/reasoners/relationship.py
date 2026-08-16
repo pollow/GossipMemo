@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from ..models import MemoryView, RelationshipView
-from ..priority import TIER_BACKGROUND, llm_call_tier
+from ..models import HypothesisView, MemoryView, RelationshipView
 from ..prompts import _json
 from ..store import WorldStore
+from .base import DescriptorReasoner
 
 if TYPE_CHECKING:
     from ..llm import LlmModel
@@ -46,50 +47,77 @@ def relationship_reasoning_prompt(
     )
 
 
-class RelationshipReasoner:
-    """Refresh one stale Relationship projection per attempt.
+@dataclass(slots=True)
+class _RelationshipTarget:
+    """One candidate Relationship, plus whether other stale targets remain.
 
-    Mirrors `PersonReasoner`: an in-flight watermark conflict simply causes
-    the next `attempt` to recompute from the latest snapshot.
+    `relationship` is `None` when the chosen target vanished between the
+    stale scan and the context read, or is no longer stale by the time it
+    is read -- either way, `call` skips the model call for this attempt.
     """
 
-    name = "relationship"
+    relationship_id: str
+    more_targets: bool
+    relationship: RelationshipView | None = None
+    memories: tuple[MemoryView, ...] = ()
+    watermark: object = None
+    inferred: tuple[MemoryView, ...] = field(default_factory=tuple)
+    hypotheses: tuple[HypothesisView, ...] = field(default_factory=tuple)
 
-    def __init__(self, store: WorldStore, model: LlmModel) -> None:
-        self.store = store
-        self.model = model
 
-    async def attempt(self, space_id: str) -> bool:
-        _, relationships, _ = self.store.stale_entities()
+def build_relationship_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
+    """Refresh one stale Relationship projection per attempt.
+
+    Mirrors the person reasoner: an in-flight watermark conflict simply
+    causes the next `attempt` to recompute from the latest snapshot.
+    """
+
+    def load_context(space_id: str) -> _RelationshipTarget | None:
+        _, relationships, _ = store.stale_entities()
         targets = [relationship_id for sid, relationship_id in relationships if sid == space_id]
         if not targets:
-            return False
+            return None
         relationship_id = targets[0]
         more_targets = len(targets) > 1
-        context = self.store.relationship_context(space_id, relationship_id)
+        context = store.relationship_context(space_id, relationship_id)
         if not context:
-            return more_targets
+            return _RelationshipTarget(relationship_id, more_targets)
         relationship, memories, watermark = context
         if not relationship.stale:
-            return more_targets
-        inferred, hypotheses = self.store.owner_review_context(space_id, "relationship", relationship_id)
-        with llm_call_tier(TIER_BACKGROUND, "reason-relationship"):
-            result = await self.model.reason_relationship(
-                relationship, memories, inferred, hypotheses,
-            )
-        applied = self.store.apply_relationship_reasoning(
-            space_id,
-            relationship_id,
-            watermark,
-            result,
-            {memory.id for memory in inferred},
-            {hypothesis.id for hypothesis in hypotheses},
+            return _RelationshipTarget(relationship_id, more_targets)
+        inferred, hypotheses = store.owner_review_context(space_id, "relationship", relationship_id)
+        return _RelationshipTarget(
+            relationship_id, more_targets, relationship, tuple(memories), watermark,
+            tuple(inferred), tuple(hypotheses),
         )
-        return more_targets or not applied
+
+    def call(space_id: str, context: _RelationshipTarget):
+        if context.relationship is None:
+            return None
+        return (
+            "reason-relationship",
+            model.reason_relationship,
+            (context.relationship, context.memories, context.inferred, context.hypotheses),
+        )
+
+    def apply(space_id: str, context: _RelationshipTarget, result) -> bool:
+        return store.apply_relationship_reasoning(
+            space_id,
+            context.relationship_id,
+            context.watermark,
+            result,
+            {memory.id for memory in context.inferred},
+            {hypothesis.id for hypothesis in context.hypotheses},
+        )
+
+    def continue_when(context: _RelationshipTarget, result, applied: bool) -> bool:
+        return context.more_targets or not applied
+
+    return DescriptorReasoner("relationship", load_context, call, apply, continue_when)
 
 
 __all__ = [
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
-    "RelationshipReasoner",
+    "build_relationship_reasoner",
     "relationship_reasoning_prompt",
 ]

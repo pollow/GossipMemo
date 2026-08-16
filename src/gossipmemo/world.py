@@ -6,7 +6,7 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .llm import TIER_FRESHNESS, LLMModel, llm_call_tier
+from .llm import LLMModel
 from .logging import elapsed_ms
 from .models import (
     ContextBundle,
@@ -25,12 +25,13 @@ from .models import (
     TurnResponse,
 )
 from .reasoners import (
-    PersonReasoner,
     Reasoner,
-    RelationshipReasoner,
     build_continuity_reasoner,
     build_coverage_reasoner,
+    build_extraction_reasoner,
     build_learning_goals_reasoner,
+    build_person_reasoner,
+    build_relationship_reasoner,
     build_user_model_reasoner,
 )
 from .reasoning import DEFAULT_REASONING_PIPELINE, FunctionStage, ReasoningPipeline
@@ -66,13 +67,14 @@ class SocialMemoryWorld:
         self.induction_interval_seconds = induction_interval_seconds
         self.continuity_threshold = continuity_threshold
         reasoners: dict[str, Reasoner] = {
-            "person": PersonReasoner(self.store, self.model),
-            "relationship": RelationshipReasoner(self.store, self.model),
+            "person": build_person_reasoner(self.store, self.model),
+            "relationship": build_relationship_reasoner(self.store, self.model),
             "user_model": build_user_model_reasoner(self.store, self.model),
             "coverage": build_coverage_reasoner(self.store, self.model),
             "learning_goals": build_learning_goals_reasoner(self.store, self.model),
         }
         self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
+        self._extraction_reasoner: Reasoner = build_extraction_reasoner(self.store, self.model)
         self.reasoning_pipeline = ReasoningPipeline(
             [
                 FunctionStage(name, self._stage_runner(reasoners[name]))
@@ -95,7 +97,7 @@ class SocialMemoryWorld:
         unbatched_spaces: set[str] = set()
         for space_id, batch_id, _ in self.store.pending_extractions():
             if batch_id:
-                self._schedule_extract(space_id, batch_id)
+                self._schedule_extraction(space_id)
             else:
                 unbatched_spaces.add(space_id)
         for space_id in unbatched_spaces:
@@ -192,12 +194,12 @@ class SocialMemoryWorld:
                 ],
             )
             if batch_id:
-                self._schedule_extract(space_id, batch_id)
+                self._schedule_extraction(space_id)
             else:
                 break
         while True:
             extraction_running = any(
-                key[0] == "extract" and key[1] == space_id
+                key[0] == "extraction" and key[1] == space_id
                 for key in self._scheduled
             )
             if not extraction_running:
@@ -316,7 +318,7 @@ class SocialMemoryWorld:
             )
             if batch_id:
                 logger.info("extraction_batch_scheduled", extra={"space_id": space_id, "batch_id": batch_id, "message_count": self.extraction_batch_size})
-                self._schedule_extract(space_id, batch_id)
+                self._schedule_extraction(space_id)
             pending = self.store.unbatched_messages(space_id)
         if pending:
             self._schedule_partial_flush(space_id, pending[0][1])
@@ -346,7 +348,7 @@ class SocialMemoryWorld:
                         ],
                     )
                     if batch_id:
-                        self._schedule_extract(space_id, batch_id)
+                        self._schedule_extraction(space_id)
                 self._drain_extraction_batches(space_id)
             finally:
                 self._flush_tasks.pop(space_id, None)
@@ -354,38 +356,12 @@ class SocialMemoryWorld:
         task = asyncio.create_task(flush(), name=f"gossipmemo-flush-{space_id}")
         self._flush_tasks[space_id] = task
 
-    def _schedule_extract(self, space_id: str, batch_id: str) -> None:
-        logger.info("extraction_scheduled", extra={"space_id": space_id, "batch_id": batch_id})
+    def _schedule_extraction(self, space_id: str) -> None:
+        logger.info("extraction_scheduled", extra={"space_id": space_id})
         self._spawn(
-            ("extract", space_id, batch_id),
-            self._extract(space_id, batch_id),
+            ("extraction", space_id, space_id),
+            self._stage_runner(self._extraction_reasoner)(space_id),
         )
-
-    async def _extract(self, space_id: str, batch_id: str) -> None:
-        messages = self.store.load_batch(space_id, batch_id)
-        if not messages:
-            return
-        context = self.store.load_extraction_context(space_id, batch_id)
-        known_people = self.store.load_known_people(space_id, messages + context)
-        comparisons = self.store.load_extraction_comparisons(space_id, batch_id)
-        started = asyncio.get_running_loop().time()
-        self.store.mark_extraction_attempt(space_id, batch_id)
-        try:
-            with llm_call_tier(TIER_FRESHNESS, "extract"):
-                result = await self.model.extract(
-                    messages, context, known_people, comparisons,
-                )
-            self.store.apply_extraction(
-                space_id, batch_id, result,
-                {memory.id for memory in comparisons},
-            )
-            logger.info("extraction_completed", extra={"space_id": space_id, "batch_id": batch_id, "message_count": len(messages), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
-        except Exception as error:
-            self.store.fail_extraction(space_id, batch_id, str(error))
-            logger.exception("extract failed for %s", batch_id)
-            return
-        if self._stopping:
-            return
 
     def _next_induction_delay(self) -> float:
         if self.induction_interval_seconds is not None:
