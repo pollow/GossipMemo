@@ -330,6 +330,121 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
     assert calls == [6]
 
 
+def _make_batch(store: SqliteWorldStore, space_id: str, content: str) -> str:
+    message_id = store.record_messages(
+        space_id,
+        [MessageInput(author="user", content=content)],
+    )[0]
+    batch_id = store.create_extraction_batch(space_id, [message_id])
+    assert batch_id is not None
+    return batch_id
+
+
+def test_failing_batch_does_not_block_later_batch(tmp_path):
+    from gossipmemo.reasoners.extraction import build_extraction_reasoner
+
+    store = _store(tmp_path)
+    bad_batch = _make_batch(store, "personal", "bad batch content")
+    good_batch = _make_batch(store, "personal", "good batch content")
+
+    class FlakyModel(FakeModel):
+        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+            del context, known_people, comparison_memories
+            if messages and "bad batch" in messages[0].content:
+                raise RuntimeError("boom")
+            return ExtractionResult()
+
+    reasoner = build_extraction_reasoner(store, FlakyModel())
+
+    async def drain() -> None:
+        while await reasoner.attempt("personal"):
+            pass
+
+    asyncio.run(drain())
+
+    with store._connect() as connection:
+        bad_state = connection.execute(
+            "SELECT extraction_state FROM messages WHERE extraction_batch_id = ?",
+            (bad_batch,),
+        ).fetchone()["extraction_state"]
+        good_state = connection.execute(
+            "SELECT extraction_state FROM messages WHERE extraction_batch_id = ?",
+            (good_batch,),
+        ).fetchone()["extraction_state"]
+    assert bad_state == "failed"
+    assert good_state == "completed"
+
+
+def test_two_permanently_failing_batches_terminate_drain(tmp_path):
+    from gossipmemo.reasoners.extraction import (
+        MAX_EXTRACTION_ATTEMPTS,
+        build_extraction_reasoner,
+    )
+
+    store = _store(tmp_path)
+    _make_batch(store, "personal", "first batch content")
+    _make_batch(store, "personal", "second batch content")
+
+    calls: list[str] = []
+
+    class AlwaysFailsModel(FakeModel):
+        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+            del context, known_people, comparison_memories
+            calls.append(messages[0].content if messages else "")
+            raise RuntimeError("boom")
+
+    reasoner = build_extraction_reasoner(store, AlwaysFailsModel())
+
+    async def drain() -> None:
+        guard = 0
+        while await reasoner.attempt("personal"):
+            guard += 1
+            assert guard <= 100, "drain loop did not terminate"
+
+    asyncio.run(drain())
+
+    assert len(calls) == 2 * MAX_EXTRACTION_ATTEMPTS
+
+
+def test_capped_batch_is_skipped_but_still_reported(tmp_path):
+    from gossipmemo.reasoners.extraction import (
+        MAX_EXTRACTION_ATTEMPTS,
+        build_extraction_reasoner,
+    )
+
+    store = _store(tmp_path)
+    capped_batch = _make_batch(store, "personal", "capped batch content")
+    fresh_batch = _make_batch(store, "personal", "fresh batch content")
+
+    for _ in range(MAX_EXTRACTION_ATTEMPTS):
+        store.mark_extraction_attempt("personal", capped_batch)
+        store.fail_extraction("personal", capped_batch, "boom")
+
+    calls: list[str] = []
+
+    class RecordingModel(FakeModel):
+        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+            del context, known_people, comparison_memories
+            calls.append(messages[0].content if messages else "")
+            return ExtractionResult()
+
+    reasoner = build_extraction_reasoner(store, RecordingModel())
+
+    async def drain() -> None:
+        while await reasoner.attempt("personal"):
+            pass
+
+    asyncio.run(drain())
+
+    assert calls == ["fresh batch content"]
+    reported = {
+        bid for sid, bid, _ in store.pending_extractions()
+        if sid == "personal"
+    }
+    assert capped_batch in reported
+    assert fresh_batch not in reported  # completed, so no longer pending
+
+
 def test_induction_waits_for_daily_scheduler(tmp_path):
     calls: list[str] = []
 

@@ -30,6 +30,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# A batch that keeps failing is skipped once it hits this many attempts, so a
+# permanently-broken batch cannot spin the drain loop forever alongside other
+# permanently-broken batches (each failure re-sorts the others ahead of it in
+# `pending_extractions`, which alone does not bound the loop).
+MAX_EXTRACTION_ATTEMPTS = 5
+
 EXTRACTION_SYSTEM_PROMPT = """Extract useful, provenance-aware memories from the messages.
 Return only the supplied JSON schema. Keep the original meaning, speaker, and
 uncertainty. Extract explicit facts, events, preferences, plans, and situations;
@@ -154,10 +160,16 @@ class _ExtractionReasoner:
             for sid, batch_id, _ in self.store.pending_extractions()
             if sid == space_id and batch_id is not None
         ]
-        if not pending:
+        eligible = [
+            batch_id
+            for batch_id in pending
+            if self.store.batch_extraction_attempts(space_id, batch_id)
+            < MAX_EXTRACTION_ATTEMPTS
+        ]
+        if not eligible:
             return False
-        batch_id = pending[0]
-        more_batches = len(pending) > 1
+        batch_id = eligible[0]
+        more_batches = len(eligible) > 1
         messages = self.store.load_batch(space_id, batch_id)
         if not messages:
             return more_batches
@@ -189,11 +201,7 @@ class _ExtractionReasoner:
         except Exception as error:
             self.store.fail_extraction(space_id, batch_id, str(error))
             logger.exception("extract failed for %s", batch_id)
-            # Stop this drain rather than immediately re-picking the same
-            # batch (still 'failed', not 'completed') off `pending_extractions`
-            # in a tight retry loop; the next external trigger (ingest,
-            # continuity threshold, startup) resumes draining.
-            return False
+            return more_batches
         return more_batches
 
 

@@ -640,6 +640,24 @@ class SqliteWorldStore:
                 (space_id, batch_id),
             )
 
+    def batch_extraction_attempts(self, space_id: str, batch_id: str) -> int:
+        """Return the current attempt count for a pending/failed batch.
+
+        All messages in a batch share the same `extraction_attempts` value
+        (`mark_extraction_attempt` updates the whole batch), so reading any
+        one row suffices.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT extraction_attempts FROM messages
+                WHERE space_id = ? AND extraction_batch_id = ?
+                LIMIT 1
+                """,
+                (space_id, batch_id),
+            ).fetchone()
+        return row["extraction_attempts"] if row is not None else 0
+
     def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -935,7 +953,7 @@ class SqliteWorldStore:
                 """
                 SELECT space_id, id, extraction_batch_id FROM messages
                 WHERE extraction_state IN ('pending', 'failed')
-                ORDER BY ingested_at
+                ORDER BY extraction_attempts, ingested_at
                 """
             ).fetchall()
         grouped: dict[tuple[str, str | None], list[str]] = {}
