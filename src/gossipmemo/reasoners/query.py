@@ -1,0 +1,34 @@
+"""Query-synthesis prompt.
+
+Query synthesis stays a single read-only model call with no watermark to
+commit, so it has no `Reasoner`; this module only co-locates its prompt.
+"""
+
+from __future__ import annotations
+
+from ..models import QueryContext
+from ..prompts import _json
+
+QUERY_SYNTHESIS_SYSTEM_PROMPT = """Answer the read-only question using the supplied
+social-memory context. Return concise plain text only (no JSON wrapper or code
+fence). Use facts and supported inferences in the context to give a direct,
+useful answer; distinguish uncertainty and current conditions from historical
+events. Separate Person records are not evidence that they represent different
+real people; when identities may overlap, state the ambiguity instead of asserting
+a distinction. Do not invent facts or claim that anything was saved. Answer in
+the language of the question.
+"""
+
+
+def query_synthesis_prompt(question: str, context: QueryContext) -> str:
+    """Build the user prompt for read-only query synthesis."""
+
+    return (
+        "Question:\n"
+        + question
+        + "\n\nContext (people, relationships, and memories):\n"
+        + _json(context)
+    )
+
+
+__all__ = ["QUERY_SYNTHESIS_SYSTEM_PROMPT", "query_synthesis_prompt"]

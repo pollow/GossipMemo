@@ -1,10 +1,49 @@
-"""Relationship projection reasoner."""
+"""Relationship projection reasoner and its prompts."""
 
 from __future__ import annotations
 
-from ..llm import LlmModel
+from typing import TYPE_CHECKING
+
+from ..models import MemoryView, RelationshipView
+from ..prompts import _json
 from ..queue import ReasonerCallQueue
 from ..store import WorldStore
+
+if TYPE_CHECKING:
+    from ..llm import LlmModel
+
+RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Reason carefully about the relationship between
+the two endpoint People in the supplied owner context. Linked memories indicate relevance to the
+endpoints, not relationship evidence by themselves. Do not transfer the current
+user's or either endpoint's standalone traits, preferences, intentions, or actions
+into a relationship claim. Mere co-occurrence is not relationship evidence. Look
+for recurring interaction patterns, cooperation, friction, trust, initiative, and
+meaningful changes in closeness, tone, or status. Recurring patterns require
+multiple distinct source memories; a narrow inference from one highly diagnostic
+interaction is allowed when calibrated to that evidence. Do not use projections,
+inferred memories, or hypotheses as evidence. Distinguish current from historical
+conditions. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
+"""
+
+
+def relationship_reasoning_prompt(
+    relationship: RelationshipView,
+    memories: list[MemoryView] | tuple[MemoryView, ...],
+    user_name: str = "CurrentUser",
+) -> str:
+    """Build the user prompt for a relationship projection refresh."""
+
+    return (
+        f"The fixed current user is named {user_name!r}; the current user is not "
+        "an endpoint Person. Rebuild the projection for the relationship between "
+        "the two endpoint People in the input. Linked memories indicate relevance, "
+        "not relationship evidence; summarize only interactions between the endpoints. "
+        "Use only the supplied context; do not transfer standalone traits, preferences, "
+        "or actions into a relationship claim.\n\nTarget relationship:\n"
+        + _json(relationship)
+        + "\n\nRelevant memories:\n"
+        + _json(list(memories))
+    )
 
 
 class RelationshipReasoner:
@@ -51,4 +90,8 @@ class RelationshipReasoner:
         return more_targets or not applied
 
 
-__all__ = ["RelationshipReasoner"]
+__all__ = [
+    "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
+    "RelationshipReasoner",
+    "relationship_reasoning_prompt",
+]

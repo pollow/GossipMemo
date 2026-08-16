@@ -1,5 +1,5 @@
 from gossipmemo.models import CoverageMapView, MemoryView, ModelMessage, PersonView, RelationshipView
-from gossipmemo.prompts import (
+from gossipmemo.reasoners import (
     EXTRACTION_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
     QUERY_SYNTHESIS_SYSTEM_PROMPT,
