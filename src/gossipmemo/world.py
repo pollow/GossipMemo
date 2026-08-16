@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
@@ -290,15 +289,7 @@ class SocialMemoryWorld:
 
     async def _reason_continuity(self, space_id: str) -> None:
         while not self._stopping:
-            # Production adapters own request-aware chunking.  Keep the
-            # historical bounded seam only for minimal deterministic fakes
-            # that cannot expose a ContextBudget.
-            if hasattr(self.model, "context_budget"):
-                context = self.store.continuity_context(space_id, limit=None)
-            else:
-                context = self.store.continuity_context(
-                    space_id, max_message_chars=8000, max_total_chars=48000,
-                )
+            context = self.store.continuity_context(space_id, limit=None)
             if not context:
                 return
             continuity, messages = context
@@ -446,14 +437,6 @@ class SocialMemoryWorld:
     async def _run_learning_goals_stage(self, space_id: str) -> None:
         await self._plan_learning_goals(space_id)
 
-    def _owner_reason_args(self, method: object, modern: tuple[object, ...], legacy_count: int) -> tuple[object, ...]:
-        """Keep pre-two-stage deterministic fakes usable during the seam transition."""
-        parameters = inspect.signature(method).parameters.values()
-        if any(parameter.kind is inspect.Parameter.VAR_POSITIONAL for parameter in parameters):
-            return modern
-        positional = [parameter for parameter in parameters if parameter.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)]
-        return modern if len(positional) >= len(modern) else modern[:legacy_count]
-
     async def _reason_person(self, space_id: str, person_id: str) -> None:
         # If Extract updates the same Person while an LLM call is in flight,
         # the optimistic watermark check fails and this loop recomputes from the
@@ -467,7 +450,7 @@ class SocialMemoryWorld:
                 return
             inferred, hypotheses = self.store.owner_review_context(space_id, "person", person_id)
             result = await self.queue.submit(
-                "reason-person", self.model.reason_person, *self._owner_reason_args(self.model.reason_person, (person, memories, inferred, hypotheses), 2)
+                "reason-person", self.model.reason_person, person, memories, inferred, hypotheses
             )
             if self.store.apply_person_reasoning(
                 space_id,
@@ -481,23 +464,14 @@ class SocialMemoryWorld:
     async def _reason_coverage(self, space_id: str) -> None:
         """Audit all bounded chunks before a single goal-planning pass."""
         while not self._stopping:
-            # Production adapters receive the complete pending delta and own
-            # all request-aware chunking. Minimal fakes retain the store's
-            # small fixed batch for deterministic tests.
-            if hasattr(self.model, "context_budget"):
-                context = self.store.coverage_context(space_id, limit=None)
-            else:
-                context = self.store.coverage_context(space_id)
+            context = self.store.coverage_context(space_id, limit=None)
             if not context:
                 return
             coverage, memories, hypotheses, pending = context
             if not memories:
                 return
-            audit = getattr(self.model, "audit_coverage", None)
-            if audit is None:
-                return
             result = await self.queue.submit(
-                "audit-coverage", audit, coverage, memories, hypotheses
+                "audit-coverage", self.model.audit_coverage, coverage, memories, hypotheses
             )
             if not self.store.apply_coverage_audit(
                 space_id, coverage.source_watermark, coverage.source_cursor_id, result,
@@ -514,11 +488,8 @@ class SocialMemoryWorld:
         if not context:
             return
         coverage, hypotheses, open_goals, closed_goals = context
-        planner = getattr(self.model, "plan_learning_goals", None)
-        if planner is None:
-            return
         result = await self.queue.submit(
-            "plan-learning-goals", planner,
+            "plan-learning-goals", self.model.plan_learning_goals,
             coverage, hypotheses, open_goals, closed_goals,
         )
         self.store.apply_goal_planning(space_id, coverage.revision, result, {goal.id for goal in open_goals} | {goal.id for goal in closed_goals})
@@ -534,7 +505,7 @@ class SocialMemoryWorld:
             evidence = [memory for memory in memories if memory.basis != "inferred"]
             inferred, hypotheses = self.store.owner_review_context(space_id, "user", None)
             result = await self.queue.submit(
-                "reason-user-model", self.model.reason_user_model, *self._owner_reason_args(self.model.reason_user_model, (evidence, inferred, hypotheses), 1)
+                "reason-user-model", self.model.reason_user_model, evidence, inferred, hypotheses
             )
             if self.store.apply_user_model_reasoning(space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}):
                 return
@@ -553,7 +524,7 @@ class SocialMemoryWorld:
             result = await self.queue.submit(
                 "reason-relationship",
                 self.model.reason_relationship,
-                *self._owner_reason_args(self.model.reason_relationship, (relationship, memories, inferred, hypotheses), 2),
+                relationship, memories, inferred, hypotheses,
             )
             if self.store.apply_relationship_reasoning(
                 space_id,

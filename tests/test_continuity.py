@@ -59,6 +59,7 @@ def test_continuity_uses_rowid_watermark_and_filters_person_refs(tmp_path: Path)
 
 class _ContinuityModel:
     configured = True
+    context_budget = None
 
     def __init__(self):
         self.calls = 0
@@ -67,10 +68,12 @@ class _ContinuityModel:
         del context, known_people, comparison_memories
         return ExtractionResult()
 
-    async def reason_person(self, person, memories):
+    async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
+        del inferred_memories, hypotheses
         return PersonReasoningResult()
 
-    async def reason_relationship(self, relationship, memories):
+    async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
+        del inferred_memories, hypotheses
         return RelationshipReasoningResult()
 
     async def reason_continuity(self, continuity, messages):
@@ -78,6 +81,16 @@ class _ContinuityModel:
         return ContinuityReasoningResult(
             text="summary", through_message_id=messages[-1].id
         )
+
+    async def audit_coverage(self, coverage, memories, hypotheses=()):
+        del coverage, memories, hypotheses
+        from gossipmemo.models import CoverageAuditPatch
+        return CoverageAuditPatch()
+
+    async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
+        del coverage, hypotheses, open_goals, recent_closed_goals
+        from gossipmemo.models import GoalPlanningResult
+        return GoalPlanningResult()
 
     async def synthesize(self, question, context):
         return ""
@@ -114,28 +127,28 @@ def test_continuity_schedules_asynchronously_at_injected_threshold(tmp_path: Pat
 
 
 def test_continuity_backfill_is_bounded_and_reaches_last_message(tmp_path: Path):
-    async def scenario():
-        store = SqliteWorldStore(tmp_path / "large.db")
-        model = _ContinuityModel()
-        model.calls_data = []
-        async def reason(continuity, messages):
-            model.calls_data.append(messages)
-            return ContinuityReasoningResult(text="summary", through_message_id=messages[-1].id)
-        model.reason_continuity = reason
-        store.initialize()
-        ids = store.record_messages("space", [MessageInput(author="user", content=f"m{i}") for i in range(1500)])
-        world = SocialMemoryWorld(store, model, continuity_threshold=20)
-        await world.start()
-        try:
-            world._schedule_continuity_reason("space")
-            while store.pending_continuities(20):
-                await asyncio.sleep(0)
-        finally:
-            await world.stop()
-        assert len(model.calls_data) > 1
-        assert all(len(batch) <= 32 for batch in model.calls_data)
-        assert store.continuity_context("space")[0].through_message_id == ids[-1]
-    asyncio.run(scenario())
+    # World-level reasoning always requests the full pending delta and lets
+    # the reasoner own chunking (see OpenAICompatibleAdapter's context_budget
+    # handling). This test exercises the store's bounded-call primitive
+    # directly, which a reasoner can still opt into.
+    store = SqliteWorldStore(tmp_path / "large.db")
+    store.initialize()
+    ids = store.record_messages("space", [MessageInput(author="user", content=f"m{i}") for i in range(1500)])
+    calls_data: list[list] = []
+    expected_through: str | None = None
+    while True:
+        context = store.continuity_context("space", limit=32)
+        assert context is not None
+        continuity, messages = context
+        if not messages:
+            break
+        calls_data.append(messages)
+        result = ContinuityReasoningResult(text="summary", through_message_id=messages[-1].id)
+        assert store.apply_continuity_reasoning("space", expected_through, result)
+        expected_through = result.through_message_id
+    assert len(calls_data) > 1
+    assert all(len(batch) <= 32 for batch in calls_data)
+    assert store.continuity_context("space")[0].through_message_id == ids[-1]
 
 
 def test_continuity_context_can_delegate_all_batching_to_reasoner(tmp_path: Path):
@@ -152,32 +165,33 @@ def test_continuity_context_can_delegate_all_batching_to_reasoner(tmp_path: Path
 
 
 def test_continuity_truncates_oversized_messages_without_stalling(tmp_path: Path):
-    async def scenario():
-        store = SqliteWorldStore(tmp_path / "oversized.db")
-        model = _ContinuityModel()
-        model.calls_data = []
-        async def reason(continuity, messages):
-            model.calls_data.append(messages)
-            return ContinuityReasoningResult(text="summary", through_message_id=messages[-1].id)
-        model.reason_continuity = reason
-        store.initialize()
-        ids = store.record_messages("space", [MessageInput(author="user", content="x" * 100_000) for _ in range(40)])
-        world = SocialMemoryWorld(store, model, continuity_threshold=20)
-        await world.start()
-        try:
-            world._schedule_continuity_reason("space")
-            while store.pending_continuities(20):
-                await asyncio.sleep(0)
-        finally:
-            await world.stop()
-        assert model.calls_data
-        assert all(max(len(message.content) for message in batch) <= 8000 for batch in model.calls_data)
-        assert all(sum(len(message.content) for message in batch) <= 48000 for batch in model.calls_data)
-        through = store.continuity_context("space")[0].through_message_id
-        assert through in ids
-        assert ids.index(through) > 0
-        assert len(store.continuity_context("space")[1]) < 20
-    asyncio.run(scenario())
+    # Exercises the store's max_message_chars/max_total_chars bounded call
+    # directly; a reasoner opts into this the same way the removed world-level
+    # fallback used to.
+    store = SqliteWorldStore(tmp_path / "oversized.db")
+    store.initialize()
+    ids = store.record_messages("space", [MessageInput(author="user", content="x" * 100_000) for _ in range(40)])
+    calls_data: list[list] = []
+    expected_through: str | None = None
+    while True:
+        context = store.continuity_context(
+            "space", limit=None, max_message_chars=8000, max_total_chars=48000,
+        )
+        assert context is not None
+        continuity, messages = context
+        if not messages:
+            break
+        calls_data.append(messages)
+        result = ContinuityReasoningResult(text="summary", through_message_id=messages[-1].id)
+        assert store.apply_continuity_reasoning("space", expected_through, result)
+        expected_through = result.through_message_id
+    assert calls_data
+    assert all(max(len(message.content) for message in batch) <= 8000 for batch in calls_data)
+    assert all(sum(len(message.content) for message in batch) <= 48000 for batch in calls_data)
+    through = store.continuity_context("space")[0].through_message_id
+    assert through in ids
+    assert ids.index(through) > 0
+    assert len(store.continuity_context("space")[1]) < 20
 
 
 def test_context_endpoint_is_read_only_and_returns_bundle(tmp_path: Path):

@@ -36,18 +36,39 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 class FakeModel:
     configured = True
+    context_budget = None
 
     async def extract(self, message, context=(), known_people=(), comparison_memories=()):
         del message, context, known_people, comparison_memories
         return ExtractionResult()
 
-    async def reason_person(self, person, memories):
-        del person, memories
+    async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
+        del person, memories, inferred_memories, hypotheses
         return PersonReasoningResult()
 
-    async def reason_relationship(self, relationship, memories):
-        del relationship, memories
+    async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
+        del relationship, memories, inferred_memories, hypotheses
         return RelationshipReasoningResult()
+
+    async def reason_user_model(self, memories, inferred_memories=(), hypotheses=()):
+        del memories, inferred_memories, hypotheses
+        from gossipmemo.models import UserModelReasoningResult
+        return UserModelReasoningResult()
+
+    async def reason_continuity(self, continuity, messages):
+        del continuity
+        from gossipmemo.models import ContinuityReasoningResult
+        return ContinuityReasoningResult(through_message_id=messages[-1].id if messages else "")
+
+    async def audit_coverage(self, coverage, memories, hypotheses=()):
+        del coverage, memories, hypotheses
+        from gossipmemo.models import CoverageAuditPatch
+        return CoverageAuditPatch()
+
+    async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
+        del coverage, hypotheses, open_goals, recent_closed_goals
+        from gossipmemo.models import GoalPlanningResult
+        return GoalPlanningResult()
 
     async def synthesize(self, question, context):
         del question
@@ -310,7 +331,8 @@ def test_induction_waits_for_daily_scheduler(tmp_path):
     calls: list[str] = []
 
     class InductionModel(FakeModel):
-        async def reason_person(self, person, memories):
+        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
+            del inferred_memories, hypotheses
             calls.append(person.display_name)
             return PersonReasoningResult(profile_card={"memory_count": len(memories)})
 
@@ -345,7 +367,8 @@ def test_induction_schedules_user_model_only_for_about_user_memory(tmp_path):
     calls: list[int] = []
 
     class UserModel(FakeModel):
-        async def reason_user_model(self, memories):
+        async def reason_user_model(self, memories, inferred_memories=(), hypotheses=()):
+            del inferred_memories, hypotheses
             calls.append(len(memories))
             from gossipmemo.models import UserModelReasoningResult
             return UserModelReasoningResult(profile_card={"count": len(memories)})
@@ -376,7 +399,8 @@ def test_startup_catches_up_stale_profiles(tmp_path):
     calls: list[str] = []
 
     class InductionModel(FakeModel):
-        async def reason_person(self, person, memories):
+        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
+            del inferred_memories, hypotheses
             calls.append(person.display_name)
             return PersonReasoningResult(profile_card={"memory_count": len(memories)})
 

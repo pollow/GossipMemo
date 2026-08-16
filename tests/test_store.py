@@ -557,6 +557,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
 
     class FakeModel:
         configured = True
+        context_budget = None
 
         async def extract(self, message, context=(), known_people=(), comparison_memories=()):
             del message, context, known_people, comparison_memories
@@ -571,13 +572,23 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                 ],
             )
 
-        async def reason_person(self, person, memories):
-            del person, memories
+        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
+            del person, memories, inferred_memories, hypotheses
             return PersonReasoningResult(profile_card={"summary": "likes tea"})
 
-        async def reason_relationship(self, relationship, memories):
-            del relationship, memories
+        async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
+            del relationship, memories, inferred_memories, hypotheses
             return RelationshipReasoningResult()
+
+        async def audit_coverage(self, coverage, memories, hypotheses=()):
+            del coverage, memories, hypotheses
+            from gossipmemo.models import CoverageAuditPatch
+            return CoverageAuditPatch()
+
+        async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
+            del coverage, hypotheses, open_goals, recent_closed_goals
+            from gossipmemo.models import GoalPlanningResult
+            return GoalPlanningResult()
 
         async def synthesize(self, question, context):
             assert question == "What does Bob prefer?"

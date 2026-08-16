@@ -128,7 +128,8 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 ]
             )
 
-        async def reason_user_model(self, memories):
+        async def reason_user_model(self, memories, inferred=(), hypotheses=()):
+            del inferred, hypotheses
             assert memories[0].content == "The user likes tea."
             return UserModelReasoningResult(
                 profile_card={"summary": "Likes tea"}
