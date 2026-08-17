@@ -237,6 +237,9 @@ class LlmTransport(Protocol):
     @property
     def user_name(self) -> str: ...
 
+    @property
+    def extraction_policy(self) -> str: ...
+
     def prepare(
         self, messages: Sequence["ChatMessage"], *, structured: bool
     ) -> "ChatCompletionRequest": ...

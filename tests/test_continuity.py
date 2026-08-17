@@ -1,23 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from pathlib import Path
 
 import httpx
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
+from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
     ContinuityReasoningResult,
-    ExtractionResult,
     IngestRequest,
     ManualMemoryRequest,
     MessageInput,
-    PersonReasoningResult,
     QueryRequest,
-    RelationshipReasoningResult,
 )
-from gossipmemo.llm import ProviderGate
+from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
@@ -59,8 +59,16 @@ def test_continuity_uses_rowid_watermark_and_filters_person_refs(tmp_path: Path)
 
 
 class _ContinuityModel:
+    """An `LlmTransport` double; every stage is told apart by prompt marker
+    in `complete` (see `tests/test_features.py`'s `FakeModel`).
+    """
+
     configured = True
     gate = ProviderGate()
+    context_budget = ContextBudget()
+    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+    user_name = "CurrentUser"
+    extraction_policy = "balanced"
 
     def __init__(self):
         self.calls = 0
@@ -68,26 +76,26 @@ class _ContinuityModel:
     async def aclose(self):
         return None
 
-    async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-        del context, known_people, comparison_memories
-        return ExtractionResult()
-
-    async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
-        del inferred_memories, hypotheses
-        return PersonReasoningResult()
-
-    async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
-        del inferred_memories, hypotheses
-        return RelationshipReasoningResult()
-
-    async def reason_continuity(self, continuity, messages):
-        self.calls += 1
-        return ContinuityReasoningResult(
-            text="summary", through_message_id=messages[-1].id
+    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="fake",
+            messages=list(messages),
+            response_format={"type": "json_object"} if structured else None,
         )
 
-    async def synthesize(self, question, context):
-        return ""
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        combined = " ".join(str(message.content) for message in request.messages)
+        if "Rebuild compact cross-session continuity." in combined:
+            self.calls += 1
+            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            return json.dumps({"text": "summary", "through_message_id": ids[-1] if ids else ""})
+        if "Review the projection above" in combined:
+            return json.dumps({})
+        if '"profile_card"' in combined:
+            return json.dumps({"profile_card": {}})
+        return json.dumps(
+            {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
+        )
 
 
 def test_continuity_schedules_asynchronously_at_injected_threshold(tmp_path: Path):

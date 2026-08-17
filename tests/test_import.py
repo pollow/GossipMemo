@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -10,9 +11,6 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
 from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
-    ContinuityReasoningResult,
-    ExtractionResult,
-    ExtractedMemory,
     ManualMemoryRequest,
     MessageInput,
     SourceRef,
@@ -111,24 +109,12 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
+        extraction_policy = "balanced"
 
         def __init__(self):
             self.extractions = 0
             self.coverage_audits = 0
             self.goal_plans = 0
-
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people, comparison_memories
-            self.extractions += 1
-            return ExtractionResult(
-                memories=[
-                    ExtractedMemory(
-                        content="The user likes tea.",
-                        basis="stated",
-                        about_user=True,
-                    )
-                ]
-            )
 
         def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
             return ChatCompletionRequest(
@@ -138,12 +124,26 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:
-            # Person/relationship/user_model/coverage/learning_goals reasoning
-            # all drive `prepare` and `complete` directly now (see
+            # Extraction, continuity, person/relationship/user_model/coverage/
+            # learning_goals reasoning all drive `prepare` and `complete`
+            # directly now (see reasoners/extraction.py, reasoners/continuity.py,
             # reasoners/owner.py, reasoners/coverage.py,
             # reasoners/learning_goals.py); each stage is distinguished by a
             # prompt marker rather than a typed method.
             combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                self.extractions += 1
+                return json.dumps({
+                    "memories": [
+                        {"content": "The user likes tea.", "basis": "stated", "about_user": True}
+                    ]
+                })
+            if "Rebuild compact cross-session continuity." in combined:
+                ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+                return json.dumps({
+                    "text": "Imported conversation",
+                    "through_message_id": ids[-1] if ids else "",
+                })
             if "Review the projection above" in combined:
                 return json.dumps({})
             if "Audit long-term autobiographical and persona coverage" in combined:
@@ -168,13 +168,6 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 return json.dumps({})
             assert "The user likes tea." in combined
             return json.dumps({"profile_card": {"summary": "Likes tea"}})
-
-        async def reason_continuity(self, continuity, messages):
-            assert continuity is not None
-            return ContinuityReasoningResult(
-                text="Imported conversation",
-                through_message_id=messages[-1].id,
-            )
 
         async def aclose(self):
             return None

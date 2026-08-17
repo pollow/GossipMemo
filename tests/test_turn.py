@@ -1,35 +1,56 @@
 import asyncio
+import json
+import re
 from pathlib import Path
 
 import httpx
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
+from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
-    ContinuityReasoningResult,
-    ExtractionResult,
     ManualMemoryRequest,
     MessageInput,
     TurnRequest,
 )
-from gossipmemo.llm import ProviderGate
+from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
 
 class _NoopModel:
+    """A minimal `LlmTransport` double: extraction/continuity/coverage/goal
+    stages are all told apart by prompt marker in `complete`, matching the
+    pattern in `reasoners/owner.py` and friends -- see `tests/test_features.py`'s
+    `FakeModel` for the fuller version of this same shape.
+    """
+
     configured = False
     gate = ProviderGate()
+    context_budget = ContextBudget()
+    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+    user_name = "CurrentUser"
+    extraction_policy = "balanced"
 
     async def aclose(self):
         return None
 
-    async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-        del context, known_people, comparison_memories
-        return ExtractionResult()
+    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="fake",
+            messages=list(messages),
+            response_format={"type": "json_object"} if structured else None,
+        )
 
-    async def reason_continuity(self, continuity, messages):
-        return ContinuityReasoningResult(text="rolling", through_message_id=messages[-1].id)
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        combined = " ".join(str(message.content) for message in request.messages)
+        if "Rebuild compact cross-session continuity." in combined:
+            # `_json` renders a bare `list[ModelMessage]` via `repr`, so
+            # each message is `id='...' space_id='...' ...`; the
+            # lookbehind keeps `space_id=` from matching as `id=`.
+            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            return json.dumps({"text": "rolling", "through_message_id": ids[-1] if ids else ""})
+        return json.dumps({})
 
 
 def test_turn_matches_longest_alias_and_recalls_user_memory(tmp_path: Path):

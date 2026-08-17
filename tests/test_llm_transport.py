@@ -121,6 +121,10 @@ class FakeTransport:
     def user_name(self) -> str:
         return "CurrentUser"
 
+    @property
+    def extraction_policy(self) -> str:
+        return "balanced"
+
     def prepare(
         self, messages, *, structured: bool
     ) -> ChatCompletionRequest:

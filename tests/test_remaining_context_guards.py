@@ -2,9 +2,10 @@
 
 These drive each reasoner's own entry point rather than the world, so an
 adapter can be given a deliberately tiny `ContextBudget` and every issued
-request inspected. Coverage, goal planning and the owner family now live
-in `reasoners/`; continuity and query synthesis are still on the adapter
-until ④.2c moves them, which is why the two styles sit side by side.
+request inspected. Coverage, goal planning, continuity, and the owner
+family all live in `reasoners/` and are driven directly here; query
+synthesis has no oversized-input guard of its own (it is one bounded,
+unpaginated call), so it stays untested by this file.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from gossipmemo.models import (
     ContinuityView, CoverageMapView, HypothesisView, LearningGoalView,
     MemoryView, ModelMessage,
 )
+from gossipmemo.reasoners.continuity import _reason_continuity
 from gossipmemo.reasoners.coverage import _audit_coverage
 from gossipmemo.reasoners.learning_goals import _plan_learning_goals
 
@@ -48,7 +50,7 @@ def test_small_paths_send_original_single_requests() -> None:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
             coverage = CoverageMapView(space_id="s")
             await adapter.audit_coverage(coverage, [_memory("e", "raw evidence")], [_hypothesis("h", "raw hypothesis")])
-            await adapter.reason_continuity(ContinuityView(text="prior"), [_message("m", "raw message")])
+            await _reason_continuity(adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
     assert "raw hypothesis" in str(calls[0]) and "raw evidence" in str(calls[0])
@@ -94,7 +96,8 @@ def test_continuity_oversized_cjk_streams_and_preserves_last_id() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"text": "ok", "related_person_ids": ["forged"], "through_message_id": "wrong"})}}]})
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            result = await OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget).reason_continuity(ContinuityView(), [_message("m0", "消息" * 9000), _message("m1", "消息" * 9000)])
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget)
+            result = await _reason_continuity(adapter, ContinuityView(), [_message("m0", "消息" * 9000), _message("m1", "消息" * 9000)])
             assert result.through_message_id == "m1"
     asyncio.run(run())
     assert len(calls) > 1

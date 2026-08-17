@@ -516,11 +516,6 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
 
     import json
 
-    from gossipmemo.models import (
-        ExtractionResult,
-        ExtractedPerson,
-        ExtractedMemory,
-    )
     from gossipmemo.app import create_app
     from gossipmemo.config import Settings
     from gossipmemo.context_budget import ContextBudget
@@ -533,22 +528,10 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
+        extraction_policy = "balanced"
 
         async def aclose(self):
             return None
-
-        async def extract(self, message, context=(), known_people=(), comparison_memories=()):
-            del message, context, known_people, comparison_memories
-            return ExtractionResult(
-                people=[ExtractedPerson(ref="bob", display_name="Bob")],
-                memories=[
-                    ExtractedMemory(
-                        content="Bob prefers tea.",
-                        basis="stated",
-                        people=["bob"],
-                    )
-                ],
-            )
 
         def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
             return ChatCompletionRequest(
@@ -558,12 +541,22 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:
-            # Person/relationship reasoning now drives `prepare`/`complete`
-            # directly (see reasoners/owner.py); tell the projection stage
-            # from the actions stage by prompt marker, and the two owner
-            # projection shapes (profile_card vs. relationship facets) by
-            # which schema was requested.
+            # Extraction, query synthesis, and person/relationship reasoning
+            # all drive `prepare`/`complete` directly now (see
+            # reasoners/extraction.py, query.py, reasoners/owner.py); tell
+            # each stage apart by prompt marker.
             combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                return json.dumps({
+                    "people": [{"ref": "bob", "display_name": "Bob"}],
+                    "memories": [
+                        {"content": "Bob prefers tea.", "basis": "stated", "people": ["bob"]}
+                    ],
+                })
+            if "Answer the read-only question" in combined:
+                assert "What does Bob prefer?" in combined
+                assert "Bob prefers tea." in combined
+                return "Bob prefers tea."
             if "Review the projection above" in combined:
                 return json.dumps({})
             if '"profile_card"' in combined:
@@ -571,11 +564,6 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             return json.dumps(
                 {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
             )
-
-        async def synthesize(self, question, context):
-            assert question == "What does Bob prefer?"
-            assert any(memory.content == "Bob prefers tea." for memory in context.memories)
-            return "Bob prefers tea."
 
     async def scenario():
         world = SocialMemoryWorld(

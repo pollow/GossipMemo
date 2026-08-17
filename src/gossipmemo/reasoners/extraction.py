@@ -17,16 +17,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from collections.abc import Sequence
+from typing import Any
 
-from ..models import MemoryView, ModelMessage
-from ..priority import TIER_FRESHNESS, llm_call_tier
-from ..prompts import _json
+from ..models import ExtractionResult, MemoryView, ModelMessage
+from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier, llm_call_tier
+from ..prompts import _json, schema_instruction
 from ..store import PendingExtraction, WorldStore
+from ..transport import ChatMessage, LlmTransport, structured
 from .base import AttemptLoop, Reasoner
-
-if TYPE_CHECKING:
-    from ..llm import LlmModel
 
 logger = logging.getLogger(__name__)
 
@@ -156,6 +155,36 @@ def extraction_prompt(
     )
 
 
+async def _extract(
+    transport: LlmTransport,
+    messages: Sequence[ModelMessage],
+    context: Sequence[ModelMessage] = (),
+    known_people: Sequence[dict[str, Any]] = (),
+    comparison_memories: Sequence[MemoryView] = (),
+) -> ExtractionResult:
+    request = transport.prepare(
+        [
+            ChatMessage(
+                role="system",
+                content=EXTRACTION_SYSTEM_PROMPT + "\n\n" + schema_instruction(ExtractionResult),
+            ),
+            ChatMessage(
+                role="user",
+                content=extraction_prompt(
+                    list(messages), transport.extraction_policy, list(context),
+                    list(known_people), transport.user_name, list(comparison_memories),
+                ),
+            ),
+        ],
+        structured=True,
+    )
+    _, result = await structured(
+        transport, request.messages, ExtractionResult,
+        tier=current_call_tier(), label=current_call_label(),
+    )
+    return result
+
+
 class _ExtractionReasoner(AttemptLoop):
     """Run one pending extraction batch per attempt.
 
@@ -166,9 +195,9 @@ class _ExtractionReasoner(AttemptLoop):
 
     name = "extraction"
 
-    def __init__(self, store: WorldStore, model: LlmModel) -> None:
+    def __init__(self, store: WorldStore, model: LlmTransport) -> None:
         self.store = store
-        self.model = model
+        self.transport = model
 
     async def _attempt(self, space_id: str) -> bool:
         eligible = [
@@ -192,8 +221,8 @@ class _ExtractionReasoner(AttemptLoop):
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
             with llm_call_tier(TIER_FRESHNESS, "extract"):
-                result = await self.model.extract(
-                    messages, context, known_people, comparisons,
+                result = await _extract(
+                    self.transport, messages, context, known_people, comparisons,
                 )
             self.store.apply_extraction(
                 space_id, batch_id, result,
@@ -217,7 +246,7 @@ class _ExtractionReasoner(AttemptLoop):
         return more_batches
 
 
-def build_extraction_reasoner(store: WorldStore, model: LlmModel) -> Reasoner:
+def build_extraction_reasoner(store: WorldStore, model: LlmTransport) -> Reasoner:
     return _ExtractionReasoner(store, model)
 
 

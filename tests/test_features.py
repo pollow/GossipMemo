@@ -41,18 +41,20 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 
 class FakeModel:
-    """A double covering both the wide `LlmModel` seam (extract, continuity,
-    synthesize -- still called by name) and the narrow `LlmTransport` seam
-    that person/relationship/user_model/coverage/learning_goals reasoning
-    now drives directly via `prepare`/`complete`.
+    """An `LlmTransport` double: extraction, continuity, and
+    person/relationship/user_model/coverage/learning_goals reasoning all
+    drive `prepare`/`complete` directly (see `reasoners/extraction.py`,
+    `reasoners/continuity.py`, `reasoners/owner.py` and friends). Every
+    stage is told apart by a prompt marker rather than a typed method.
 
-    `complete`'s default fallback -- an object whose fields are all
+    `_owner_response`'s default fallback -- an object whose fields are all
     unrelated to any reasoner's schema -- parses successfully against every
-    result type used here (`CoverageAuditPatch`, `GoalPlanningResult`,
-    `GoalPlanningCandidates`, `RelationshipProjectionResult`) because every
-    field on each of them has a default and pydantic ignores unknown keys;
-    it only needs a real branch for stages whose schema requires a
-    `profile_card` or that must observe an actions-stage completion.
+    result type used here (`ExtractionResult`, `CoverageAuditPatch`,
+    `GoalPlanningResult`, `GoalPlanningCandidates`,
+    `RelationshipProjectionResult`) because every field on each of them has
+    a default and pydantic ignores unknown keys; it only needs a real
+    branch for stages whose schema requires a `profile_card` or that must
+    observe an actions-stage completion.
     """
 
     configured = True
@@ -60,13 +62,10 @@ class FakeModel:
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
+    extraction_policy = "balanced"
 
     async def aclose(self):
         return None
-
-    async def extract(self, message, context=(), known_people=(), comparison_memories=()):
-        del message, context, known_people, comparison_memories
-        return ExtractionResult()
 
     def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
         return ChatCompletionRequest(
@@ -81,6 +80,9 @@ class FakeModel:
     @staticmethod
     def _owner_response(request: ChatCompletionRequest) -> str:
         combined = " ".join(str(message.content) for message in request.messages)
+        if "Rebuild compact cross-session continuity." in combined:
+            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            return json.dumps({"through_message_id": ids[-1] if ids else ""})
         if "Review the projection above" in combined:
             return json.dumps({})
         if '"profile_card"' in combined:
@@ -88,15 +90,6 @@ class FakeModel:
         return json.dumps(
             {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
         )
-
-    async def reason_continuity(self, continuity, messages):
-        del continuity
-        from gossipmemo.models import ContinuityReasoningResult
-        return ContinuityReasoningResult(through_message_id=messages[-1].id if messages else "")
-
-    async def synthesize(self, question, context):
-        del question
-        return "\n".join(memory.content for memory in context.memories)
 
 
 def _settings(database_path, *, api_key: str = "") -> Settings:
@@ -270,14 +263,44 @@ def test_message_time_requires_timezone():
         )
 
 
+def _extraction_batch_size(combined: str) -> int:
+    """Count messages in the current extraction batch (evidence plus assistant context)."""
+
+    section = combined.split(
+        "Current batch evidence (user-authored; the only messages allowed to produce memories):",
+        1,
+    )[1]
+    section = section.split(
+        "Comparison memories (deduplication/update reference only; never new evidence):", 1
+    )[0]
+    # `_json` renders a bare `list[ModelMessage]` via `repr` (only a
+    # top-level BaseModel is converted to real JSON), so each message is a
+    # quoted `id='...' space_id='...' ...` string; the lookbehind keeps
+    # `space_id=`/`through_message_id=` from matching as `id=`.
+    return len(re.findall(r"(?<!\w)id='", section))
+
+
+def _extraction_first_content(combined: str) -> str:
+    """The first evidence message's content in an extraction request."""
+
+    section = combined.split(
+        "Current batch evidence (user-authored; the only messages allowed to produce memories):",
+        1,
+    )[1]
+    match = re.search(r"(?<!\w)content='([^']*)'", section)
+    return match.group(1) if match else ""
+
+
 def test_extraction_batches_default_to_six_messages(tmp_path):
     calls: list[int] = []
 
     class BatchModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people
-            calls.append(len(messages))
-            return ExtractionResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                calls.append(_extraction_batch_size(combined))
+                return json.dumps({})
+            return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)
@@ -310,10 +333,12 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
     calls: list[int] = []
 
     class BatchModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people
-            calls.append(len(messages))
-            return ExtractionResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                calls.append(_extraction_batch_size(combined))
+                return json.dumps({})
+            return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)
@@ -369,11 +394,13 @@ def test_failing_batch_does_not_block_later_batch(tmp_path):
     good_batch = _make_batch(store, "personal", "good batch content")
 
     class FlakyModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people, comparison_memories
-            if messages and "bad batch" in messages[0].content:
-                raise RuntimeError("boom")
-            return ExtractionResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                if "bad batch" in _extraction_first_content(combined):
+                    raise RuntimeError("boom")
+                return json.dumps({})
+            return self._owner_response(request)
 
     reasoner = build_extraction_reasoner(store, FlakyModel())
 
@@ -405,10 +432,12 @@ def test_two_permanently_failing_batches_terminate_drain(tmp_path):
     calls: list[str] = []
 
     class AlwaysFailsModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people, comparison_memories
-            calls.append(messages[0].content if messages else "")
-            raise RuntimeError("boom")
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                calls.append(_extraction_first_content(combined))
+                raise RuntimeError("boom")
+            return self._owner_response(request)
 
     reasoner = build_extraction_reasoner(store, AlwaysFailsModel())
 
@@ -443,10 +472,12 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
     calls: list[str] = []
 
     class RecordingModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people, comparison_memories
-            calls.append(messages[0].content if messages else "")
-            return ExtractionResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                calls.append(_extraction_first_content(combined))
+                return json.dumps({})
+            return self._owner_response(request)
 
     reasoner = build_extraction_reasoner(store, RecordingModel())
 
@@ -490,10 +521,12 @@ def test_batch_killed_mid_call_is_not_capped(tmp_path):
     calls: list[str] = []
 
     class RecordingModel(FakeModel):
-        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
-            del context, known_people, comparison_memories
-            calls.append(messages[0].content if messages else "")
-            return ExtractionResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Extract useful, provenance-aware memories" in combined:
+                calls.append(_extraction_first_content(combined))
+                return json.dumps({})
+            return self._owner_response(request)
 
     reasoner = build_extraction_reasoner(store, RecordingModel())
     asyncio.run(reasoner.run_until_caught_up("personal"))

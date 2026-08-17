@@ -34,6 +34,7 @@ from .reasoners import (
     build_relationship_reasoner,
     build_user_model_reasoner,
 )
+from .query import synthesize
 from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
 from .store import SqliteWorldStore
 
@@ -381,8 +382,8 @@ class SocialMemoryWorld:
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
         context = self.store.read(space_id, request)
         # `synthesize` is the only synchronous, HTTP-response-blocking call;
-        # it sets the foreground gate tier itself in llm.py.
-        answer = await self.model.synthesize(request.question, context)
+        # it sets the foreground gate tier itself in query.py.
+        answer = await synthesize(self.model, request.question, context)
         return QueryResponse(answer=answer, **context.model_dump())
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:
