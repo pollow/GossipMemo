@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from gossipmemo.models import (
+    COVERAGE_ROOTS,
     ExtractionResult,
     ExtractedPerson,
     InferredMemory,
@@ -42,6 +43,27 @@ def store(tmp_path):
     world = SqliteWorldStore(tmp_path / "world.db")
     world.initialize()
     return world
+
+
+def test_initialize_seeds_coverage_roots_for_an_existing_space(tmp_path):
+    """A space that predates its roots must not be silently unauditable."""
+    path = tmp_path / "world.db"
+    first = SqliteWorldStore(path)
+    first.initialize()
+    first.ensure_space("personal")
+    with sqlite3.connect(path) as connection:
+        connection.execute("DELETE FROM coverage_roots")
+
+    SqliteWorldStore(path).initialize()
+
+    with sqlite3.connect(path) as connection:
+        roots = {
+            row[0]
+            for row in connection.execute(
+                "SELECT root FROM coverage_roots WHERE space_id = ?", ("personal",)
+            )
+        }
+    assert roots == set(COVERAGE_ROOTS)
 
 
 def _message(

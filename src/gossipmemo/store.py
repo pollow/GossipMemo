@@ -283,11 +283,26 @@ class SqliteWorldStore:
             connection.close()
 
     def initialize(self) -> None:
+        """Apply the schema, and seed the coverage roots of every space.
+
+        `ensure_space` seeds roots too, but it only runs on an ingest path.
+        A space that exists without its rows is audited by nobody and
+        reports no staleness -- `stale_coverage_spaces` reads
+        `coverage_roots`, so an empty table is indistinguishable from a
+        space that is fully caught up. Seeding here keeps that silence
+        impossible for a space whose roots are new to it.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._enable_wal()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._connect() as connection:
             connection.executescript(schema)
+            now = _now()
+            connection.executemany(
+                "INSERT OR IGNORE INTO coverage_roots(space_id, root, updated_at) "
+                "SELECT id, ?, ? FROM spaces",
+                [(root, now) for root in COVERAGE_ROOTS],
+            )
 
     def _enable_wal(self) -> None:
         """Switch the database to WAL once, and confirm it took.
