@@ -17,7 +17,7 @@ from gossipmemo.models import (
     MessageInput,
     QueryRequest,
 )
-from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
+from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 

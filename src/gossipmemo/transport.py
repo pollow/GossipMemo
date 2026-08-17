@@ -1,11 +1,12 @@
 """Provider transport: one chat-completions request, and nothing above it.
 
-This module is a leaf on purpose. `llm.py` still carries the wide
-`LlmModel` interface, which assembles per-reasoner prompts and therefore
-imports from `reasoners/`; a reasoner that also needed `ChatMessage` or
-`structured()` back from `llm.py` would close that loop. Everything a
-reasoner legitimately needs to talk to a provider lives here instead, and
-nothing here imports a reasoner, a prompt, or a store.
+This module is a leaf on purpose. `llm.py` carries only the one production
+`LlmTransport` implementation, `OpenAICompatibleAdapter`; every reasoner's
+prompt assembly lives in `reasoners/` and `query.py` instead, so a
+reasoner that also needed `ChatMessage` or `structured()` back from
+`llm.py` would close a loop. Everything a reasoner legitimately needs to
+talk to a provider lives here, and nothing here imports a reasoner, a
+prompt, or a store.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ class LLMProtocolError(LLMError):
 
 class LLMOutputError(LLMError):
     """Raised when model content cannot validate as the requested result."""
+
 
 class ProviderGate:
     """Global single-permit priority gate for outbound provider requests.
@@ -140,6 +142,7 @@ class ProviderGate:
                 self._unavailable_until = None
                 return
             await asyncio.sleep(delay)
+
 
 class ChatMessage(BaseModel):
     """Minimal OpenAI-compatible chat message used in request payloads."""

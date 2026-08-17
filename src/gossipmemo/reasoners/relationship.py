@@ -14,7 +14,6 @@ from ..models import (
     RelationshipReasoningResult,
     RelationshipView,
 )
-from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
@@ -34,26 +33,6 @@ interaction is allowed when calibrated to that evidence. Do not use projections,
 inferred memories, or hypotheses as evidence. Distinguish current from historical
 conditions. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
-
-
-def relationship_reasoning_prompt(
-    relationship: RelationshipView,
-    memories: list[MemoryView] | tuple[MemoryView, ...],
-    user_name: str = "CurrentUser",
-) -> str:
-    """Build the user prompt for a relationship projection refresh."""
-
-    return (
-        f"The fixed current user is named {user_name!r}; the current user is not "
-        "an endpoint Person. Rebuild the projection for the relationship between "
-        "the two endpoint People in the input. Linked memories indicate relevance, "
-        "not relationship evidence; summarize only interactions between the endpoints. "
-        "Use only the supplied context; do not transfer standalone traits, preferences, "
-        "or actions into a relationship claim.\n\nTarget relationship:\n"
-        + _json(relationship)
-        + "\n\nRelevant memories:\n"
-        + _json(list(memories))
-    )
 
 
 @dataclass(slots=True)
@@ -143,5 +122,4 @@ def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> Des
 __all__ = [
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
     "build_relationship_reasoner",
-    "relationship_reasoning_prompt",
 ]

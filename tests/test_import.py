@@ -9,7 +9,7 @@ import pytest
 
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
-from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
+from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
     ManualMemoryRequest,
     MessageInput,

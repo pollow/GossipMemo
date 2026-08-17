@@ -27,13 +27,17 @@ from gossipmemo.models import (
     SupersedeRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import (
+from gossipmemo.llm import OpenAICompatibleAdapter
+from gossipmemo.transport import (
     ChatCompletionRequest,
     LLMRequestError,
-    OpenAICompatibleAdapter,
     ProviderGate,
     RetryPolicy,
 )
+from gossipmemo.query import synthesize
+from gossipmemo.reasoners.extraction import _extract
+from gossipmemo.reasoners.person import _reason_person
+from gossipmemo.reasoners.user_model import _reason_user_model
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
@@ -703,7 +707,8 @@ def test_openai_compatible_adapter_validates_structured_output():
             adapter = OpenAICompatibleAdapter(
                 "http://llm.test/v1", "key", "test-model", client=client
             )
-            result = await adapter.extract(
+            result = await _extract(
+                adapter,
                 [ModelMessage(
                     id="message_1",
                     space_id="personal",
@@ -730,7 +735,8 @@ def test_owner_reasoning_uses_an_identical_prefix_for_both_stages():
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://llm.test/v1", "key", "test-model", client=client)
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="person_1", display_name="Bob"),
                 [MemoryView(id="memory_1", content="Bob likes tea.", kind="fact", basis="stated", status="active", created_at="2026-08-01T00:00:00+00:00")],
             )
@@ -756,7 +762,7 @@ def test_user_owner_review_schema_excludes_inferred_memory_actions():
     async def scenario() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://llm.test/v1", "key", "test-model", client=client)
-            await adapter.reason_user_model([])
+            await _reason_user_model(adapter, [])
 
     asyncio.run(scenario())
     assert "hypothesis_actions" in payloads[1]["messages"][-1]["content"]
@@ -804,7 +810,7 @@ def test_openai_compatible_adapter_retries_transient_statuses(monkeypatch):
                 retry_base_seconds=2,
                 retry_max_seconds=10,
             )
-            assert await adapter.synthesize("Question", QueryContext()) == "Recovered"
+            assert await synthesize(adapter, "Question", QueryContext()) == "Recovered"
 
     asyncio.run(scenario())
     assert requests == 3
@@ -832,7 +838,7 @@ def test_openai_compatible_adapter_does_not_retry_permanent_status(monkeypatch):
                 "http://llm.test/v1", "key", "test-model", client=client
             )
             with pytest.raises(LLMRequestError, match="HTTP 401: bad key"):
-                await adapter.synthesize("Question", QueryContext())
+                await synthesize(adapter, "Question", QueryContext())
 
     asyncio.run(scenario())
     assert requests == 1
@@ -873,7 +879,7 @@ def test_openai_compatible_adapter_retries_transport_errors(monkeypatch):
                 retry_base_seconds=3,
                 retry_max_seconds=10,
             )
-            assert await adapter.synthesize("Question", QueryContext()) == "Recovered"
+            assert await synthesize(adapter, "Question", QueryContext()) == "Recovered"
 
     asyncio.run(scenario())
     assert requests == 2

@@ -519,7 +519,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     from gossipmemo.app import create_app
     from gossipmemo.config import Settings
     from gossipmemo.context_budget import ContextBudget
-    from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
+    from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
     from gossipmemo.world import SocialMemoryWorld
 
     class FakeModel:

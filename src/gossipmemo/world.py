@@ -6,7 +6,6 @@ from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .llm import LLMModel
 from .logging import elapsed_ms
 from .models import (
     ContextBundle,
@@ -37,6 +36,7 @@ from .reasoners import (
 from .query import synthesize
 from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
 from .store import SqliteWorldStore
+from .transport import LlmTransport
 
 
 logger = logging.getLogger(__name__)
@@ -48,13 +48,13 @@ class SocialMemoryWorld:
     Persistence details are internal implementation. Ingest is intentionally
     eventual: it durably records Message inputs, then returns after their
     Extract work has been scheduled as a background task. Provider-side
-    serialization and priority live in `llm.ProviderGate`, not here.
+    serialization and priority live in `transport.ProviderGate`, not here.
     """
 
     def __init__(
         self,
         store: SqliteWorldStore,
-        model: LLMModel,
+        model: LlmTransport,
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,

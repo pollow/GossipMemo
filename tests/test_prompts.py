@@ -1,4 +1,4 @@
-from gossipmemo.models import CoverageMapView, MemoryView, ModelMessage, PersonView, RelationshipView
+from gossipmemo.models import CoverageMapView, MemoryView, ModelMessage
 from gossipmemo.query import QUERY_SYNTHESIS_SYSTEM_PROMPT
 from gossipmemo.reasoners import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -7,8 +7,6 @@ from gossipmemo.reasoners import (
     USER_MODEL_REASONING_SYSTEM_PROMPT,
     CONTINUITY_SYSTEM_PROMPT,
     extraction_prompt,
-    person_reasoning_prompt,
-    relationship_reasoning_prompt,
     coverage_audit_prompt,
 )
 
@@ -126,41 +124,6 @@ def test_owner_system_policies_do_not_prescribe_a_stage_output_shape():
         assert "Return only" not in prompt
         assert "JSON schema" not in prompt
         assert "optional inferred memory" not in prompt
-
-
-def test_person_reasoning_separates_relevance_from_semantic_subject():
-    person = PersonView(id="person-a", display_name="Person_A")
-    memory = MemoryView(
-        id="memory-1",
-        content="Deus wants to ask Person_A about his girlfriend.",
-        kind="event",
-        basis="stated",
-        status="active",
-        people=[{"id": "person-a", "display_name": "Person_A"}],
-        created_at="2026-08-14T12:00:00+00:00",
-        about_user=True,
-    )
-    prompt = person_reasoning_prompt(person, [memory], user_name="Deus")
-    assert "target Person" in prompt
-    assert "Linked memories indicate relevance, not semantic subject" in prompt
-    assert "Do not transfer" in PERSON_REASONING_SYSTEM_PROMPT
-    assert "Deus" in prompt
-
-
-def test_relationship_reasoning_requires_endpoint_interactions():
-    relationship = RelationshipView(
-        id="relationship-1",
-        person_a_id="person-a",
-        person_b_id="person-b",
-        status="unknown",
-        summary="",
-    )
-    prompt = relationship_reasoning_prompt(relationship, [], user_name="Deus")
-    assert "relationship between the two endpoint People" in prompt
-    assert "not relationship evidence" in prompt
-    assert "Mere co-occurrence is not relationship evidence" in (
-        RELATIONSHIP_REASONING_SYSTEM_PROMPT
-    )
 
 
 def test_all_prompt_contracts_keep_i18n_rule_compact():

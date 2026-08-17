@@ -8,7 +8,6 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from ..models import HypothesisView, MemoryView, PersonProjectionResult, PersonReasoningResult, PersonView
-from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
@@ -28,27 +27,6 @@ Make reasonable social inferences when supported, with uncertainty proportional
 to evidence. Do not use projections, inferred memories, or hypotheses as evidence.
 Distinguish current conditions from historical events. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
-
-
-def person_reasoning_prompt(
-    person: PersonView,
-    memories: list[MemoryView] | tuple[MemoryView, ...],
-    user_name: str = "CurrentUser",
-) -> str:
-    """Build the user prompt for a person projection refresh."""
-
-    return (
-        f"The fixed current user is named {user_name!r}; the current user is not "
-        "the target Person. Rebuild the profile card for the target Person from "
-        "the active memories. Linked memories indicate relevance, not semantic "
-        "subject. Attribute traits, preferences, and actions to the target only "
-        "when the memory supports that attribution. Use only the supplied context; "
-        "prefer concise traits, preferences, current_state, and interaction_notes "
-        f"that help {user_name} socialize.\n\nTarget Person:\n"
-        + _json(person)
-        + "\n\nActive memories:\n"
-        + _json(list(memories))
-    )
 
 
 @dataclass(slots=True)
@@ -136,4 +114,4 @@ def build_person_reasoner(store: WorldStore, model: "LlmTransport") -> Descripto
     return DescriptorReasoner("person", load_context, call, apply, continue_when)
 
 
-__all__ = ["PERSON_REASONING_SYSTEM_PROMPT", "build_person_reasoner", "person_reasoning_prompt"]
+__all__ = ["PERSON_REASONING_SYSTEM_PROMPT", "build_person_reasoner"]

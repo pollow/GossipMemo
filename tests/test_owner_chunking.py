@@ -8,7 +8,8 @@ import httpx
 import pytest
 
 from gossipmemo.context_budget import ContextBudget
-from gossipmemo.llm import ChatCompletionRequest, OpenAICompatibleAdapter
+from gossipmemo.llm import OpenAICompatibleAdapter
+from gossipmemo.transport import ChatCompletionRequest
 from gossipmemo.reasoners.person import _reason_person
 from gossipmemo.models import (
     HypothesisView,

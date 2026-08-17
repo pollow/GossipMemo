@@ -1,9 +1,9 @@
-"""Tests for the narrow `LlmTransport` seam alongside the wide `LlmModel`.
+"""Tests for the narrow `LlmTransport` seam.
 
 Focused on the new pieces only: `OpenAICompatibleAdapter.complete` (gate
 acquisition + hard budget check) and the module-level `structured()` helper
-(malformed-output retry). Existing `LlmModel` reasoner behavior is covered
-elsewhere and must stay unchanged.
+(malformed-output retry). Per-reasoner behavior is covered elsewhere and
+must stay unchanged.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ import httpx
 import pytest
 
 from gossipmemo.context_budget import ContextBudget
-from gossipmemo.llm import (
+from gossipmemo.llm import OpenAICompatibleAdapter
+from gossipmemo.transport import (
     ChatCompletionRequest,
     ChatMessage,
     LlmTransport,
-    OpenAICompatibleAdapter,
     ProviderGate,
     RetryPolicy,
     structured,
@@ -204,7 +204,7 @@ def test_structured_retries_malformed_output_then_returns_parsed_model() -> None
 def test_structured_raises_after_exhausting_retries() -> None:
     """`structured()` propagates `LLMOutputError` once retries are exhausted."""
 
-    from gossipmemo.llm import LLMOutputError
+    from gossipmemo.transport import LLMOutputError
 
     calls: list[dict] = []
 

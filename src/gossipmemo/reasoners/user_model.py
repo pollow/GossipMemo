@@ -14,7 +14,6 @@ from ..models import (
     UserModelView,
     UserReasoningActionsResult,
 )
-from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
@@ -30,16 +29,6 @@ another person's identity. Use valid_from and valid_to to separate current
 conditions from historical events. Do not use projections, inferred memories, or
 hypotheses as evidence. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
 """
-
-
-def user_model_reasoning_prompt(
-    memories: list[MemoryView], user_name: str = "CurrentUser"
-) -> str:
-    return (
-        f"Rebuild the compact profile card for {user_name} from these active "
-        "memories only. Keep it bounded and useful for interaction.\n\nActive "
-        "about-user memories:\n" + _json(memories)
-    )
 
 
 async def _reason_user_model(
@@ -89,5 +78,4 @@ def build_user_model_reasoner(store: WorldStore, model: "LlmTransport") -> Descr
 __all__ = [
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "build_user_model_reasoner",
-    "user_model_reasoning_prompt",
 ]

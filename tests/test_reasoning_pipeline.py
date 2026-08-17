@@ -96,7 +96,8 @@ def test_context_budget_rejects_unusable_values():
 @pytest.mark.asyncio
 async def test_adapter_rejects_oversized_request_before_http_client():
     from gossipmemo.context_budget import ContextBudget
-    from gossipmemo.llm import ChatMessage, OpenAICompatibleAdapter
+    from gossipmemo.llm import OpenAICompatibleAdapter
+    from gossipmemo.transport import ChatMessage
 
     adapter = OpenAICompatibleAdapter("http://example.test", "key", "model", context_budget=ContextBudget(100, 90, 5))
     called = False
@@ -107,6 +108,7 @@ async def test_adapter_rejects_oversized_request_before_http_client():
         raise AssertionError("HTTP client must not be created")
 
     adapter._get_client = no_client  # type: ignore[method-assign]
+    request = adapter.prepare([ChatMessage(role="user", content="超大文本" * 100)], structured=False)
     with pytest.raises(ValueError, match=r"estimated .* limit"):
-        await adapter._chat_messages([ChatMessage(role="user", content="超大文本" * 100)], structured=False)
+        await adapter.complete(request)
     assert not called

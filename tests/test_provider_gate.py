@@ -8,13 +8,31 @@ import time
 
 import httpx
 
-from gossipmemo.llm import (
-    TIER_BACKGROUND,
-    TIER_FOREGROUND,
-    OpenAICompatibleAdapter,
-    ProviderGate,
-)
+from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import ContinuityReasoningResult
+from gossipmemo.priority import TIER_BACKGROUND, TIER_FOREGROUND
+from gossipmemo.transport import ChatMessage, ProviderGate, structured
+
+
+async def _structured_call(adapter, system_prompt, user_prompt, result_type):
+    """Reproduce the deleted `OpenAICompatibleAdapter._structured_call` seam.
+
+    Any `LlmTransport` can drive `structured()` directly; this local helper
+    keeps these gate tests focused on one system/user prompt pair without
+    routing through a specific reasoner's chunking.
+    """
+
+    _, result = await structured(
+        adapter,
+        [
+            ChatMessage(role="system", content=system_prompt),
+            ChatMessage(role="user", content=user_prompt),
+        ],
+        result_type,
+        tier=TIER_BACKGROUND,
+        label=None,
+    )
+    return result
 
 
 def test_tier_one_acquires_ahead_of_already_waiting_tier_three() -> None:
@@ -112,7 +130,7 @@ def test_adapter_publishes_shared_backoff_deadline_on_429_retry_after() -> None:
                 original(deadline)
 
             adapter.gate.mark_unavailable_until = spy  # type: ignore[method-assign]
-            result = await adapter._structured_call("sys", "call", ContinuityReasoningResult)
+            result = await _structured_call(adapter, "sys", "call", ContinuityReasoningResult)
             assert result.text == "ok"
             return recorded
 
@@ -151,11 +169,11 @@ def test_semantic_retry_backoff_does_not_block_other_caller() -> None:
                 retry_base_seconds=0.2, retry_max_seconds=0.2, max_retries=3,
             )
             task_a = asyncio.create_task(
-                adapter._structured_call("sys-a", "CALL-A", ContinuityReasoningResult)
+                _structured_call(adapter, "sys-a", "CALL-A", ContinuityReasoningResult)
             )
             await asyncio.sleep(0.02)  # let A's first (malformed) attempt land
             task_b = asyncio.create_task(
-                adapter._structured_call("sys-b", "call-b", ContinuityReasoningResult)
+                _structured_call(adapter, "sys-b", "call-b", ContinuityReasoningResult)
             )
             result_b = await task_b
             result_a = await task_a

@@ -16,7 +16,8 @@ import json
 import httpx
 
 from gossipmemo.context_budget import ContextBudget
-from gossipmemo.llm import ChatCompletionRequest, OpenAICompatibleAdapter
+from gossipmemo.transport import ChatCompletionRequest
+from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
     ContinuityView, CoverageMapView, HypothesisView, LearningGoalView,
     MemoryView, ModelMessage,
@@ -49,7 +50,7 @@ def test_small_paths_send_original_single_requests() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
             coverage = CoverageMapView(space_id="s")
-            await adapter.audit_coverage(coverage, [_memory("e", "raw evidence")], [_hypothesis("h", "raw hypothesis")])
+            await _audit_coverage(adapter, coverage, [_memory("e", "raw evidence")], [_hypothesis("h", "raw hypothesis")])
             await _reason_continuity(adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
