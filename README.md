@@ -249,10 +249,39 @@ Freshness is watermark-based: a card is stale when a related Memory has a newer
 `updated_at`. That covers additions, retractions, and supersedes with one
 mechanism, so no reasoner needs an invalidation hook.
 
+Extraction drains sequentially per space: one batch at a time, oldest and
+least-attempted first, until nothing is pending. A batch that keeps failing is
+retired after five recorded failures so one broken batch cannot spin the drain
+forever — but only failures the server actually observed count. A process
+killed mid-call leaves its batch untouched and it is retried on the next start.
+
 Extraction reads only its own batch. It will infer that "don't change the specs
 right before next month's release again" means the speaker dislikes late scope
 changes, but it will not conclude that the speaker resists change in general —
 that requires history, and belongs to reasoning.
+
+### One provider request at a time
+
+Every outbound provider request passes a single-permit gate, so exactly one is
+in flight process-wide. The unit is one HTTP request, not one reasoner call: a
+reasoner that has to split oversized context into several requests releases the
+permit between them rather than holding it for the whole job.
+
+Waiting callers are served by strict priority, FIFO within a tier:
+
+1. **Foreground** — `query` synthesis, the one synchronous LLM path.
+2. **Freshness** — extraction and continuity, which keep recent messages usable.
+3. **Background** — everything else: the card, coverage, and goal reasoners.
+
+There is deliberately no aging and no quota. During a large backfill,
+extraction is *meant* to starve induction: a Person card induced from
+half-extracted history would only be invalidated once extraction caught up.
+
+When the provider signals a rate limit or an outage, the backoff is taken while
+holding the permit. That is intentional global backpressure — one caller waiting
+out a `Retry-After` stops every other caller from making it worse. Retries for
+malformed model output work differently: the provider is healthy, so those wait
+outside the gate and let other work through.
 
 ### What the agent actually receives
 
@@ -318,6 +347,20 @@ alone from a running server silently loses recent data.** To move or back up
 a database, either stop the server first and copy the file, or copy all three
 files together. The server refuses to start if the filesystem will not accept
 WAL — a network mount, usually — rather than falling back silently.
+
+### Code layout
+
+The provider seam is deliberately narrow. `transport.py` is a leaf module —
+the chat-completion models, the priority gate, the retry policy, and the
+`LlmTransport` protocol, which is everything a reasoner is allowed to know
+about the provider. `llm.py` is the one implementation of it: HTTP, retries,
+and nothing else. Prompt assembly and chunking strategy belong to the
+reasoners, one module each under `reasoners/`, with the budget-driven splitting
+tools they share in `chunking.py`.
+
+The point of the narrowness is that each reasoner's real path — two-stage owner
+reasoning, lossy digesting, paginated evidence — is exercised by tests against
+a transport double, rather than stubbed out behind a per-reasoner method.
 
 See [data_schema.md](data_schema.md) for the table-level model and
 [glossary.md](glossary.md) for the canonical vocabulary.
