@@ -115,6 +115,26 @@ def test_reasoning_prompts_allow_useful_social_inference():
     assert "Generalize recurring patterns" in USER_MODEL_REASONING_SYSTEM_PROMPT
 
 
+def test_owner_prompts_keep_relevance_apart_from_subject_and_relationship():
+    """Linked-but-not-about is the failure these two prompts exist to prevent.
+
+    These assertions used to sit on `person_reasoning_prompt` and
+    `relationship_reasoning_prompt`, user-prompt builders that went dead
+    when owner reasoning moved to `reasoners/owner.py` and were deleted
+    with them. The instructions themselves still ship, in the system
+    prompts, so they are checked there now rather than dropped.
+    """
+
+    assert "Linked memories indicate" in PERSON_REASONING_SYSTEM_PROMPT
+    assert "semantic subject" in PERSON_REASONING_SYSTEM_PROMPT
+    assert "Do not transfer" in PERSON_REASONING_SYSTEM_PROMPT
+    assert "endpoint People" in RELATIONSHIP_REASONING_SYSTEM_PROMPT
+    assert (
+        "Mere co-occurrence is not relationship evidence"
+        in RELATIONSHIP_REASONING_SYSTEM_PROMPT
+    )
+
+
 def test_owner_system_policies_do_not_prescribe_a_stage_output_shape():
     for prompt in (
         PERSON_REASONING_SYSTEM_PROMPT,
