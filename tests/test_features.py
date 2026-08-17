@@ -53,7 +53,7 @@ class FakeModel:
 
     `_owner_response`'s default fallback -- an object whose fields are all
     unrelated to any reasoner's schema -- parses successfully against every
-    result type used here (`ExtractionResult`, `CoverageAuditPatch`,
+    result type used here (`ExtractionResult`, `ExtractedCoverageAudit`,
     `GoalPlanningResult`, `GoalPlanningCandidates`,
     `RelationshipProjectionResult`) because every field on each of them has
     a default and pydantic ignores unknown keys; it only needs a real

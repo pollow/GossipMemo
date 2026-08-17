@@ -4,8 +4,8 @@ Each reasoner now owns its own system prompt(s) and user-prompt builder(s)
 (see `gossipmemo/reasoners/*.py`). What stays here is genuinely cross-
 reasoner: the JSON-schema instruction helper, compact evidence/hypothesis
 rendering, the owner-reasoning family shared by person/relationship/
-user_model, and the coverage rubric/method shared by coverage and all three
-goal-planning prompts.
+user_model, the per-root viewpoints the coverage audit fans out over, and the
+coverage rubric/method shared by all three goal-planning prompts.
 """
 
 from __future__ import annotations
@@ -113,9 +113,9 @@ def actions_stage_prompt() -> str:
     return "<stage>Review the projection above. Return only explicit inferred-memory and hypothesis actions. Omission is always no-op. IDs must be from supplied context.</stage>"
 
 
-# Stable parent IDs deliberately have richer prompt-only facets. The stored map is
-# compact, while this readable rubric lets audit boundaries name meaningful blind
-# spots without turning sensitive life material into a normalized schema.
+# Stable root IDs deliberately have richer prompt-only facets. Stored coverage is
+# compact prose, while this readable rubric lets goal planning name meaningful
+# blind spots without turning sensitive life material into a normalized schema.
 COVERAGE_RUBRIC = """M1 life_chapters — Which eras, beginnings, moves, endings, and chapters are legible? Rich when chronology and transitions have texture; blind spots: childhood, family origin, education, work, migration, future chapters.
 M2 everyday_life — What does ordinary life, routine, home, work, care, money, and security feel like? Rich when habits and constraints have context; blind spots: class, housing, debt, caregiving, disability access.
 M3 turning_points — Which choices, accidents, losses, recoveries, and reversals changed the story? Rich when consequences and alternatives are known; blind spots: regret, repair, harm done, survival.
@@ -136,6 +136,33 @@ P8 preferences_and_routines — What tastes, practices, environments, and practi
 P9 voice_and_expression — How does the user tell stories, joke, ask, withhold, create, or communicate? Rich when examples span settings; blind spots: silence and code-switching.
 P10 context_and_exceptions — Which roles, settings, identities, pressures, and exceptions change the pattern? Rich when it prevents overgeneralization; blind spots: home/work, safety, power, culture.
 P11 skills_and_knowledge — What has the user learned, practiced, taught, or become capable of? Rich when confidence and limits are clear; blind spots: informal knowledge and blocked opportunities."""
+
+# One short viewpoint line per coverage root, for the per-root audit request.
+# The audit only summarizes what the evidence supports, so it deliberately does
+# not get the rubric's "blind spots" cues: naming what is missing is the
+# planner's work, not the auditor's.
+COVERAGE_ROOT_VIEWPOINTS: dict[str, str] = {
+    "M1": "Which eras, beginnings, moves, endings, and chapters are legible?",
+    "M2": "What do ordinary life, routine, home, work, care, money, and security look like?",
+    "M3": "Which choices, accidents, losses, recoveries, and reversals changed the story?",
+    "M4": "Which attachments, ruptures, loyalties, intimacies, and family or friend arcs matter?",
+    "M5": "Which places, communities, cultures, institutions, and historical contexts shape meaning?",
+    "M6": "Which concrete scenes, sensory memories, conversations, and small moments carry the story?",
+    "M7": "How are feelings, needs, fear, desire, grief, and self-protection described?",
+    "M8": "Which recurring themes, tensions, growth, and contradictions span time?",
+    "M9": "Which questions, conflicts, decisions, losses, or hopes are still running?",
+    "P1": "How does the user name self, belonging, and self-understanding?",
+    "P2": "What matters to the user and which costs are accepted?",
+    "P3": "Which assumptions, beliefs, and sources of meaning guide interpretation?",
+    "P4": "What pulls the user forward or holds them back?",
+    "P5": "How does the user decide under uncertainty, conflict, or pressure?",
+    "P6": "Which non-clinical emotional rhythms and coping patterns recur?",
+    "P7": "How does the user connect, communicate, protect space, and repair?",
+    "P8": "Which tastes, practices, environments, and practical rhythms recur?",
+    "P9": "How does the user tell stories, joke, ask, withhold, create, or communicate?",
+    "P10": "Which roles, settings, identities, pressures, and exceptions change the pattern?",
+    "P11": "What has the user learned, practiced, taught, or become capable of?",
+}
 
 # Method cues are deliberately non-clinical: they guide respectful inquiry and
 # audit interpretation, not treatment or a demand for disclosure.
@@ -161,6 +188,7 @@ is not."""
 
 __all__ = [
     "COVERAGE_METHOD",
+    "COVERAGE_ROOT_VIEWPOINTS",
     "COVERAGE_RUBRIC",
     "actions_stage_prompt",
     "owner_evidence_digest_prompt",

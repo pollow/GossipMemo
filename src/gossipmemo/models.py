@@ -16,14 +16,13 @@ HypothesisOwnerKind = Literal["user", "person", "relationship"]
 HypothesisStatus = Literal["open", "promoted", "rejected", "superseded", "retired"]
 HypothesisConfidence = Literal["low", "medium", "high"]
 HypothesisEvidenceRole = Literal["support", "counter"]
-CoverageLevel = Literal["unknown", "fragmentary", "grounded", "rich"]
-CoverageBoundaryKind = Literal["edge", "blind_spot", "conflict"]
-CoverageBoundaryStatus = Literal["open", "resolved"]
+CoverageEntryStatus = Literal["active", "superseded"]
 LearningGoalStatus = Literal["open", "partial", "answered", "deferred", "retired"]
 
 # These are intentionally prompt-native IDs rather than a normalized rubric
-# table: they are a stable contract for the CoverageAudit and GoalPlanning LLM
-# calls, while each space stores only its current rebuildable assessment.
+# table. They are the coverage *roots*: one audit request per root, so a root
+# is decided by which request produced an entry and never by a field the model
+# fills in. Everything below a root is free-text `path`.
 COVERAGE_CRITERIA: dict[str, str] = {
     "M1": "life_chapters", "M2": "everyday_life", "M3": "turning_points",
     "M4": "people_and_relationship_arcs", "M5": "places_and_context",
@@ -37,8 +36,7 @@ COVERAGE_CRITERIA: dict[str, str] = {
 }
 
 
-def coverage_skeleton() -> dict[str, dict[str, str]]:
-    return {criterion_id: {"level": "unknown"} for criterion_id in COVERAGE_CRITERIA}
+COVERAGE_ROOTS: tuple[str, ...] = tuple(COVERAGE_CRITERIA)
 
 
 class SourceRef(BaseModel):
@@ -303,67 +301,68 @@ class UserReasoningActionsResult(BaseModel):
     hypothesis_actions: HypothesisActions | None = None
 
 
-class CoverageCriterionPatch(BaseModel):
-    criterion_id: str
-    level: CoverageLevel
-    known_state: str = ""
-    evidence_memory_ids: list[str] = Field(default_factory=list)
+class CoverageEntryView(BaseModel):
+    """One stored summary of how well a path under a root is understood.
 
+    An entry is a summary over many Memories, not a Memory: it says what we
+    understand about this path, never what is still missing.  `path` is free
+    text and deliberately unnormalized; the root-level entry is the one with
+    an empty `path`.
+    """
 
-class CoverageBoundary(BaseModel):
-    id: str = Field(min_length=1)
-    kind: CoverageBoundaryKind
-    status: CoverageBoundaryStatus = "open"
-    summary: str = Field(min_length=1)
-    criterion_refs: list[str] = Field(default_factory=list)
-    evidence_memory_ids: list[str] = Field(default_factory=list)
-    hypothesis_id: str | None = None
-    status_reason: str | None = None
-
-
-class CoverageBoundaryUpsert(BaseModel):
-    """A new boundary only; storage assigns its trusted ID."""
-
-    kind: CoverageBoundaryKind
-    summary: str = Field(min_length=1)
-    criterion_refs: list[str] = Field(default_factory=list)
-    evidence_memory_ids: list[str] = Field(default_factory=list)
-    hypothesis_id: str | None = None
-
-
-class CoverageBoundaryTransition(BaseModel):
-    boundary_id: str = Field(min_length=1)
-    status: CoverageBoundaryStatus
-    reason: str = Field(min_length=1)
-
-
-class CoverageAuditPatch(BaseModel):
-    criteria: list[CoverageCriterionPatch] = Field(default_factory=list)
-    boundary_upserts: list[CoverageBoundaryUpsert] = Field(default_factory=list)
-    boundary_transitions: list[CoverageBoundaryTransition] = Field(default_factory=list)
-    life_periods: list[str] = Field(default_factory=list)
-    relationship_arcs: list[str] = Field(default_factory=list)
-    behavioral_contexts: list[str] = Field(default_factory=list)
-
-
-class CoverageMapView(BaseModel):
+    id: str
     space_id: str
+    root: str
+    path: str = ""
+    content: str
+    status: CoverageEntryStatus = "active"
+    evidence_memory_ids: list[str] = Field(default_factory=list)
+    created_at: str
+    updated_at: str
+
+
+class CoverageRootView(BaseModel):
+    """One root's audit cursor: how far its own evidence backlog is read."""
+
+    space_id: str
+    root: str
     revision: int = 0
     source_watermark: str | None = None
     source_cursor_id: str | None = None
-    criteria: dict[str, dict[str, Any]] = Field(default_factory=coverage_skeleton)
-    boundaries: list[CoverageBoundary] = Field(default_factory=list)
-    life_periods: list[str] = Field(default_factory=list)
-    relationship_arcs: list[str] = Field(default_factory=list)
-    behavioral_contexts: list[str] = Field(default_factory=list)
+
+
+class ExtractedCoverageEntry(BaseModel):
+    """A new entry under the audited root; storage assigns its trusted ID."""
+
+    path: str = ""
+    content: str = Field(min_length=1)
+
+
+class ExtractedCoverageEntryEdit(BaseModel):
+    """A rewrite of one entry listed in the prompt.
+
+    Merge and split need no dedicated operations: merging is rewriting one
+    entry and marking the other `superseded`, splitting is narrowing one
+    entry and adding another.  Omitted `path` keeps the stored path.
+    """
+
+    entry_id: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    path: str | None = None
+    status: CoverageEntryStatus = "active"
+
+
+class ExtractedCoverageAudit(BaseModel):
+    additions: list[ExtractedCoverageEntry] = Field(default_factory=list)
+    modifications: list[ExtractedCoverageEntryEdit] = Field(default_factory=list)
 
 
 class LearningGoalUpsert(BaseModel):
     goal_id: str | None = None
     prompt: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
-    criteria_refs: list[str] = Field(min_length=1)
-    boundary_ids: list[str] = Field(min_length=1)
+    criteria_refs: list[str] = Field(default_factory=list)
+    boundary_ids: list[str] = Field(default_factory=list)
     focus_kind: Literal["user", "person", "relationship"] = "user"
     focus_id: str | None = None
 
@@ -384,8 +383,8 @@ class LearningGoalCandidate(BaseModel):
 
     prompt: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
-    criteria_refs: list[str] = Field(min_length=1)
-    boundary_ids: list[str] = Field(min_length=1)
+    criteria_refs: list[str] = Field(default_factory=list)
+    boundary_ids: list[str] = Field(default_factory=list)
     focus_kind: Literal["user", "person", "relationship"] = "user"
     focus_id: str | None = None
 

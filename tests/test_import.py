@@ -11,6 +11,7 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
 from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
+    COVERAGE_ROOTS,
     ManualMemoryRequest,
     MessageInput,
     SourceRef,
@@ -146,20 +147,14 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 })
             if "Review the projection above" in combined:
                 return json.dumps({})
-            if "Audit long-term autobiographical and persona coverage" in combined:
+            if "Summarize how well one area of a person's life and" in combined:
                 # Make it observable that import waits for induction spawned
                 # by extraction instead of returning as soon as messages
                 # complete.
                 await asyncio.sleep(0.01)
                 self.coverage_audits += 1
                 return json.dumps({
-                    "criteria": [
-                        {
-                            "criterion_id": "P8",
-                            "level": "fragmentary",
-                            "known_state": "A preference is known.",
-                        }
-                    ]
+                    "additions": [{"path": "", "content": "A preference is known."}]
                 })
             if "Propose optional candidate invitations only" in combined:
                 return json.dumps({"candidates": []})
@@ -206,7 +201,8 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         assert first == {"messages": 2, "extracted": 2}
         assert second == first
         assert model.extractions == 1
-        assert model.coverage_audits == 1
+        # Coverage fans out over roots: one request per root per attempt.
+        assert model.coverage_audits == len(COVERAGE_ROOTS)
         assert model.goal_plans == 1
         assert store.user_model_context("personal")[0].profile_card == {
             "summary": "Likes tea"

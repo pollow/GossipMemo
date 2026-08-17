@@ -18,7 +18,7 @@ from functools import partial
 
 from ..chunking import greedy_chunks, reduce_until_fits
 from ..models import (
-    CoverageMapView,
+    CoverageEntryView,
     GoalPlanningCandidates,
     GoalPlanningResult,
     HypothesisView,
@@ -30,12 +30,11 @@ from ..prompts import COVERAGE_METHOD, COVERAGE_RUBRIC, _json
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, LlmTransport, structured
 from .base import DescriptorReasoner
-from .coverage import _coverage_skeleton, _structured_request
+from .coverage import _structured_request
 
 GOAL_PLANNING_SYSTEM_PROMPT = """Plan a very small number of optional, user-owned
-learning invitations from an updated coverage map. Return only the supplied JSON
-schema. Every new or changed goal must cite supplied criterion and boundary IDs.
-Unknown, intimate, traumatic, stigmatized, or otherwise private areas are never
+learning invitations from updated coverage entries. Return only the supplied JSON
+schema. Unknown, intimate, traumatic, stigmatized, or otherwise private areas are never
 automatic targets: respect explicit readiness, consent, defer, and do-not-pursue
 signals. Prefer gentle, specific questions with an easy opt-out; never pressure,
 diagnose, or imply that disclosure is owed. Omission is no-op: only explicitly
@@ -43,12 +42,12 @@ transition an existing supplied goal when its lifecycle changes."""
 
 
 def goal_planning_prompt(
-    coverage: CoverageMapView, hypotheses: list[HypothesisView],
+    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
     open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
 ) -> str:
     return (
         "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<updated-coverage-map>\n" + _json(coverage) + "\n</updated-coverage-map>\n"
+        "<coverage-entries>\n" + _json(list(entries)) + "\n</coverage-entries>\n"
         "<open-hypotheses>\n"
         + _json([item.model_dump(mode="json") for item in hypotheses])
         + "\n</open-hypotheses>\n<open-goals>\n"
@@ -62,28 +61,28 @@ def goal_planning_prompt(
 
 
 def goal_candidate_prompt(
-    coverage: CoverageMapView, hypotheses: list[HypothesisView],
+    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
     open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
 ) -> str:
     return (
         "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<updated-coverage-map>\n" + _json(coverage) + "\n</updated-coverage-map>\n"
+        "<coverage-entries>\n" + _json(list(entries)) + "\n</coverage-entries>\n"
         "<open-hypotheses>\n" + _json(hypotheses) + "\n</open-hypotheses>\n"
         "<open-goals>\n" + _json(open_goals) + "\n</open-goals>\n"
         "<recent-closed-goals>\n" + _json(recent_closed_goals) + "\n</recent-closed-goals>\n"
         "Propose optional candidate invitations only. Candidates are non-mutating: do not "
         "transition, retire, defer, update, or otherwise change any goal lifecycle. Respect "
-        "consent, privacy, and easy decline; cite only supplied criterion and boundary IDs."
+        "consent, privacy, and easy decline."
     )
 
 
 def goal_reconciliation_prompt(
-    coverage: CoverageMapView, hypotheses: list[HypothesisView],
+    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
     open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
     candidates: list[LearningGoalCandidate],
 ) -> str:
     return (
-        goal_planning_prompt(coverage, hypotheses, open_goals, recent_closed_goals)
+        goal_planning_prompt(entries, hypotheses, open_goals, recent_closed_goals)
         + "\n<candidates>\n"
         + _json([item.model_dump(mode="json") for item in candidates])
         + "\n</candidates>\n"
@@ -101,21 +100,21 @@ def goal_candidate_reduction_prompt(candidates: list[LearningGoalCandidate]) -> 
 
 
 def _bounded_goal_context(
-    transport: LlmTransport, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
+    transport: LlmTransport, entries: Sequence[CoverageEntryView], hypotheses: Sequence[HypothesisView],
     open_goals: Sequence[LearningGoalView], closed_goals: Sequence[LearningGoalView],
-) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]]:
+) -> tuple[list[CoverageEntryView], list[HypothesisView], list[LearningGoalView], list[LearningGoalView]]:
     # Goal planning has different schemas and prompt scaffolding than a
     # coverage audit, so its minimum-fit proof must use its own requests.
     context_budget = transport.context_budget
 
     def fits(
-        candidate_coverage: CoverageMapView, candidate_hypotheses: Sequence[HypothesisView],
+        candidate_entries: Sequence[CoverageEntryView], candidate_hypotheses: Sequence[HypothesisView],
         candidate_open: Sequence[LearningGoalView], candidate_closed: Sequence[LearningGoalView],
     ) -> bool:
         candidate = _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
             goal_candidate_prompt(
-                candidate_coverage, list(candidate_hypotheses), list(
+                list(candidate_entries), list(candidate_hypotheses), list(
                     candidate_open), list(candidate_closed),
             ),
             GoalPlanningCandidates,
@@ -123,7 +122,7 @@ def _bounded_goal_context(
         final = _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
             goal_reconciliation_prompt(
-                candidate_coverage, list(candidate_hypotheses), list(
+                list(candidate_entries), list(candidate_hypotheses), list(
                     candidate_open), list(candidate_closed), [],
             ),
             GoalPlanningResult,
@@ -138,11 +137,13 @@ def _bounded_goal_context(
     skeleton_open = [goal.model_copy(update={"prompt": "", "rationale": ""}) for goal in open_goals]
     skeleton_closed = [goal.model_copy(
         update={"prompt": "", "rationale": ""}) for goal in closed_goals]
-    if fits(coverage, skeleton_hypotheses, skeleton_open, skeleton_closed):
-        return coverage, skeleton_hypotheses, skeleton_open, skeleton_closed
+    if fits(entries, skeleton_hypotheses, skeleton_open, skeleton_closed):
+        return list(entries), skeleton_hypotheses, skeleton_open, skeleton_closed
 
-    bounded_coverage = _coverage_skeleton(coverage)
-    if not fits(bounded_coverage, [], [], []):
+    # Entry IDs stay listed even when their prose has to go: an ID a goal can
+    # cite is the cheapest part of an entry.
+    bounded_entries = [item.model_copy(update={"content": ""}) for item in entries]
+    if not fits(bounded_entries, [], [], []):
         raise ValueError("learning-goal minimum skeleton exceeds context budget")
 
     bounded_hypotheses: list[HypothesisView] = []
@@ -150,40 +151,26 @@ def _bounded_goal_context(
     bounded_closed: list[LearningGoalView] = []
     # Lifecycle IDs have priority; omitted comparison state is always no-op.
     for item in skeleton_open:
-        if fits(bounded_coverage, bounded_hypotheses, [*bounded_open, item], bounded_closed):
+        if fits(bounded_entries, bounded_hypotheses, [*bounded_open, item], bounded_closed):
             bounded_open.append(item)
     for item in skeleton_hypotheses:
-        if fits(bounded_coverage, [*bounded_hypotheses, item], bounded_open, bounded_closed):
+        if fits(bounded_entries, [*bounded_hypotheses, item], bounded_open, bounded_closed):
             bounded_hypotheses.append(item)
     for item in skeleton_closed:
-        if fits(bounded_coverage, bounded_hypotheses, bounded_open, [*bounded_closed, item]):
+        if fits(bounded_entries, bounded_hypotheses, bounded_open, [*bounded_closed, item]):
             bounded_closed.append(item)
-    return bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed
-
-
-def _filter_goal_candidates(
-    candidates: Sequence[LearningGoalCandidate], coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
-) -> list[LearningGoalCandidate]:
-    criteria = set(coverage.criteria)
-    boundaries = {item.id for item in coverage.boundaries if item.status == "open"}
-    # Persistence remains the authority for focus Person/Relationship IDs.
-    accepted: list[LearningGoalCandidate] = []
-    for item in candidates:
-        if not set(item.criteria_refs).issubset(criteria) or not set(item.boundary_ids).issubset(boundaries):
-            continue
-        accepted.append(item)
-    return accepted
+    return bounded_entries, bounded_hypotheses, bounded_open, bounded_closed
 
 
 async def _plan_learning_goals(
-    transport: LlmTransport, coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
+    transport: LlmTransport, entries: Sequence[CoverageEntryView], hypotheses: Sequence[HypothesisView],
     open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
 ) -> GoalPlanningResult:
     context_budget = transport.context_budget
     tier, label = current_call_tier(), current_call_label()
     normal = _structured_request(
         transport, GOAL_PLANNING_SYSTEM_PROMPT,
-        goal_planning_prompt(coverage, list(hypotheses), list(
+        goal_planning_prompt(list(entries), list(hypotheses), list(
             open_goals), list(recent_closed_goals)),
         GoalPlanningResult,
     )
@@ -191,14 +178,14 @@ async def _plan_learning_goals(
         _, result = await structured(transport, normal.messages, GoalPlanningResult, tier=tier, label=label)
         return result
 
-    bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed = _bounded_goal_context(
-        transport, coverage, hypotheses, open_goals, recent_closed_goals,
+    bounded_entries, bounded_hypotheses, bounded_open, bounded_closed = _bounded_goal_context(
+        transport, entries, hypotheses, open_goals, recent_closed_goals,
     )
 
     def candidate_request(chunk: Sequence[HypothesisView]) -> ChatCompletionRequest:
         return _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_candidate_prompt(bounded_coverage, list(chunk), bounded_open, bounded_closed),
+            goal_candidate_prompt(bounded_entries, list(chunk), bounded_open, bounded_closed),
             GoalPlanningCandidates,
         )
 
@@ -218,13 +205,13 @@ async def _plan_learning_goals(
     for chunk in greedy_chunks(list(hypotheses) or [None], candidate_fits, candidate_check):
         request = candidate_request([item for item in chunk if item is not None])
         _, result = await structured(transport, request.messages, GoalPlanningCandidates, tier=tier, label=label)
-        candidates.extend(_filter_goal_candidates(result.candidates, coverage, hypotheses))
+        candidates.extend(result.candidates)
 
     def reconciliation_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
         return _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
             goal_reconciliation_prompt(
-                bounded_coverage, bounded_hypotheses, bounded_open, bounded_closed, list(items),
+                bounded_entries, bounded_hypotheses, bounded_open, bounded_closed, list(items),
             ),
             GoalPlanningResult,
         )
@@ -253,7 +240,7 @@ async def _plan_learning_goals(
                 _, result = await structured(
                     transport, request.messages, GoalPlanningCandidates, tier=tier, label=label,
                 )
-                reduced.extend(_filter_goal_candidates(result.candidates, coverage, hypotheses))
+                reduced.extend(result.candidates)
             if not reduced:
                 raise ValueError("learning-goal candidate reduction made no progress")
             return reduced
@@ -285,17 +272,17 @@ def build_learning_goals_reasoner(store: WorldStore, model: LlmTransport) -> Des
         return store.learning_goal_context(space_id)
 
     def call(space_id: str, context):
-        coverage, hypotheses, open_goals, closed_goals = context
+        _, entries, hypotheses, open_goals, closed_goals = context
         return (
             "plan-learning-goals",
             plan_learning_goals,
-            (coverage, hypotheses, open_goals, closed_goals),
+            (entries, hypotheses, open_goals, closed_goals),
         )
 
     def apply(space_id: str, context, result) -> bool:
-        coverage, _, open_goals, closed_goals = context
+        revision, _, _, open_goals, closed_goals = context
         store.apply_goal_planning(
-            space_id, coverage.revision, result,
+            space_id, revision, result,
             {goal.id for goal in open_goals} | {goal.id for goal in closed_goals},
         )
         return True

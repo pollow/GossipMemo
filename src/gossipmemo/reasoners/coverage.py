@@ -1,10 +1,16 @@
-"""Coverage-map audit reasoner and its prompt.
+"""Coverage-audit reasoner and its prompt.
 
-Coverage is an accumulator, not a snapshot (unlike the owner family), so
-an oversized audit is bounded by paginating evidence across several
-requests rather than lossily digesting it: `_audit_coverage` packs
-memories into `chunking.greedy_chunks`-sized requests and applies each
-chunk's patch independently, filtering forged evidence IDs per chunk.
+Coverage is one recursive table of entries: an entry summarizes how well one
+path under one root is understood, and the root-level entry (empty path) is
+the overview of that root. Auditing fans out over roots -- one request per
+root, carrying that root's active entries plus a chunk of its new evidence --
+so an entry's root is decided by which request produced it and never by a
+field the model fills in.
+
+Each attempt audits exactly one budget-sized chunk of one root and commits
+it against that root's own cursor, so entries written by an earlier chunk are
+visible to the next one and a failure never rolls back the roots (or chunks)
+that already landed.
 """
 
 from __future__ import annotations
@@ -13,42 +19,44 @@ from collections.abc import Sequence
 from functools import partial
 
 from ..chunking import greedy_chunks
-from ..models import CoverageAuditPatch, CoverageMapView, HypothesisView, MemoryView
+from ..models import COVERAGE_CRITERIA, CoverageEntryView, ExtractedCoverageAudit, MemoryView
 from ..priority import current_call_label, current_call_tier
-from ..prompts import (
-    COVERAGE_METHOD,
-    COVERAGE_RUBRIC,
-    _evidence_lines,
-    _hypothesis_lines,
-    _json,
-    schema_instruction,
-)
+from ..prompts import COVERAGE_ROOT_VIEWPOINTS, _evidence_lines, schema_instruction
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
 
-COVERAGE_AUDIT_SYSTEM_PROMPT = """Audit long-term autobiographical and persona coverage.
-Return only the supplied JSON schema. Coverage is a summary of supported evidence,
-not a profile and not an invitation to disclose. A hypothesis may identify an edge,
-blind spot, or conflict, but never raises a coverage level. Preserve uncertainty:
-unknown, private, or deferred material is valid and must not be treated as a gap to
-press. Do not diagnose pathology. Use the supplied memory IDs exactly; do not invent
-facts, evidence, or private details. Keep natural-language summaries concise and in
-the language of the evidence."""
+COVERAGE_AUDIT_SYSTEM_PROMPT = """Summarize how well one area of a person's life and
+persona is already understood. Return only the supplied JSON schema. An entry is a
+summary over many memories -- roughly dozens of memories into a short paragraph -- not a
+retelling of them and not memoir prose. Write only what is known; never write what is
+missing, unclear, or worth asking about. Do not invent facts, evidence, or private
+details, and do not diagnose. Keep entries concise and in the language of the evidence."""
 
 
 def coverage_audit_prompt(
-    coverage: CoverageMapView, memories: list[MemoryView], hypotheses: list[HypothesisView]
+    root: str, entries: Sequence[CoverageEntryView], memories: Sequence[MemoryView],
 ) -> str:
-    """Immutable audit prefix plus one bounded evidence chunk."""
+    """One root's current entries plus one bounded chunk of its new evidence."""
+    entry_lines = "\n".join(
+        f"- id={item.id!r} path={item.path!r} content={item.content!r}" for item in entries
+    ) or "- (none)"
     return (
-        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<current-coverage-map>\n" + _json(coverage) + "\n</current-coverage-map>\n"
-        "<new-evidence>\n" + _evidence_lines(memories) + "\n</new-evidence>\n"
-        "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
-        + "\n</open-hypotheses>\nApply a patch only for this chunk. Preserve prior coverage unless new evidence changes it. "
-        "Hypotheses may add a boundary or conflict with hypothesis_id, never evidence; a hypothesis never raises a coverage level. "
-        "Each criterion patch needs only its stable parent criterion_id. Keep inventories compact and additive."
+        f"<coverage-root id={root!r} facet={COVERAGE_CRITERIA.get(root, '')!r}>\n"
+        + COVERAGE_ROOT_VIEWPOINTS.get(root, "") + "\n</coverage-root>\n"
+        "<current-entries>\n" + entry_lines + "\n</current-entries>\n"
+        "<new-evidence>\n" + _evidence_lines(list(memories)) + "\n</new-evidence>\n"
+        "Fold this evidence into the entries for this root. Add an entry for a topic that "
+        "the entries do not cover yet, and modify an entry whose summary this evidence "
+        "changes or extends; leaving an entry out changes nothing. An entry that only one "
+        "memory supports is almost always wrong -- that is a single event, not an "
+        "understanding of a topic. Keep exactly one entry with an empty path: the overview "
+        "of this root, naming which areas exist under it and how much is understood about "
+        "each. Paths are free text; reuse a stored path when you mean the same area, and do "
+        "not renumber or normalize the others. Keep content under about two hundred words: "
+        "when an entry outgrows that, split it by narrowing that entry and adding the "
+        "areas it no longer covers. To merge two entries, rewrite one to absorb the other "
+        "and modify the other with status \"superseded\"."
     )
 
 
@@ -65,116 +73,23 @@ def _structured_request(
     )
 
 
-def _coverage_skeleton(coverage: CoverageMapView) -> CoverageMapView:
-    """Bound coverage prose/evidence IDs for scaffolding-only sizing.
-
-    Shared with `learning_goals._bounded_goal_context`, since both need the
-    same minimum-viable coverage map before spending remaining budget on
-    comparison-only hypotheses or goals.
-    """
-    criteria = {
-        identifier: {
-            "level": value.get("level", "unknown"),
-            "known_state": str(value.get("known_state", ""))[:800],
-            "evidence_memory_ids": list(value.get("evidence_memory_ids", []))[:32],
-        }
-        for identifier, value in coverage.criteria.items()
-    }
-    boundaries = [
-        item.model_copy(update={
-            "summary": item.summary[:600],
-            "evidence_memory_ids": item.evidence_memory_ids[:32],
-        })
-        for item in coverage.boundaries
-    ]
-    return coverage.model_copy(update={
-        "criteria": criteria,
-        "boundaries": boundaries,
-        "life_periods": [str(item)[:600] for item in coverage.life_periods[:30]],
-        "relationship_arcs": [str(item)[:600] for item in coverage.relationship_arcs[:30]],
-        "behavioral_contexts": [str(item)[:600] for item in coverage.behavioral_contexts[:30]],
-    })
-
-
-def _bounded_coverage_context(
-    transport: "LlmTransport", coverage: CoverageMapView, hypotheses: Sequence[HypothesisView],
-) -> tuple[CoverageMapView, list[HypothesisView]]:
-    # Bound comparison-only hypotheses and boundary prose before evidence is
-    # added. IDs remain present whenever scaffold space permits it.
-    context_budget = transport.context_budget
-
-    def fits(candidate_coverage: CoverageMapView, candidate_hypotheses: Sequence[HypothesisView]) -> bool:
-        request = _structured_request(
-            transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(candidate_coverage, [], list(candidate_hypotheses)),
-            CoverageAuditPatch,
-        )
-        return context_budget.report(context_budget.estimate_request(request)).fits
-
-    if fits(coverage, hypotheses):
-        return coverage, list(hypotheses)
-    skeleton_hypotheses = [
-        item.model_copy(update={"content": "", "evidence": []}) for item in hypotheses
-    ]
-    if fits(coverage, skeleton_hypotheses):
-        return coverage, skeleton_hypotheses
-
-    bounded = _coverage_skeleton(coverage)
-    if not fits(bounded, []):
-        raise ValueError("coverage prompt scaffolding exceeds context budget")
-    chosen: list[HypothesisView] = []
-    for hypothesis in hypotheses:
-        skeleton = hypothesis.model_copy(update={"content": "", "evidence": []})
-        if fits(bounded, [*chosen, skeleton]):
-            chosen.append(skeleton)
-    return bounded, chosen
-
-
-def _filter_coverage_patch(patch: CoverageAuditPatch, evidence_ids: set[str]) -> CoverageAuditPatch:
-    return CoverageAuditPatch(
-        criteria=[
-            item.model_copy(update={
-                "evidence_memory_ids": [id_ for id_ in item.evidence_memory_ids if id_ in evidence_ids],
-            })
-            for item in patch.criteria
-        ],
-        boundary_upserts=[
-            item.model_copy(update={
-                "evidence_memory_ids": [id_ for id_ in item.evidence_memory_ids if id_ in evidence_ids],
-            })
-            for item in patch.boundary_upserts
-        ],
-        boundary_transitions=patch.boundary_transitions,
-        life_periods=patch.life_periods,
-        relationship_arcs=patch.relationship_arcs,
-        behavioral_contexts=patch.behavioral_contexts,
-    )
-
-
 async def _audit_coverage(
-    transport: "LlmTransport", coverage: CoverageMapView, memories: Sequence[MemoryView],
-    hypotheses: Sequence[HypothesisView] = (),
-) -> CoverageAuditPatch:
-    context_budget = transport.context_budget
-    normal = _structured_request(
-        transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-        coverage_audit_prompt(coverage, list(memories), list(hypotheses)), CoverageAuditPatch,
-    )
-    if context_budget.report(context_budget.estimate_request(normal)).fits:
-        _, result = await structured(
-            transport, normal.messages, CoverageAuditPatch,
-            tier=current_call_tier(), label=current_call_label(),
-        )
-        return result
+    transport: "LlmTransport", root: str, entries: Sequence[CoverageEntryView],
+    memories: Sequence[MemoryView],
+) -> tuple[ExtractedCoverageAudit, list[MemoryView]]:
+    """Audit the largest prefix of `memories` that fits one request.
 
-    bounded_coverage, bounded_hypotheses = _bounded_coverage_context(
-        transport, coverage, hypotheses)
+    Returns the audit together with the evidence it actually read, since the
+    caller advances this root's cursor by exactly that much. A root whose
+    entries alone no longer fit the budget raises rather than dropping any of
+    them: compacting such a root is its own pass, not a silent truncation.
+    """
+    context_budget = transport.context_budget
 
     def request_for(chunk: Sequence[MemoryView]) -> ChatCompletionRequest:
         return _structured_request(
             transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(bounded_coverage, list(
-                chunk), bounded_hypotheses), CoverageAuditPatch,
+            coverage_audit_prompt(root, entries, chunk), ExtractedCoverageAudit,
         )
 
     def fits(chunk: Sequence[MemoryView]) -> bool:
@@ -183,56 +98,39 @@ async def _audit_coverage(
     def check(chunk: Sequence[MemoryView]) -> None:
         context_budget.check(context_budget.estimate_request(request_for(chunk)))
 
-    patches: list[CoverageAuditPatch] = []
-    for chunk in greedy_chunks(list(memories), fits, check):
-        request = request_for(chunk)
-        _, result = await structured(
-            transport, request.messages, CoverageAuditPatch,
-            tier=current_call_tier(), label=current_call_label(),
-        )
-        patches.append(_filter_coverage_patch(result, {memory.id for memory in chunk}))
-
-    return CoverageAuditPatch(
-        criteria=[item for patch in patches for item in patch.criteria],
-        boundary_upserts=[item for patch in patches for item in patch.boundary_upserts],
-        boundary_transitions=[item for patch in patches for item in patch.boundary_transitions],
-        life_periods=[item for patch in patches for item in patch.life_periods],
-        relationship_arcs=[item for patch in patches for item in patch.relationship_arcs],
-        behavioral_contexts=[item for patch in patches for item in patch.behavioral_contexts],
+    chunk = greedy_chunks(list(memories), fits, check)[0]
+    request = request_for(chunk)
+    _, result = await structured(
+        transport, request.messages, ExtractedCoverageAudit,
+        tier=current_call_tier(), label=current_call_label(),
     )
+    return result, chunk
 
 
 def build_coverage_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
-    """Audit all bounded chunks before a single goal-planning pass."""
+    """Audit one root's next evidence chunk per attempt, until none is behind."""
 
     audit_coverage = partial(_audit_coverage, model)
 
     def load_context(space_id: str):
-        context = store.coverage_context(space_id, limit=None)
-        if not context:
-            return None
-        _, memories, _, _ = context
-        if not memories:
-            return None
-        return context
+        return store.coverage_context(space_id)
 
     def call(space_id: str, context):
-        coverage, memories, hypotheses, _ = context
-        return "audit-coverage", audit_coverage, (coverage, memories, hypotheses)
+        root, entries, memories = context
+        return "audit-coverage", audit_coverage, (root.root, entries, memories)
 
     def apply(space_id: str, context, result) -> bool:
-        coverage, memories, hypotheses, _ = context
+        root, entries, _ = context
+        audit, audited = result
         return store.apply_coverage_audit(
-            space_id, coverage.source_watermark, coverage.source_cursor_id, result,
-            {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries},
-            {hypothesis.id for hypothesis in hypotheses},
+            space_id, root.root, root.source_watermark, root.source_cursor_id, audit,
+            {memory.id for memory in audited}, {entry.id for entry in entries},
         )
 
     def continue_when(context, result, applied: bool) -> bool:
-        if not applied:
-            return True
-        _, _, _, pending = context
-        return pending
+        # Both outcomes reload: another chunk or root is usually still
+        # behind, and a lost CAS means the fresh cursor is worth re-reading.
+        return True
 
     return DescriptorReasoner("coverage", load_context, call, apply, continue_when)
 

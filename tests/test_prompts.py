@@ -1,4 +1,4 @@
-from gossipmemo.models import CoverageMapView, MemoryView, ModelMessage
+from gossipmemo.models import MemoryView, ModelMessage
 from gossipmemo.query import QUERY_SYNTHESIS_SYSTEM_PROMPT
 from gossipmemo.reasoners import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -8,6 +8,7 @@ from gossipmemo.reasoners import (
     CONTINUITY_SYSTEM_PROMPT,
     extraction_prompt,
     coverage_audit_prompt,
+    COVERAGE_AUDIT_SYSTEM_PROMPT,
 )
 
 
@@ -158,12 +159,17 @@ def test_all_prompt_contracts_keep_i18n_rule_compact():
     assert "language of the question" in QUERY_SYNTHESIS_SYSTEM_PROMPT
 
 
-def test_coverage_prompt_keeps_private_facets_and_choice_boundaries():
-    prompt = coverage_audit_prompt(CoverageMapView(space_id="space"), [], [])
-    assert "sexuality" in prompt
-    assert "shame" in prompt
-    assert "mortality" in prompt
-    assert "never raises a coverage level" in prompt
+def test_coverage_audit_prompt_summarizes_one_root_without_hunting_gaps():
+    prompt = coverage_audit_prompt("M4", [], [])
+    # The audited root arrives through the call structure, with its own
+    # viewpoint line; naming what is missing belongs to goal planning, so the
+    # rubric's blind-spot cues stay out of this prompt.
+    assert "M4" in prompt and "people_and_relationship_arcs" in prompt
+    assert "Which attachments, ruptures" in prompt
+    assert "blind spot" not in prompt
+    assert "empty path" in prompt and "superseded" in prompt
+    assert "only one memory supports" in prompt
+    assert "never write what is\nmissing" in COVERAGE_AUDIT_SYSTEM_PROMPT
 
 
 def test_query_synthesis_does_not_treat_unmerged_people_as_distinct_evidence():

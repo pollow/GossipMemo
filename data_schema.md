@@ -13,7 +13,7 @@ Space
 ├── Person
 ├── Relationship (Person ↔ Person)
 ├── UserModel (one compact projection per Space)
-├── CoverageMap (one incremental projection per Space)
+├── CoverageEntry (recursive per-root coverage summaries per Space)
 ├── Hypothesis (owned by user / Person / Relationship)
 ├── LearningGoal (user-owned; may focus Person / Relationship)
 ├── Message
@@ -46,7 +46,7 @@ LearningGoal
 - Message author、Memory subject、asserter 和 reporter 不得混为一个字段。
 - Person 和 Relationship 的画像是可重建 projection，Memory 和 Message 才是其依据。
 - Hypothesis 是待确认 interpretation，不是 Memory/evidence；LearningGoal 是可选了解方向，不是用户事实。
-- CoverageMap 是可重建的 user-learning projection，只由 UserLearningGoalReasoner 消费。
+- Coverage entries 是可重放的 user-learning 累积状态，只由 UserLearningGoalReasoner 消费。
 - 人物合并必须显式发生，不能仅凭同名或语义相似自动合并。
 
 ## 2. spaces
@@ -401,16 +401,27 @@ inferred Memory，不能被 reasoning 当作 evidence。
 `hypothesis_evidence` 保存 support/counter Memory IDs。Upsert/transition 只能引用
 reasoner 本次 context 中 server 提供的 owner、Memory 和 Hypothesis IDs；遗漏是 no-op。
 
-### coverage_maps
+### coverage_roots 与 coverage_entries
 
-每个 Space 初始化一份包含 20 个稳定 parent criteria 的 CoverageMap。Criterion 只保存
-`unknown / fragmentary / grounded / rich`、简短 `known_state` 和 active evidence Memory IDs，
-不保存虚假的百分比。Map 另含有界 inventories 和 `edge / blind_spot / conflict`
-boundaries；boundary ID 由 store 分配。
+Coverage 是一张递归的 entry 表。一条 entry 是「我们在这个 path 上了解到什么程度」的
+总结（数十条 Memory → 一小段话），不是 Memory 的复述，也不写「还不知道什么」——找缺口
+是 goal planning 的工作。
 
-增量 cursor 使用 `(source_watermark, source_cursor_id)`，按所有 non-inferred Memory 的
-`(updated_at, id)` 前进，因此同 timestamp 以及 retract/supersede 都不会漏审。Hypothesis
-可以产生 boundary/conflict，但不能提高 criterion level。
+| 字段 | 含义 |
+| --- | --- |
+| `root` | 20 个稳定 memoir/persona 视角之一；由 audit 的调用结构决定，模型不填 |
+| `path` | 自由文本、不规范化；`root` 级 overview entry 的 path 为空 |
+| `content` | 该 path 上的认识总结，上限约一两百字，超了应拆 |
+| `status` | `active \| superseded` |
+| `evidence_memory_ids` | 由 store 维护，并在写入时剔除已失效 Memory |
+
+Audit 的操作面只有 add 与 modify：合并 = 改写一条 + 把另一条标 `superseded`，
+拆分 = 缩小一条 + 新增一条，两步都不需要原子性保证。
+
+`coverage_roots` 每个 Space 每个 root 一行，保存该 root 自己的
+`(source_watermark, source_cursor_id)` 增量 cursor 与 CAS `revision`。cursor 按所有
+non-inferred Memory 的 `(updated_at, id)` 前进，因此同 timestamp 以及 retract/supersede
+都不会漏审；某个 root 的 audit 失败也不会回退其它 root 已推进的进度。
 
 ### learning_goals
 
@@ -421,11 +432,11 @@ LearningGoal 属于 Space/current user，即使 `focus_kind` 指向 Person 或 R
 | --- | --- |
 | `prompt` | chat agent 可选择如何转化为对话的了解方向 |
 | `rationale` | 为什么该方向可能有价值 |
-| `criteria_refs` / `boundary_ids` | 必须引用当前 CoverageMap 的 criteria 与 open boundaries |
+| `criteria_refs` / `boundary_ids` | 旧的 coverage 引用字段，正在迁移为可选的 coverage entry 引用 |
 | `focus_kind` / `focus_id` | `user`，或同 Space 的 Person/Relationship |
 | `status` | `open \| partial \| answered \| deferred \| retired` |
 
-Goal planning 使用 CoverageMap revision 做 optimistic compare-and-swap。Unknown/private 不自动
+Goal planning 使用所有 coverage root revision 之和做 optimistic compare-and-swap。Unknown/private 不自动
 产生 Goal；deferred 不进入 chat guidance。创建 Goal 本身不提高 coverage。
 
 ## 9. Projection 与 canonical data
@@ -446,7 +457,7 @@ Goal planning 使用 CoverageMap revision 做 optimistic compare-and-swap。Unkn
 - Person.profile_card
 - Relationship.facets、summary、closeness、tone 和 status projection
 - `user_models` 中每个 Space 一条 `profile_card` projection；仅从 active `about_user` Memory 低频重建，保持 compact、有界且可删除重建
-- `coverage_maps` 中每个 Space 一条、从 non-inferred Memory 增量重建的 coverage projection
+- `coverage_entries` 与 `coverage_roots`：从 non-inferred Memory 增量累积的 coverage 状态（可重放，但重放结果依赖 audit 顺序）
 - rolling continuity；每次只读取有界 Message window 并推进 through-message watermark
 - 全文、embedding 或图索引
 

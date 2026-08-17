@@ -19,7 +19,7 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.transport import ChatCompletionRequest
 from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
-    ContinuityView, CoverageMapView, HypothesisView, LearningGoalView,
+    ContinuityView, CoverageEntryView, HypothesisView, LearningGoalView,
     MemoryView, ModelMessage,
 )
 from gossipmemo.reasoners.continuity import _reason_continuity
@@ -29,6 +29,10 @@ from gossipmemo.reasoners.learning_goals import _plan_learning_goals
 
 def _memory(identifier: str, content: str) -> MemoryView:
     return MemoryView(id=identifier, content=content, kind="fact", basis="stated", status="active", created_at="1")
+
+
+def _entry(identifier: str, content: str) -> CoverageEntryView:
+    return CoverageEntryView(id=identifier, space_id="s", root="M1", content=content, created_at="1", updated_at="1")
 
 
 def _hypothesis(identifier: str, content: str) -> HypothesisView:
@@ -46,40 +50,42 @@ def test_small_paths_send_original_single_requests() -> None:
         payload = json.loads(request.content)
         calls.append(payload)
         prompt = str(payload["messages"])
-        body = {"criteria": []} if "<new-evidence>" in prompt else {"text": "ok",
-                                                                    "related_person_ids": [], "through_message_id": "m"}
+        body = {"additions": []} if "<new-evidence>" in prompt else {"text": "ok",
+                                                                     "related_person_ids": [], "through_message_id": "m"}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
-            coverage = CoverageMapView(space_id="s")
-            await _audit_coverage(adapter, coverage, [_memory("e", "raw evidence")], [_hypothesis("h", "raw hypothesis")])
+            await _audit_coverage(adapter, "M1", [_entry("c", "prior understanding")],
+                                  [_memory("e", "raw evidence")])
             await _reason_continuity(adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
-    assert "raw hypothesis" in str(calls[0]) and "raw evidence" in str(calls[0])
+    assert "prior understanding" in str(calls[0]) and "raw evidence" in str(calls[0])
     assert "raw message" in str(calls[1]) and "prior" in str(calls[1])
 
 
-def test_coverage_cjk_chunks_filter_fake_evidence_ids() -> None:
+def test_coverage_cjk_backlog_audits_one_budget_sized_chunk() -> None:
     calls: list[dict] = []
     budget = ContextBudget(6500, 400, 200)
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"criteria": [{"criterion_id": "M1", "level": "grounded", "evidence_memory_ids": ["forged", "m0"]}], "boundary_upserts": [{"kind": "blind_spot", "summary": "x", "evidence_memory_ids": ["forged", "m0"]}]})}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"additions": [{"path": "", "content": "总结"}]})}}]})
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
-            result = await _audit_coverage(adapter, CoverageMapView(space_id="s"), [_memory(f"m{i}", "证据" * 2500) for i in range(3)])
-            assert all(
-                "forged" not in item.evidence_memory_ids for item in result.criteria + result.boundary_upserts)
+            memories = [_memory(f"m{i}", "证据" * 2500) for i in range(3)]
+            _, audited = await _audit_coverage(adapter, "M1", [], memories)
+            # One request per attempt; the caller only commits the evidence
+            # this request actually read, so the rest stays in the backlog.
+            assert 0 < len(audited) < len(memories)
     asyncio.run(run())
-    assert len(calls) > 1
+    assert len(calls) == 1
     assert all(budget.estimate_request(ChatCompletionRequest.model_validate(item))
                <= budget.usable_input_tokens for item in calls)
 
@@ -100,7 +106,7 @@ def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
-            await _plan_learning_goals(adapter, CoverageMapView(space_id="s"), [_hypothesis(f"h{i}", "假设" * 2500) for i in range(4)], [], [])
+            await _plan_learning_goals(adapter, [], [_hypothesis(f"h{i}", "假设" * 2500) for i in range(4)], [], [])
     asyncio.run(run())
     candidates = [
         item for item in calls if "Propose optional candidate invitations only" in str(item)]

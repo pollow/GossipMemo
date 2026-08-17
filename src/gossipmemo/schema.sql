@@ -14,18 +14,34 @@ CREATE TABLE IF NOT EXISTS user_models (
     profile_updated_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS coverage_maps (
-    space_id TEXT PRIMARY KEY REFERENCES spaces(id) ON DELETE CASCADE,
+-- One row per space per coverage root. The root is the unit of auditing, so
+-- it is also the unit of progress: each root carries its own evidence cursor
+-- and its own CAS revision, and a root whose audit fails never rolls back the
+-- roots that already advanced.
+CREATE TABLE IF NOT EXISTS coverage_roots (
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    root TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0,
     source_watermark TEXT,
     source_cursor_id TEXT,
-    criteria TEXT NOT NULL,
-    boundaries TEXT NOT NULL DEFAULT '[]',
-    life_periods TEXT NOT NULL DEFAULT '[]',
-    relationship_arcs TEXT NOT NULL DEFAULT '[]',
-    behavioral_contexts TEXT NOT NULL DEFAULT '[]',
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(space_id, root)
+);
+
+CREATE TABLE IF NOT EXISTS coverage_entries (
+    id TEXT PRIMARY KEY,
+    space_id TEXT NOT NULL REFERENCES spaces(id) ON DELETE CASCADE,
+    root TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded')),
+    evidence_memory_ids TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS coverage_entries_by_root
+ON coverage_entries(space_id, root, status);
 
 CREATE TABLE IF NOT EXISTS learning_goals (
     id TEXT PRIMARY KEY,
