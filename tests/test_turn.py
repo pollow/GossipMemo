@@ -157,9 +157,9 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
         connection.execute(
             "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,status,created_at,updated_at) VALUES ('closed','s','person',?,'旅行已确认','impression','low','rejected','4','4')", (pid,))
         connection.execute(
-            "INSERT INTO learning_goals(id,space_id,prompt,rationale,criteria_refs,boundary_ids,status,created_at,updated_at) VALUES ('deferred','s','旅行方向','context','[]','[]','deferred','5','5')")
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,status,created_at,updated_at) VALUES ('deferred','s','旅行方向','context','[]','deferred','5','5')")
         connection.execute(
-            "INSERT INTO learning_goals(id,space_id,prompt,rationale,criteria_refs,boundary_ids,created_at,updated_at) VALUES ('g','s','Learn Alice plans','context','[]','[]','2','2')")
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,created_at,updated_at) VALUES ('g','s','Learn Alice plans','context','[]','2','2')")
     generic = store.context_bundle("s")
     assert [item.id for item in generic.guidance.items] == ["g"]
     assert store.context_bundle("s").version == generic.version

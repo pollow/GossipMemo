@@ -358,13 +358,21 @@ class ExtractedCoverageAudit(BaseModel):
 
 
 class LearningGoalUpsert(BaseModel):
+    """One learning direction, carried entirely in natural language.
+
+    `rationale` says which direction this is and why it is worth knowing;
+    `prompt` is one suggested wording.  `entry_ids` points back at the
+    coverage entries the direction grew out of and is best effort only:
+    storage drops IDs it cannot resolve and still stores the goal, so a
+    direction that files nowhere is never lost.  Focus is resolved by
+    storage from the goal's own text, so the model never picks a person or
+    relationship ID.
+    """
+
     goal_id: str | None = None
     prompt: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
-    criteria_refs: list[str] = Field(default_factory=list)
-    boundary_ids: list[str] = Field(default_factory=list)
-    focus_kind: Literal["user", "person", "relationship"] = "user"
-    focus_id: str | None = None
+    entry_ids: list[str] = Field(default_factory=list)
 
 
 class LearningGoalTransition(BaseModel):
@@ -379,14 +387,11 @@ class GoalPlanningResult(BaseModel):
 
 
 class LearningGoalCandidate(BaseModel):
-    """A non-mutating proposal used while planning cannot fit in one request."""
+    """A non-mutating proposal from one root's planning request."""
 
     prompt: str = Field(min_length=1)
     rationale: str = Field(min_length=1)
-    criteria_refs: list[str] = Field(default_factory=list)
-    boundary_ids: list[str] = Field(default_factory=list)
-    focus_kind: Literal["user", "person", "relationship"] = "user"
-    focus_id: str | None = None
+    entry_ids: list[str] = Field(default_factory=list)
 
 
 class GoalPlanningCandidates(BaseModel):
@@ -394,12 +399,17 @@ class GoalPlanningCandidates(BaseModel):
 
 
 class LearningGoalView(BaseModel):
+    """A stored learning direction.
+
+    `focus_kind`/`focus_id` are derived by storage from the goal's own text
+    through deterministic alias matching, never supplied by the model.
+    """
+
     id: str
     space_id: str
     prompt: str
     rationale: str
-    criteria_refs: list[str] = Field(default_factory=list)
-    boundary_ids: list[str] = Field(default_factory=list)
+    entry_ids: list[str] = Field(default_factory=list)
     focus_kind: Literal["user", "person", "relationship"] = "user"
     focus_id: str | None = None
     status: LearningGoalStatus

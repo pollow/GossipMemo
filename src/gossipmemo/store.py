@@ -189,7 +189,7 @@ class WorldStore(Protocol):
                              audit: ExtractedCoverageAudit, evidence_ids: set[str], context_entry_ids: set[str]) -> bool: ...
 
     def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView],
-                                                            list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None: ...
+                                                            list[LearningGoalView], list[LearningGoalView]] | None: ...
 
     def apply_goal_planning(self, space_id: str, expected_revision: int,
                             result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
@@ -1883,7 +1883,7 @@ class SqliteWorldStore:
             return True
 
     def _learning_goal_view(self, row: sqlite3.Row) -> LearningGoalView:
-        return LearningGoalView(id=row["id"], space_id=row["space_id"], prompt=row["prompt"], rationale=row["rationale"], criteria_refs=_loads(row["criteria_refs"], []), boundary_ids=_loads(row["boundary_ids"], []), focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"], status_reason=row["status_reason"], created_at=row["created_at"], updated_at=row["updated_at"])
+        return LearningGoalView(id=row["id"], space_id=row["space_id"], prompt=row["prompt"], rationale=row["rationale"], entry_ids=_loads(row["entry_ids"], []), focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"], status_reason=row["status_reason"], created_at=row["created_at"], updated_at=row["updated_at"])
 
     def _coverage_revision(self, connection: sqlite3.Connection, space_id: str) -> int | None:
         """Sum every root revision as one space-level planning CAS token.
@@ -1898,36 +1898,63 @@ class SqliteWorldStore:
         ).fetchone()
         return int(row["revision"]) if row and row["roots"] else None
 
-    def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView], list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None:
+    def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView], list[LearningGoalView], list[LearningGoalView]] | None:
+        """Coverage entries and goal lifecycles -- the planner's whole world.
+
+        Memories are the auditor's input, entries are the planner's: a
+        planning pass reads only what coverage already summarized, plus the
+        goals it may transition.
+        """
         with self._connect() as connection:
             revision = self._coverage_revision(connection, space_id)
             if revision is None:
                 return None
-            hypotheses = connection.execute(
-                "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)).fetchall()
             goals = connection.execute(
                 "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
-            return revision, self._coverage_entries(connection, space_id), [self._hypothesis_view(connection, item) for item in hypotheses], [self._learning_goal_view(item) for item in goals if item["status"] == "open"], [self._learning_goal_view(item) for item in goals if item["status"] != "open"][:20]
+            return revision, self._coverage_entries(connection, space_id), [self._learning_goal_view(item) for item in goals if item["status"] == "open"], [self._learning_goal_view(item) for item in goals if item["status"] != "open"][:20]
+
+    def _goal_focus(
+        self, connection: sqlite3.Connection, space_id: str, text: str
+    ) -> tuple[str, str | None]:
+        """Derive a goal's focus from its own words, never from the model.
+
+        A person-focused goal used to require the planner to produce a valid
+        person ID, which it was never given and so could never do. The
+        anchor is the person the goal already names: deterministic alias
+        matching resolves exactly-one-person text to that person, and
+        anything else -- nobody named, or several people -- stays a
+        user-focused goal.
+        """
+        people = self._match_people(connection, space_id, text)
+        return ("person", people[0].id) if len(people) == 1 else ("user", None)
 
     def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool:
+        """Commit one planning pass; a goal that files nowhere is still kept.
+
+        `entry_ids` is best effort: an ID that does not name an active entry
+        in this space is dropped, and the goal is stored regardless. Nothing
+        a planner proposes is discarded for failing to cite something.
+        """
         with self._connect() as connection:
             if self._coverage_revision(connection, space_id) != expected_revision:
                 return False
             now = _now()
+            known_entry_ids = {item.id for item in self._coverage_entries(connection, space_id)}
             for item in result.upserts:
-                if item.focus_kind != "user":
-                    table = "people" if item.focus_kind == "person" else "relationships"
-                    if not item.focus_id or not connection.execute(f"SELECT 1 FROM {table} WHERE id = ? AND space_id = ?", (item.focus_id, space_id)).fetchone():
-                        continue
+                entry_ids = _json(
+                    [ref for ref in dict.fromkeys(item.entry_ids) if ref in known_entry_ids])
+                focus_kind, focus_id = self._goal_focus(
+                    connection, space_id, item.prompt + "\n" + item.rationale)
                 if item.goal_id and item.goal_id in context_goal_ids:
-                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, criteria_refs = ?, boundary_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
-                        item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, item.goal_id, space_id))
+                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, entry_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
+                        item.prompt, item.rationale, entry_ids, focus_kind, focus_id, now, item.goal_id, space_id))
                 elif not item.goal_id:
-                    duplicate = connection.execute("SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND criteria_refs = ? AND boundary_ids = ? AND status = 'open'", (
-                        space_id, item.prompt, _json(item.criteria_refs), _json(item.boundary_ids))).fetchone()
+                    duplicate = connection.execute(
+                        "SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND status = 'open'",
+                        (space_id, item.prompt)).fetchone()
                     if not duplicate:
-                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, criteria_refs, boundary_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id(
-                            "goal"), space_id, item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, now))
+                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id(
+                            "goal"), space_id, item.prompt, item.rationale, entry_ids, focus_kind, focus_id, now, now))
             for item in result.transitions:
                 if item.goal_id in context_goal_ids:
                     connection.execute("UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
@@ -2095,44 +2122,50 @@ class SqliteWorldStore:
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]:
         """Resolve explicit aliases without creating people or invoking an LLM."""
-        folded = unicodedata.normalize("NFKC", text).casefold()
         with self._connect() as connection:
-            aliases = connection.execute(
-                """SELECT a.normalized_value, a.value, a.person_id, p.*
-                   FROM person_aliases a JOIN people p ON p.id = a.person_id
-                   WHERE a.space_id = ? AND p.status = 'active'""", (space_id,)
-            ).fetchall()
-            by_alias: dict[str, set[str]] = {}
-            for row in aliases:
-                by_alias.setdefault(unicodedata.normalize(
-                    "NFKC", row["normalized_value"]).casefold(), set()).add(row["person_id"])
+            return self._match_people(connection, space_id, text)
 
-            candidates: list[tuple[int, int, str]] = []
-            for alias, person_ids in by_alias.items():
-                if not alias or len(person_ids) != 1:
-                    continue  # An ambiguous alias is deliberately ignored.
-                escaped = re.escape(alias).replace(r"\ ", r"\s+")
-                latin = bool(re.search(r"[a-z]", alias))
-                boundary_left = r"(?<![a-z])" if latin else ""
-                boundary_right = r"(?![a-z])" if latin else ""
-                for match in re.finditer(boundary_left + escaped + boundary_right, folded):
-                    candidates.append((len(alias), match.start(), next(iter(person_ids))))
-            selected: list[tuple[int, str]] = []
-            occupied: list[tuple[int, int]] = []
-            for length, start, person_id in sorted(candidates, key=lambda item: (-item[0], item[1])):
-                end = start + length
-                if any(start < right and end > left for left, right in occupied):
-                    continue
-                occupied.append((start, end))
-                selected.append((start, person_id))
-            people: list[PersonView] = []
-            seen: set[str] = set()
-            rows_by_id = {row["id"]: row for row in aliases}
-            for _, person_id in sorted(selected):
-                if person_id not in seen:
-                    people.append(self._person_view(connection, rows_by_id[person_id]))
-                    seen.add(person_id)
-            return people
+    def _match_people(
+        self, connection: sqlite3.Connection, space_id: str, text: str
+    ) -> list[PersonView]:
+        """Alias matching on a caller's connection, so a writer can reuse it."""
+        folded = unicodedata.normalize("NFKC", text).casefold()
+        aliases = connection.execute(
+            """SELECT a.normalized_value, a.value, a.person_id, p.*
+               FROM person_aliases a JOIN people p ON p.id = a.person_id
+               WHERE a.space_id = ? AND p.status = 'active'""", (space_id,)
+        ).fetchall()
+        by_alias: dict[str, set[str]] = {}
+        for row in aliases:
+            by_alias.setdefault(unicodedata.normalize(
+                "NFKC", row["normalized_value"]).casefold(), set()).add(row["person_id"])
+
+        candidates: list[tuple[int, int, str]] = []
+        for alias, person_ids in by_alias.items():
+            if not alias or len(person_ids) != 1:
+                continue  # An ambiguous alias is deliberately ignored.
+            escaped = re.escape(alias).replace(r"\ ", r"\s+")
+            latin = bool(re.search(r"[a-z]", alias))
+            boundary_left = r"(?<![a-z])" if latin else ""
+            boundary_right = r"(?![a-z])" if latin else ""
+            for match in re.finditer(boundary_left + escaped + boundary_right, folded):
+                candidates.append((len(alias), match.start(), next(iter(person_ids))))
+        selected: list[tuple[int, str]] = []
+        occupied: list[tuple[int, int]] = []
+        for length, start, person_id in sorted(candidates, key=lambda item: (-item[0], item[1])):
+            end = start + length
+            if any(start < right and end > left for left, right in occupied):
+                continue
+            occupied.append((start, end))
+            selected.append((start, person_id))
+        people: list[PersonView] = []
+        seen: set[str] = set()
+        rows_by_id = {row["id"]: row for row in aliases}
+        for _, person_id in sorted(selected):
+            if person_id not in seen:
+                people.append(self._person_view(connection, rows_by_id[person_id]))
+                seen.add(person_id)
+        return people
 
     def merge_person(
         self, space_id: str, source_person_id: str, target_person_id: str

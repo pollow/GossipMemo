@@ -4,8 +4,8 @@ Each reasoner now owns its own system prompt(s) and user-prompt builder(s)
 (see `gossipmemo/reasoners/*.py`). What stays here is genuinely cross-
 reasoner: the JSON-schema instruction helper, compact evidence/hypothesis
 rendering, the owner-reasoning family shared by person/relationship/
-user_model, the per-root viewpoints the coverage audit fans out over, and the
-coverage rubric/method shared by all three goal-planning prompts.
+user_model, the per-root viewpoints both coverage reasoners fan out over, and
+the blind-spot cues and method scan that only goal planning reads.
 """
 
 from __future__ import annotations
@@ -113,34 +113,15 @@ def actions_stage_prompt() -> str:
     return "<stage>Review the projection above. Return only explicit inferred-memory and hypothesis actions. Omission is always no-op. IDs must be from supplied context.</stage>"
 
 
-# Stable root IDs deliberately have richer prompt-only facets. Stored coverage is
-# compact prose, while this readable rubric lets goal planning name meaningful
-# blind spots without turning sensitive life material into a normalized schema.
-COVERAGE_RUBRIC = """M1 life_chapters — Which eras, beginnings, moves, endings, and chapters are legible? Rich when chronology and transitions have texture; blind spots: childhood, family origin, education, work, migration, future chapters.
-M2 everyday_life — What does ordinary life, routine, home, work, care, money, and security feel like? Rich when habits and constraints have context; blind spots: class, housing, debt, caregiving, disability access.
-M3 turning_points — Which choices, accidents, losses, recoveries, and reversals changed the story? Rich when consequences and alternatives are known; blind spots: regret, repair, harm done, survival.
-M4 people_and_relationship_arcs — Which attachments, ruptures, loyalties, intimacy, and family/friend arcs matter? Rich when change and boundaries are clear; blind spots: sexuality, consent, estrangement, reconciliation.
-M5 places_and_context — Which places, communities, cultures, institutions, and historical contexts shape meaning? Rich when belonging and constraint are visible; blind spots: religion, politics, class, diaspora, taboo contexts.
-M6 lived_scenes — What concrete scenes, sensory memories, conversations, and small moments carry the story? Rich when scenes ground abstractions; blind spots: body, health, illness, substance use, private rituals.
-M7 inner_experience — How are feelings, needs, shame, guilt, secrets, fear, desire, grief, and self-protection described? Rich when the user's own meaning is present; blind spots: unspoken or explicitly private inner life.
-M8 themes_and_change — What recurring themes, tensions, growth, and contradictions span time? Rich when evidence supports change and exceptions; blind spots: envy, resentment, moral injury, forgiveness, repair.
-M9 unresolved_threads — What questions, conflicts, decisions, losses, or hopes remain open? Rich when uncertainty and next steps are named; blind spots: mortality, legacy, unfinished goodbyes.
-P1 identity_and_self_story — How does the user name self, belonging, and self-understanding? Rich when self-authored and contextual; blind spots: protected identities and labels not offered.
-P2 values_and_tradeoffs — What matters and what costs are accepted? Rich when choices reveal tensions; blind spots: morality, faith, politics, loyalty, money.
-P3 worldview_and_beliefs — What assumptions, beliefs, and sources of meaning guide interpretation? Rich when complexity and change are represented; blind spots: religion, ideology, taboos.
-P4 goals_motives_fears — What pulls the user forward or holds them back? Rich when motives and constraints are situated; blind spots: safety, status, intimacy, mortality.
-P5 reasoning_and_decisions — How does the user decide under uncertainty, conflict, or pressure? Rich when strategies and exceptions are supported; blind spots: avoidance, risk, regret.
-P6 emotional_patterns — What non-clinical emotional rhythms and coping patterns recur? Rich when grounded across contexts; blind spots: grief, shame, anger, substance-related coping. Never diagnose.
-P7 social_style_and_boundaries — How does the user connect, communicate, protect space, and repair? Rich when context and consent are clear; blind spots: conflict, attachment, intimacy.
-P8 preferences_and_routines — What tastes, practices, environments, and practical rhythms recur? Rich when stable versus situational preferences are separated; blind spots: health, money, accessibility constraints.
-P9 voice_and_expression — How does the user tell stories, joke, ask, withhold, create, or communicate? Rich when examples span settings; blind spots: silence and code-switching.
-P10 context_and_exceptions — Which roles, settings, identities, pressures, and exceptions change the pattern? Rich when it prevents overgeneralization; blind spots: home/work, safety, power, culture.
-P11 skills_and_knowledge — What has the user learned, practiced, taught, or become capable of? Rich when confidence and limits are clear; blind spots: informal knowledge and blocked opportunities."""
+# The old single-string `COVERAGE_RUBRIC` bundled two different jobs into one
+# blob every prompt got in full: "what is this root about" and "what tends to go
+# unsaid under it". Both reasoners now fan out over one root at a time, so each
+# is a per-root dict and each side gets only its own half -- the auditor gets the
+# viewpoint (it summarizes what the evidence supports), the planner gets the
+# viewpoint plus the blind-spot cues (naming what is missing is its work).
 
-# One short viewpoint line per coverage root, for the per-root audit request.
-# The audit only summarizes what the evidence supports, so it deliberately does
-# not get the rubric's "blind spots" cues: naming what is missing is the
-# planner's work, not the auditor's.
+# One short viewpoint line per coverage root, shared by the per-root audit and
+# planning requests.
 COVERAGE_ROOT_VIEWPOINTS: dict[str, str] = {
     "M1": "Which eras, beginnings, moves, endings, and chapters are legible?",
     "M2": "What do ordinary life, routine, home, work, care, money, and security look like?",
@@ -162,6 +143,33 @@ COVERAGE_ROOT_VIEWPOINTS: dict[str, str] = {
     "P9": "How does the user tell stories, joke, ask, withhold, create, or communicate?",
     "P10": "Which roles, settings, identities, pressures, and exceptions change the pattern?",
     "P11": "What has the user learned, practiced, taught, or become capable of?",
+}
+
+# Areas that stay unsaid under each root unless something invites them. These
+# are planning cues, not a ban list and not a questionnaire: an area named here
+# is a direction worth holding open, and whether, when, and how to raise any of
+# it is the consuming agent's call, not the planner's.
+COVERAGE_ROOT_BLIND_SPOTS: dict[str, str] = {
+    "M1": "childhood, family origin, education, work, migration, chapters still ahead",
+    "M2": "class, housing, debt, caregiving, accessibility",
+    "M3": "regret, repair, harm done, survival",
+    "M4": "sexuality, consent, estrangement, reconciliation",
+    "M5": "religion, politics, class, diaspora, contexts treated as taboo",
+    "M6": "body, health, illness, substance use, private rituals",
+    "M7": "shame, guilt, secrets, inner life left unspoken",
+    "M8": "envy, resentment, moral injury, forgiveness, repair",
+    "M9": "mortality, legacy, unfinished goodbyes",
+    "P1": "identities and labels not yet offered",
+    "P2": "morality, faith, politics, loyalty, money",
+    "P3": "religion, ideology, taboos",
+    "P4": "safety, status, intimacy, mortality",
+    "P5": "avoidance, risk, regret",
+    "P6": "grief, shame, anger, substance-related coping",
+    "P7": "conflict, attachment, intimacy",
+    "P8": "health, money, accessibility constraints",
+    "P9": "silence and code-switching",
+    "P10": "home versus work, safety, power, culture",
+    "P11": "informal knowledge and opportunities that were blocked",
 }
 
 # Method cues are deliberately non-clinical: they guide respectful inquiry and
@@ -188,8 +196,8 @@ is not."""
 
 __all__ = [
     "COVERAGE_METHOD",
+    "COVERAGE_ROOT_BLIND_SPOTS",
     "COVERAGE_ROOT_VIEWPOINTS",
-    "COVERAGE_RUBRIC",
     "actions_stage_prompt",
     "owner_evidence_digest_prompt",
     "owner_reasoning_prefix",

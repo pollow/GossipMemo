@@ -430,14 +430,16 @@ LearningGoal 属于 Space/current user，即使 `focus_kind` 指向 Person 或 R
 
 | 字段 | 含义 |
 | --- | --- |
-| `prompt` | chat agent 可选择如何转化为对话的了解方向 |
-| `rationale` | 为什么该方向可能有价值 |
-| `criteria_refs` / `boundary_ids` | 旧的 coverage 引用字段，正在迁移为可选的 coverage entry 引用 |
-| `focus_kind` / `focus_id` | `user`，或同 Space 的 Person/Relationship |
+| `prompt` | chat agent 可选择如何转化为对话的一个建议措辞 |
+| `rationale` | 这是哪个方向、为什么值得了解 |
+| `entry_ids` | 该方向所出自的 coverage entry；best-effort，解析不了的 id 被丢弃而 goal 保留 |
+| `focus_kind` / `focus_id` | `user`，或同 Space 的 Person；由 store 用确定性别名匹配从 goal 文本推导，模型不填 |
 | `status` | `open \| partial \| answered \| deferred \| retired` |
 
-Goal planning 使用所有 coverage root revision 之和做 optimistic compare-and-swap。Unknown/private 不自动
-产生 Goal；deferred 不进入 chat guidance。创建 Goal 本身不提高 coverage。
+Goal planning 按 root 扇出读 coverage entries（不读 Memory、不读 hypothesis），并用所有
+coverage root revision 之和做 optimistic compare-and-swap。私密方向不是天然禁区：planner
+忠实维护包括敏感内容在内的未知方向，**现在是否询问、怎样询问由消费 agent 决定**。
+deferred 不进入 chat guidance。创建 Goal 本身不提高 coverage。
 
 ## 9. Projection 与 canonical data
 

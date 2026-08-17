@@ -227,8 +227,8 @@ none of them reads another's card.
 | **Relationship** | that Relationship is stale | `facets`, `closeness`, `tone`, `status`, `summary`, plus inferred Memories and Hypotheses |
 | **UserModel** | the space's UserModel is stale | The space-level user `profile_card`, plus Hypotheses about the user |
 | **Continuity** | ~20 new messages | A short rolling continuity text, the related Person IDs, and the last covered message |
-| **Coverage audit** | new Memories since the last audit | The CoverageMap: per-criterion coverage levels, open/closed knowledge boundaries, life periods, relationship arcs, behavioral contexts |
-| **Learning goals** | after each coverage audit | LearningGoals: an askable prompt, its rationale, the boundaries it would close, and its status |
+| **Coverage audit** | new Memories since the last root's last audit | Coverage entries: one short summary per path under each of the twenty roots, of how well that area is understood |
+| **Learning goals** | after each coverage audit | LearningGoals: up to three directions per root, reconciled into one plan; each is an askable prompt, why it is worth understanding, and its status |
 
 The first five run as one ordered pipeline per space — Person, Relationship,
 UserModel, Coverage, LearningGoals — so a card is refreshed before anything

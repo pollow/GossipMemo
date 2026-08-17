@@ -19,8 +19,7 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.transport import ChatCompletionRequest
 from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
-    ContinuityView, CoverageEntryView, HypothesisView, LearningGoalView,
-    MemoryView, ModelMessage,
+    ContinuityView, CoverageEntryView, MemoryView, ModelMessage,
 )
 from gossipmemo.reasoners.continuity import _reason_continuity
 from gossipmemo.reasoners.coverage import _audit_coverage
@@ -31,12 +30,8 @@ def _memory(identifier: str, content: str) -> MemoryView:
     return MemoryView(id=identifier, content=content, kind="fact", basis="stated", status="active", created_at="1")
 
 
-def _entry(identifier: str, content: str) -> CoverageEntryView:
-    return CoverageEntryView(id=identifier, space_id="s", root="M1", content=content, created_at="1", updated_at="1")
-
-
-def _hypothesis(identifier: str, content: str) -> HypothesisView:
-    return HypothesisView(id=identifier, space_id="s", owner_kind="user", content=content, kind="fact", confidence="low", status="open", created_at="1", updated_at="1")
+def _entry(identifier: str, content: str, *, root: str = "M1", path: str = "") -> CoverageEntryView:
+    return CoverageEntryView(id=identifier, space_id="s", root=root, path=path, content=content, created_at="1", updated_at="1")
 
 
 def _message(identifier: str, content: str) -> ModelMessage:
@@ -90,7 +85,14 @@ def test_coverage_cjk_backlog_audits_one_budget_sized_chunk() -> None:
                <= budget.usable_input_tokens for item in calls)
 
 
-def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
+def test_goal_planning_fans_out_per_root_and_reconciles_once() -> None:
+    """Every root gets its own request, and only one pass may mutate goals.
+
+    Fan-out is the normal path here, not an overflow path: M2 has one small
+    entry and still gets a request of its own. Oversized entries only add
+    chunks *within* a root, and the root's overview entry rides along in
+    each of them.
+    """
     calls: list[dict] = []
     budget = ContextBudget(7000, 400, 200)
 
@@ -98,7 +100,8 @@ def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
         payload = json.loads(request.content)
         calls.append(payload)
         prompt = str(payload["messages"])
-        body = {"candidates": []} if "Propose optional candidate invitations only" in prompt else {
+        body = {"candidates": [{"prompt": "问", "rationale": "因"}]} if (
+            "Propose optional candidate directions only" in prompt) else {
             "upserts": [], "transitions": []}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
@@ -106,12 +109,19 @@ def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
-            await _plan_learning_goals(adapter, [], [_hypothesis(f"h{i}", "假设" * 2500) for i in range(4)], [], [])
+            entries = [
+                _entry("m1-overview", "已知章节：求学、迁移。"),
+                *(_entry(f"m1-{i}", "证据" * 2500, path=f"阶段{i}") for i in range(3)),
+                _entry("m2-overview", "日常生活的轮廓已知。", root="M2"),
+            ]
+            await _plan_learning_goals(adapter, entries, [], [])
     asyncio.run(run())
-    candidates = [
-        item for item in calls if "Propose optional candidate invitations only" in str(item)]
-    finals = [item for item in calls if "<candidates>" in str(item)]
-    assert len(candidates) > 1 and len(finals) == 1
+    prompts = [" ".join(message["content"] for message in item["messages"]) for item in calls]
+    first_root = [item for item in prompts if "id='M1'" in item]
+    second_root = [item for item in prompts if "id='M2'" in item]
+    finals = [item for item in prompts if "<candidates>" in item]
+    assert len(first_root) > 1 and len(second_root) == 1 and len(finals) == 1
+    assert all("已知章节：求学、迁移。" in item for item in first_root)
     assert all(budget.estimate_request(ChatCompletionRequest.model_validate(item))
                <= budget.usable_input_tokens for item in calls)
 

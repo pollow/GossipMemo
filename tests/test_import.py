@@ -156,9 +156,12 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 return json.dumps({
                     "additions": [{"path": "", "content": "A preference is known."}]
                 })
-            if "Propose optional candidate invitations only" in combined:
-                return json.dumps({"candidates": []})
-            if "Plan a very small number of optional, user-owned" in combined:
+            if "Propose optional candidate directions only" in combined:
+                return json.dumps({"candidates": [
+                    {"prompt": "Would you like to say more about that?",
+                     "rationale": "One optional direction"}
+                ]})
+            if "<candidates>" in combined:
                 self.goal_plans += 1
                 return json.dumps({})
             assert "The user likes tea." in combined

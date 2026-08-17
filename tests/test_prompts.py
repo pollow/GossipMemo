@@ -8,7 +8,10 @@ from gossipmemo.reasoners import (
     CONTINUITY_SYSTEM_PROMPT,
     extraction_prompt,
     coverage_audit_prompt,
+    goal_candidate_prompt,
+    goal_reconciliation_prompt,
     COVERAGE_AUDIT_SYSTEM_PROMPT,
+    GOAL_PLANNING_SYSTEM_PROMPT,
 )
 
 
@@ -170,6 +173,44 @@ def test_coverage_audit_prompt_summarizes_one_root_without_hunting_gaps():
     assert "empty path" in prompt and "superseded" in prompt
     assert "only one memory supports" in prompt
     assert "never write what is\nmissing" in COVERAGE_AUDIT_SYSTEM_PROMPT
+
+
+def test_goal_candidate_prompt_carries_one_root_and_four_expansions():
+    prompt = goal_candidate_prompt("M4", [], [])
+    assert "M4" in prompt and "people_and_relationship_arcs" in prompt
+    # The rubric's blind-spot cues moved here from the audit: they are what
+    # a sideways expansion needs, and the auditor no longer hunts gaps.
+    assert "estrangement, reconciliation" in prompt
+    assert "deeper into one entry" in prompt and "sideways to a neighbouring" in prompt
+    assert "forward in time along a thread" in prompt and "a person an entry names" in prompt
+    assert "never withhold a direction for having nothing to cite" in " ".join(prompt.split())
+
+
+def test_goal_planning_leaves_asking_now_to_the_consuming_agent():
+    """The planner records directions; the agent decides what to raise.
+
+    The old prompt called private areas "never automatic targets" and told
+    the planner not to equate a blind spot with a question to ask now --
+    that is the consuming agent's judgement, and taking it here is what
+    censored the plan down to nothing. What stays is the standing limit:
+    no diagnosis, no assumed happy ending, no third-party dossier.
+    """
+    text = " ".join(GOAL_PLANNING_SYSTEM_PROMPT.split())
+    assert "never automatic targets" not in text
+    assert "question to ask now" not in text
+    assert "are not off limits" in text
+    assert "the consuming agent's decision in the moment, not this planner's" in text
+    assert "never a standalone information-gathering task about a third party" in text
+    assert "test, probe, or secretly verify anyone" in text
+    assert "Do not diagnose" in text and "reconciliation, disclosure, or repair" in text
+
+
+def test_goal_reconciliation_is_the_only_lifecycle_pass_and_keeps_breadth():
+    candidates = goal_candidate_prompt("M1", [], [])
+    final = goal_reconciliation_prompt([], [], [])
+    assert "do not transition, retire, defer, update" in candidates
+    assert "only pass that may transition a goal's lifecycle" in final
+    assert "Keep breadth" in final
 
 
 def test_query_synthesis_does_not_treat_unmerged_people_as_distinct_evidence():

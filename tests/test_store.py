@@ -1340,18 +1340,21 @@ def test_coverage_entries_accumulate_per_root_and_feed_goal_planning(store):
     assert next_root.root == "M2"
     assert [memory.id for memory in next_memories] == [memory_id]
 
-    revision, planning_entries, _, _, _ = store.learning_goal_context("personal")
+    revision, planning_entries, _, _ = store.learning_goal_context("personal")
     assert [(item.root, item.path, item.evidence_memory_ids) for item in planning_entries] == [
         ("M1", "", [memory_id])]
     store.apply_goal_planning(
         "personal", revision,
         GoalPlanningResult(upserts=[LearningGoalUpsert(
             prompt="Would you like to share a coastal memory, or skip it?",
-            rationale="Optional origin context")]),
+            rationale="Optional origin context",
+            entry_ids=[planning_entries[0].id, "entry_invented"])]),
         set(),
     )
-    _, _, _, goals, _ = store.learning_goal_context("personal")
-    assert len(goals) == 1
+    _, _, goals, _ = store.learning_goal_context("personal")
+    # An unresolvable ref is dropped; the goal it came with is never lost.
+    assert [(goal.entry_ids, goal.focus_kind) for goal in goals] == [
+        ([planning_entries[0].id], "user")]
 
 
 def test_coverage_entries_are_modified_and_superseded_by_a_later_audit(store):
@@ -1454,9 +1457,38 @@ def test_coverage_entry_evidence_drops_retracted_memories(store):
 
 def test_goal_planning_uses_coverage_revision_cas(store):
     store.ensure_space("personal")
-    revision, _, _, _, _ = store.learning_goal_context("personal")
+    revision, _, _, _ = store.learning_goal_context("personal")
     assert not store.apply_goal_planning(
         "personal", revision + 1, GoalPlanningResult(), set())
+
+
+def test_goal_focus_is_resolved_from_the_goal_text_by_alias_matching(store):
+    """A person-focused goal is anchored by the person its own words name.
+
+    The planner never sees a person ID, so a goal that names exactly one
+    known person becomes that person's goal here; naming two keeps it the
+    user's, since the direction is then about the user's own life.
+    """
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="Alice and Bob shared a flat with me.",
+                                        people=["Alice", "Bob"]))
+    alice = next(person.id for person in store.match_people_in_text("personal", "Alice"))
+    revision, _, _, _ = store.learning_goal_context("personal")
+    assert store.apply_goal_planning(
+        "personal", revision,
+        GoalPlanningResult(upserts=[
+            LearningGoalUpsert(prompt="How did you and Alice first meet?",
+                               rationale="Alice recurs but the start of the friendship is blank"),
+            LearningGoalUpsert(prompt="What was that shared flat like?",
+                               rationale="Alice and Bob both appear, the home itself does not"),
+        ]),
+        set(),
+    )
+    _, _, goals, _ = store.learning_goal_context("personal")
+    assert {goal.prompt: (goal.focus_kind, goal.focus_id) for goal in goals} == {
+        "How did you and Alice first meet?": ("person", alice),
+        "What was that shared flat like?": ("user", None),
+    }
 
 
 def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):

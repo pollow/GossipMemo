@@ -19,7 +19,6 @@ from .learning_goals import (
     build_learning_goals_reasoner,
     goal_candidate_prompt,
     goal_candidate_reduction_prompt,
-    goal_planning_prompt,
     goal_reconciliation_prompt,
 )
 from .person import PERSON_REASONING_SYSTEM_PROMPT, build_person_reasoner
@@ -55,6 +54,5 @@ __all__ = [
     "extraction_prompt",
     "goal_candidate_prompt",
     "goal_candidate_reduction_prompt",
-    "goal_planning_prompt",
     "goal_reconciliation_prompt",
 ]

@@ -1,14 +1,20 @@
 """Learning-goal planning reasoner and its prompts.
 
-Like coverage, learning-goal planning is an accumulator over hypotheses and
-existing goals, so candidate generation paginates through
-`chunking.greedy_chunks` the same way `reasoners.coverage` does. The final
-reconciliation step is different: it must mutate goal lifecycles from a
-*single* candidate list, so an oversized reconciliation request can only be
-shrunk by compressing candidates round by round -- the same shape as the
-owner family's evidence digest, expressed through the same
-`chunking.reduce_until_fits` helper rather than a second hand-rolled
-round loop.
+Planning reads coverage entries and nothing else: Memories are the auditor's
+input, and by the time planning runs, everything the auditor understood is
+already in the entries. That boundary is what makes fan-out affordable --
+one request per root, carrying that root's overview entry plus its children,
+is a page of prose rather than hundreds of Memories.
+
+Fanning out is the normal path, not an overflow path. A single global pass
+saw every root at once and answered with two or three directions for the
+whole life; a request that can only see one root answers for that root, and
+breadth comes from there being twenty of them. The passes are therefore
+always two-stage: per-root candidates, then one reconciliation that is the
+only lifecycle-mutating request. Reconciliation reads candidates and goals
+only, so when even that does not fit, candidates are compressed round by
+round through `chunking.reduce_until_fits` -- the same shape as the owner
+family's evidence digest.
 """
 
 from __future__ import annotations
@@ -18,201 +24,175 @@ from functools import partial
 
 from ..chunking import greedy_chunks, reduce_until_fits
 from ..models import (
+    COVERAGE_CRITERIA,
+    COVERAGE_ROOTS,
     CoverageEntryView,
     GoalPlanningCandidates,
     GoalPlanningResult,
-    HypothesisView,
     LearningGoalCandidate,
     LearningGoalView,
 )
 from ..priority import current_call_label, current_call_tier
-from ..prompts import COVERAGE_METHOD, COVERAGE_RUBRIC, _json
+from ..prompts import (
+    COVERAGE_METHOD,
+    COVERAGE_ROOT_BLIND_SPOTS,
+    COVERAGE_ROOT_VIEWPOINTS,
+    _json,
+)
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, LlmTransport, structured
 from .base import DescriptorReasoner
 from .coverage import _structured_request
 
-GOAL_PLANNING_SYSTEM_PROMPT = """Plan a very small number of optional, user-owned
-learning invitations from updated coverage entries. Return only the supplied JSON
-schema. Unknown, intimate, traumatic, stigmatized, or otherwise private areas are never
-automatic targets: respect explicit readiness, consent, defer, and do-not-pursue
-signals. Prefer gentle, specific questions with an easy opt-out; never pressure,
-diagnose, or imply that disclosure is owed. Omission is no-op: only explicitly
-transition an existing supplied goal when its lifecycle changes."""
+GOAL_PLANNING_SYSTEM_PROMPT = """Plan optional directions in which this user's memoir
+and persona could be understood better, reading summaries of what is already
+understood. Return only the supplied JSON schema. A direction is natural language: what
+it is, why it is worth understanding, and one suggested wording. Private, intimate,
+painful, and stigmatized areas are not off limits -- an unlit part of a life is still
+part of it, and recording a direction is not asking about it. Whether to raise one now,
+how to word it, and how to keep that exchange safe is the consuming agent's decision in
+the moment, not this planner's. A direction may be about a friend, but it belongs to the
+user's own life, relationships, or memoir: never a standalone information-gathering task
+about a third party, and never a suggestion that the user test, probe, or secretly
+verify anyone. Do not diagnose, and do not assume that reconciliation, disclosure, or
+repair is the right ending of any thread. Omission is no-op: only explicitly transition
+an existing supplied goal when its lifecycle changes."""
 
 
-def goal_planning_prompt(
-    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
-    open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
-) -> str:
-    return (
-        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<coverage-entries>\n" + _json(list(entries)) + "\n</coverage-entries>\n"
-        "<open-hypotheses>\n"
-        + _json([item.model_dump(mode="json") for item in hypotheses])
-        + "\n</open-hypotheses>\n<open-goals>\n"
-        + _json([item.model_dump(mode="json") for item in open_goals])
-        + "\n</open-goals>\n<recent-closed-goals>\n"
-        + _json([item.model_dump(mode="json") for item in recent_closed_goals])
-        + "\n</recent-closed-goals>\n"
-        "Plan only after the map is caught up. Use trauma-informed partnership, choice, and an easy decline; "
-        "do not equate a blind spot with a question to ask now. Goals can focus a person or relationship but remain user-owned."
-    )
+def _entry_lines(entries: Sequence[CoverageEntryView]) -> str:
+    return "\n".join(
+        f"- id={item.id!r} path={item.path!r} content={item.content!r}" for item in entries
+    ) or "- (none)"
+
+
+def _goal_lines(goals: Sequence[LearningGoalView]) -> str:
+    return "\n".join(
+        f"- id={item.id!r} status={item.status!r} prompt={item.prompt!r} "
+        f"rationale={item.rationale!r}" for item in goals
+    ) or "- (none)"
 
 
 def goal_candidate_prompt(
-    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
-    open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
+    root: str, entries: Sequence[CoverageEntryView], open_goals: Sequence[LearningGoalView],
 ) -> str:
+    """One root's entries and the four directions a candidate may expand in."""
     return (
-        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<coverage-entries>\n" + _json(list(entries)) + "\n</coverage-entries>\n"
-        "<open-hypotheses>\n" + _json(hypotheses) + "\n</open-hypotheses>\n"
-        "<open-goals>\n" + _json(open_goals) + "\n</open-goals>\n"
-        "<recent-closed-goals>\n" + _json(recent_closed_goals) + "\n</recent-closed-goals>\n"
-        "Propose optional candidate invitations only. Candidates are non-mutating: do not "
-        "transition, retire, defer, update, or otherwise change any goal lifecycle. Respect "
-        "consent, privacy, and easy decline."
+        f"<coverage-root id={root!r} facet={COVERAGE_CRITERIA.get(root, '')!r}>\n"
+        + COVERAGE_ROOT_VIEWPOINTS.get(root, "") + "\nAreas that stay unsaid under this "
+        "root unless something invites them: " + COVERAGE_ROOT_BLIND_SPOTS.get(root, "")
+        + "\n</coverage-root>\n<method>\n" + COVERAGE_METHOD + "\n</method>\n"
+        "<entries>\n" + _entry_lines(entries) + "\n</entries>\n"
+        "<open-goals comparison-only=\"true\">\n" + _goal_lines(open_goals) + "\n</open-goals>\n"
+        "These entries are everything that is understood about this root; the entry with "
+        "an empty path is its overview. Propose optional candidate directions only, at "
+        "most three, and none at all when this root has nothing worth opening. Expand in "
+        "four ways: deeper into one entry, at something it states but never unfolds; "
+        "sideways to a neighbouring or missing sibling, a stage or place or period the "
+        "entries step over; forward in time along a thread the entries already contain, "
+        "at what became of it -- a concrete hook like that usually yields the best "
+        "direction; and along a person an entry names, where the direction is that "
+        "person's part in the user's own life. Write each direction in the language of "
+        "the entries. Cite in `entry_ids` the entries a direction grew out of when you "
+        "can, leave it empty rather than guessing, and never withhold a direction for "
+        "having nothing to cite. Do not repeat a direction an open goal already covers. "
+        "Candidates are non-mutating: do not transition, retire, defer, update, or "
+        "otherwise change any goal lifecycle."
     )
 
 
 def goal_reconciliation_prompt(
-    entries: Sequence[CoverageEntryView], hypotheses: list[HypothesisView],
-    open_goals: list[LearningGoalView], recent_closed_goals: list[LearningGoalView],
-    candidates: list[LearningGoalCandidate],
+    candidates: Sequence[LearningGoalCandidate], open_goals: Sequence[LearningGoalView],
+    recent_closed_goals: Sequence[LearningGoalView],
 ) -> str:
+    """The one mutating pass: candidates from every root, plus goal lifecycles."""
     return (
-        goal_planning_prompt(entries, hypotheses, open_goals, recent_closed_goals)
-        + "\n<candidates>\n"
-        + _json([item.model_dump(mode="json") for item in candidates])
-        + "\n</candidates>\n"
-        "Select or reconcile these candidates into the final result. This is the only lifecycle-mutating planning pass."
+        "<candidates>\n" + _json([item.model_dump(mode="json") for item in candidates])
+        + "\n</candidates>\n<open-goals>\n" + _goal_lines(open_goals)
+        + "\n</open-goals>\n<recent-closed-goals>\n" + _goal_lines(recent_closed_goals)
+        + "\n</recent-closed-goals>\n"
+        "These candidates come from separate per-root passes, so near-duplicates across "
+        "roots are expected: merge them, and keep the ones that read as an invitation "
+        "into this user's own life rather than a survey question. Keep breadth -- several "
+        "directions on one subject are worth less than the same number spread across "
+        "different parts of the life. Reuse an existing `goal_id` to rewrite that goal, "
+        "and omit it to create a new one. This is the only pass that may transition a "
+        "goal's lifecycle: transition one when a candidate shows it is answered, "
+        "overtaken, or no longer worth holding open."
     )
 
 
-def goal_candidate_reduction_prompt(candidates: list[LearningGoalCandidate]) -> str:
+def goal_candidate_reduction_prompt(candidates: Sequence[LearningGoalCandidate]) -> str:
     return (
-        "Deduplicate and compress these non-mutating learning-goal candidates. "
-        "Return candidates only; never transition any lifecycle.\n<candidates>\n"
+        "Deduplicate and compress these non-mutating learning-goal candidates, keeping "
+        "their breadth across different parts of the life. Return candidates only; never "
+        "transition any lifecycle.\n<candidates>\n"
         + _json([item.model_dump(mode="json") for item in candidates])
         + "\n</candidates>"
     )
 
 
-def _bounded_goal_context(
-    transport: LlmTransport, entries: Sequence[CoverageEntryView], hypotheses: Sequence[HypothesisView],
-    open_goals: Sequence[LearningGoalView], closed_goals: Sequence[LearningGoalView],
-) -> tuple[list[CoverageEntryView], list[HypothesisView], list[LearningGoalView], list[LearningGoalView]]:
-    # Goal planning has different schemas and prompt scaffolding than a
-    # coverage audit, so its minimum-fit proof must use its own requests.
-    context_budget = transport.context_budget
+async def _root_candidates(
+    transport: LlmTransport, root: str, entries: Sequence[CoverageEntryView],
+    open_goals: Sequence[LearningGoalView],
+) -> list[LearningGoalCandidate]:
+    """Plan one root, splitting its child entries when they outgrow a request.
 
-    def fits(
-        candidate_entries: Sequence[CoverageEntryView], candidate_hypotheses: Sequence[HypothesisView],
-        candidate_open: Sequence[LearningGoalView], candidate_closed: Sequence[LearningGoalView],
-    ) -> bool:
-        candidate = _structured_request(
+    The overview entry rides in every chunk: it is what tells the model which
+    areas exist under this root, which is exactly what a sideways expansion
+    needs.
+    """
+    context_budget = transport.context_budget
+    overview = [item for item in entries if not item.path]
+    children = [item for item in entries if item.path]
+
+    def request_for(chunk: Sequence[CoverageEntryView]) -> ChatCompletionRequest:
+        return _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_candidate_prompt(
-                list(candidate_entries), list(candidate_hypotheses), list(
-                    candidate_open), list(candidate_closed),
-            ),
+            goal_candidate_prompt(root, [*overview, *chunk], open_goals),
             GoalPlanningCandidates,
         )
-        final = _structured_request(
-            transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_reconciliation_prompt(
-                list(candidate_entries), list(candidate_hypotheses), list(
-                    candidate_open), list(candidate_closed), [],
-            ),
-            GoalPlanningResult,
+
+    def fits(chunk: Sequence[CoverageEntryView]) -> bool:
+        return context_budget.report(context_budget.estimate_request(request_for(chunk))).fits
+
+    def check(chunk: Sequence[CoverageEntryView]) -> None:
+        context_budget.check(context_budget.estimate_request(request_for(chunk)))
+
+    candidates: list[LearningGoalCandidate] = []
+    # A root whose entries are only the overview still gets its one request.
+    for chunk in greedy_chunks(children, fits, check) or [[]]:
+        request = request_for(chunk)
+        _, result = await structured(
+            transport, request.messages, GoalPlanningCandidates,
+            tier=current_call_tier(), label=current_call_label(),
         )
-        return all(
-            context_budget.report(context_budget.estimate_request(request)).fits
-            for request in (candidate, final)
-        )
-
-    skeleton_hypotheses = [item.model_copy(
-        update={"content": "", "evidence": []}) for item in hypotheses]
-    skeleton_open = [goal.model_copy(update={"prompt": "", "rationale": ""}) for goal in open_goals]
-    skeleton_closed = [goal.model_copy(
-        update={"prompt": "", "rationale": ""}) for goal in closed_goals]
-    if fits(entries, skeleton_hypotheses, skeleton_open, skeleton_closed):
-        return list(entries), skeleton_hypotheses, skeleton_open, skeleton_closed
-
-    # Entry IDs stay listed even when their prose has to go: an ID a goal can
-    # cite is the cheapest part of an entry.
-    bounded_entries = [item.model_copy(update={"content": ""}) for item in entries]
-    if not fits(bounded_entries, [], [], []):
-        raise ValueError("learning-goal minimum skeleton exceeds context budget")
-
-    bounded_hypotheses: list[HypothesisView] = []
-    bounded_open: list[LearningGoalView] = []
-    bounded_closed: list[LearningGoalView] = []
-    # Lifecycle IDs have priority; omitted comparison state is always no-op.
-    for item in skeleton_open:
-        if fits(bounded_entries, bounded_hypotheses, [*bounded_open, item], bounded_closed):
-            bounded_open.append(item)
-    for item in skeleton_hypotheses:
-        if fits(bounded_entries, [*bounded_hypotheses, item], bounded_open, bounded_closed):
-            bounded_hypotheses.append(item)
-    for item in skeleton_closed:
-        if fits(bounded_entries, bounded_hypotheses, bounded_open, [*bounded_closed, item]):
-            bounded_closed.append(item)
-    return bounded_entries, bounded_hypotheses, bounded_open, bounded_closed
+        candidates.extend(result.candidates)
+    return candidates
 
 
 async def _plan_learning_goals(
-    transport: LlmTransport, entries: Sequence[CoverageEntryView], hypotheses: Sequence[HypothesisView],
+    transport: LlmTransport, entries: Sequence[CoverageEntryView],
     open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
 ) -> GoalPlanningResult:
     context_budget = transport.context_budget
     tier, label = current_call_tier(), current_call_label()
-    normal = _structured_request(
-        transport, GOAL_PLANNING_SYSTEM_PROMPT,
-        goal_planning_prompt(list(entries), list(hypotheses), list(
-            open_goals), list(recent_closed_goals)),
-        GoalPlanningResult,
-    )
-    if context_budget.report(context_budget.estimate_request(normal)).fits:
-        _, result = await structured(transport, normal.messages, GoalPlanningResult, tier=tier, label=label)
-        return result
-
-    bounded_entries, bounded_hypotheses, bounded_open, bounded_closed = _bounded_goal_context(
-        transport, entries, hypotheses, open_goals, recent_closed_goals,
-    )
-
-    def candidate_request(chunk: Sequence[HypothesisView]) -> ChatCompletionRequest:
-        return _structured_request(
-            transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_candidate_prompt(bounded_entries, list(chunk), bounded_open, bounded_closed),
-            GoalPlanningCandidates,
-        )
-
-    def candidate_fits(items: Sequence[HypothesisView | None]) -> bool:
-        chunk = [item for item in items if item is not None]
-        return context_budget.report(context_budget.estimate_request(candidate_request(chunk))).fits
-
-    def candidate_check(items: Sequence[HypothesisView | None]) -> None:
-        chunk = [item for item in items if item is not None]
-        context_budget.check(context_budget.estimate_request(candidate_request(chunk)))
-
     candidates: list[LearningGoalCandidate] = []
-    # Candidate passes cover every original hypothesis; only the final
-    # reconciliation uses the complete ID-preserving bounded map. A
-    # hypothesis-free planning still runs one candidate pass, driven by the
-    # sentinel `[None]` source below.
-    for chunk in greedy_chunks(list(hypotheses) or [None], candidate_fits, candidate_check):
-        request = candidate_request([item for item in chunk if item is not None])
-        _, result = await structured(transport, request.messages, GoalPlanningCandidates, tier=tier, label=label)
-        candidates.extend(result.candidates)
+    for root in COVERAGE_ROOTS:
+        # A root with no entries is skipped rather than planned from its
+        # rubric line alone: with nothing understood there yet, anything
+        # proposed would be invented from the facet name. The audit reads
+        # the same evidence for every root, so such a root fills in on its
+        # own as soon as there is evidence to summarize.
+        root_entries = [item for item in entries if item.root == root]
+        if root_entries:
+            candidates.extend(await _root_candidates(transport, root, root_entries, open_goals))
+    if not candidates and not open_goals:
+        return GoalPlanningResult()
 
     def reconciliation_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
         return _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_reconciliation_prompt(
-                bounded_entries, bounded_hypotheses, bounded_open, bounded_closed, list(items),
-            ),
+            goal_reconciliation_prompt(items, open_goals, recent_closed_goals),
             GoalPlanningResult,
         )
 
@@ -222,7 +202,7 @@ async def _plan_learning_goals(
         def reduction_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
             return _structured_request(
                 transport, GOAL_PLANNING_SYSTEM_PROMPT,
-                goal_candidate_reduction_prompt(list(items)), GoalPlanningCandidates,
+                goal_candidate_reduction_prompt(items), GoalPlanningCandidates,
             )
 
         def reduction_fits(items: Sequence[LearningGoalCandidate]) -> bool:
@@ -245,12 +225,12 @@ async def _plan_learning_goals(
                 raise ValueError("learning-goal candidate reduction made no progress")
             return reduced
 
-        def target_fits(candidates: list[LearningGoalCandidate]) -> bool:
-            request = reconciliation_request(candidates)
-            return context_budget.report(context_budget.estimate_request(request)).fits
+        def target_fits(items: list[LearningGoalCandidate]) -> bool:
+            return context_budget.report(
+                context_budget.estimate_request(reconciliation_request(items))).fits
 
-        def progress_size(candidates: list[LearningGoalCandidate]) -> int:
-            return context_budget.estimate_text(str([item.model_dump() for item in candidates]))
+        def progress_size(items: list[LearningGoalCandidate]) -> int:
+            return context_budget.estimate_text(str([item.model_dump() for item in items]))
 
         candidates = await reduce_until_fits(
             reduce_round, target_fits, progress_size, candidates,
@@ -272,15 +252,11 @@ def build_learning_goals_reasoner(store: WorldStore, model: LlmTransport) -> Des
         return store.learning_goal_context(space_id)
 
     def call(space_id: str, context):
-        _, entries, hypotheses, open_goals, closed_goals = context
-        return (
-            "plan-learning-goals",
-            plan_learning_goals,
-            (entries, hypotheses, open_goals, closed_goals),
-        )
+        _, entries, open_goals, closed_goals = context
+        return "plan-learning-goals", plan_learning_goals, (entries, open_goals, closed_goals)
 
     def apply(space_id: str, context, result) -> bool:
-        revision, _, _, open_goals, closed_goals = context
+        revision, _, open_goals, closed_goals = context
         store.apply_goal_planning(
             space_id, revision, result,
             {goal.id for goal in open_goals} | {goal.id for goal in closed_goals},
@@ -298,6 +274,5 @@ __all__ = [
     "build_learning_goals_reasoner",
     "goal_candidate_prompt",
     "goal_candidate_reduction_prompt",
-    "goal_planning_prompt",
     "goal_reconciliation_prompt",
 ]
