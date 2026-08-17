@@ -45,10 +45,9 @@ class _NoopModel:
     async def complete(self, request: ChatCompletionRequest) -> str:
         combined = " ".join(str(message.content) for message in request.messages)
         if "Rebuild compact cross-session continuity." in combined:
-            # `_json` renders a bare `list[ModelMessage]` via `repr`, so
-            # each message is `id='...' space_id='...' ...`; the
-            # lookbehind keeps `space_id=` from matching as `id=`.
-            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            # Messages are rendered as JSON objects, so the last "id" in
+            # the prompt is the last message the request covers.
+            ids = re.findall(r'"id": "([^"]*)"', combined)
             return json.dumps({"text": "rolling", "through_message_id": ids[-1] if ids else ""})
         return json.dumps({})
 

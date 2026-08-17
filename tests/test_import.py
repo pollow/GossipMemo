@@ -139,7 +139,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                     ]
                 })
             if "Rebuild compact cross-session continuity." in combined:
-                ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+                ids = re.findall(r'"id": "([^"]*)"', combined)
                 return json.dumps({
                     "text": "Imported conversation",
                     "through_message_id": ids[-1] if ids else "",

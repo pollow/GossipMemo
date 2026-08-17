@@ -87,7 +87,7 @@ class _ContinuityModel:
         combined = " ".join(str(message.content) for message in request.messages)
         if "Rebuild compact cross-session continuity." in combined:
             self.calls += 1
-            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            ids = re.findall(r'"id": "([^"]*)"', combined)
             return json.dumps({"text": "summary", "through_message_id": ids[-1] if ids else ""})
         if "Review the projection above" in combined:
             return json.dumps({})

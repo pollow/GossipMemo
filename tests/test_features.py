@@ -81,7 +81,7 @@ class FakeModel:
     def _owner_response(request: ChatCompletionRequest) -> str:
         combined = " ".join(str(message.content) for message in request.messages)
         if "Rebuild compact cross-session continuity." in combined:
-            ids = re.findall(r"(?<!\w)id='([^']*)'", combined)
+            ids = re.findall(r'"id": "([^"]*)"', combined)
             return json.dumps({"through_message_id": ids[-1] if ids else ""})
         if "Review the projection above" in combined:
             return json.dumps({})
@@ -273,11 +273,7 @@ def _extraction_batch_size(combined: str) -> int:
     section = section.split(
         "Comparison memories (deduplication/update reference only; never new evidence):", 1
     )[0]
-    # `_json` renders a bare `list[ModelMessage]` via `repr` (only a
-    # top-level BaseModel is converted to real JSON), so each message is a
-    # quoted `id='...' space_id='...' ...` string; the lookbehind keeps
-    # `space_id=`/`through_message_id=` from matching as `id=`.
-    return len(re.findall(r"(?<!\w)id='", section))
+    return len(re.findall(r'"id": "', section))
 
 
 def _extraction_first_content(combined: str) -> str:
@@ -287,7 +283,7 @@ def _extraction_first_content(combined: str) -> str:
         "Current batch evidence (user-authored; the only messages allowed to produce memories):",
         1,
     )[1]
-    match = re.search(r"(?<!\w)content='([^']*)'", section)
+    match = re.search(r'"content": "([^"]*)"', section)
     return match.group(1) if match else ""
 
 

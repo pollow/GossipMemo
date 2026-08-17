@@ -33,10 +33,27 @@ def schema_instruction(result_type: type[BaseModel]) -> str:
     )
 
 
-def _json(value: Any) -> str:
+def _plain(value: Any) -> Any:
+    """Turn nested Pydantic models into JSON-serializable data.
+
+    A bare model was already handled, but a *list* of models was not: it
+    fell through to `json.dumps(default=str)`, which stringified each one
+    with `repr`. Prompts that pass a list -- recent context messages,
+    evidence memories -- were embedding `id='m1' space_id='s' ...` as a
+    single opaque string per item rather than a JSON object.
+    """
+
     if isinstance(value, BaseModel):
-        value = value.model_dump(mode="json")
-    return json.dumps(value, ensure_ascii=False, indent=2, default=str)
+        return value.model_dump(mode="json")
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+
+def _json(value: Any) -> str:
+    return json.dumps(_plain(value), ensure_ascii=False, indent=2, default=str)
 
 
 def _evidence_lines(memories: list[MemoryView] | tuple[MemoryView, ...] | list[Any] | tuple[Any, ...]) -> str:
