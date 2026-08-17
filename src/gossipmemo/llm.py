@@ -146,6 +146,30 @@ class LlmModel(Protocol):
     async def synthesize(self, question: str, context: QueryContext) -> str: ...
 
 
+@runtime_checkable
+class LlmTransport(Protocol):
+    """The narrow transport seam: one provider HTTP request, nothing else.
+
+    This sits alongside the wide :class:`LlmModel` interface rather than
+    replacing it. `OpenAICompatibleAdapter` satisfies both today. A later
+    commit moves individual reasoners onto `LlmTransport` + `structured()`
+    one family at a time, once prompt assembly has left `llm.py`.
+    """
+
+    @property
+    def configured(self) -> bool: ...
+
+    @property
+    def gate(self) -> "ProviderGate": ...
+
+    @property
+    def context_budget(self) -> ContextBudget: ...
+
+    async def complete(self, request: "ChatCompletionRequest") -> str: ...
+
+    async def aclose(self) -> None: ...
+
+
 LLMModel = LlmModel
 
 
@@ -1118,26 +1142,10 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self, messages: list[ChatMessage], result_type: type[_ResultT],
     ) -> tuple[str, _ResultT]:
         """Retry transient malformed structured output with the same request."""
-        attempt = 0
-        while True:
-            content = await self._chat_messages(messages, structured=True)
-            try:
-                return content, _parse_model_output(content, result_type)
-            except LLMOutputError:
-                if attempt >= self.max_retries:
-                    raise
-                delay = self._retry_delay(attempt)
-                logger.warning(
-                    "llm_output_retry_scheduled",
-                    extra={
-                        "model": self.model,
-                        "attempt": attempt + 1,
-                        "result_type": result_type.__name__,
-                        "delay_seconds": round(delay, 3),
-                    },
-                )
-                await asyncio.sleep(delay)
-                attempt += 1
+        return await structured(
+            self, messages, result_type,
+            tier=_call_tier.get(), label=_call_label.get(),
+        )
 
     async def _chat(
         self,
@@ -1158,6 +1166,18 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             response_format={"type": "json_object"} if structured else None,
             max_tokens=self.max_tokens,
         )
+        return await self.complete(request)
+
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        """Send a prebuilt chat-completions request over HTTP.
+
+        Acquires :attr:`gate`, runs the context-budget hard check, POSTs,
+        and runs the existing transport retry/backoff (including
+        `mark_unavailable_until` on 429/5xx). Returns the raw assistant
+        message content. `response_format` is decided by the caller when
+        it builds `request`, not here.
+        """
+        structured = request.response_format is not None
         # Check the exact serialized request before acquiring/sending HTTP.
         # This includes system/messages and response schema JSON.
         self.context_budget.check(self.context_budget.estimate_request(request))
@@ -1350,6 +1370,60 @@ def _parse_model_output(content: str, result_type: type[_ResultT]) -> _ResultT:
         ) from error
 
 
+async def structured(
+    transport: LlmTransport,
+    messages: list[ChatMessage],
+    result_type: type[_ResultT],
+    *,
+    tier: int,
+    label: str | None,
+) -> tuple[str, _ResultT]:
+    """Send a structured-output request over `transport`, retrying malformed output.
+
+    This is policy layered over `LlmTransport.complete`, not part of the
+    protocol: it builds the JSON-mode request, marks `tier`/`label` on the
+    tier/label contextvars for `complete`'s gate acquisition, and retries
+    `LLMOutputError` (but not transport-level failures, which `complete`
+    already retries internally) with the same jittered backoff
+    `OpenAICompatibleAdapter` has always used for malformed output.
+
+    `transport` is typed narrowly as `LlmTransport`, but request/retry
+    configuration (`model`, `temperature`, `max_tokens`, `max_retries`, the
+    retry-delay formula) is read directly off the concrete instance, since
+    `OpenAICompatibleAdapter` is still the only implementation and building
+    a valid `ChatCompletionRequest` requires that configuration.
+    """
+    request = ChatCompletionRequest(
+        model=transport.model,  # type: ignore[attr-defined]
+        messages=messages,
+        temperature=transport.temperature,  # type: ignore[attr-defined]
+        response_format={"type": "json_object"},
+        max_tokens=transport.max_tokens,  # type: ignore[attr-defined]
+    )
+    max_retries = transport.max_retries  # type: ignore[attr-defined]
+    attempt = 0
+    while True:
+        with llm_call_tier(tier, label):
+            content = await transport.complete(request)
+        try:
+            return content, _parse_model_output(content, result_type)
+        except LLMOutputError:
+            if attempt >= max_retries:
+                raise
+            delay = transport._retry_delay(attempt)  # type: ignore[attr-defined]
+            logger.warning(
+                "llm_output_retry_scheduled",
+                extra={
+                    "model": transport.model,  # type: ignore[attr-defined]
+                    "attempt": attempt + 1,
+                    "result_type": result_type.__name__,
+                    "delay_seconds": round(delay, 3),
+                },
+            )
+            await asyncio.sleep(delay)
+            attempt += 1
+
+
 def _response_detail(response: httpx.Response) -> str:
     try:
         payload = response.json()
@@ -1394,6 +1468,7 @@ __all__ = [
     "LLMProtocolError",
     "LLMRequestError",
     "LlmModel",
+    "LlmTransport",
     "OpenAICompatibleAdapter",
     "ProviderGate",
     "TIER_BACKGROUND",
@@ -1401,4 +1476,5 @@ __all__ = [
     "TIER_FRESHNESS",
     "create_llm",
     "llm_call_tier",
+    "structured",
 ]
