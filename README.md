@@ -196,7 +196,7 @@ POST /ingest ─→ Message persisted (idempotent) ─→ returns {"status": "ac
                      │
                      ↓
                 reasoning pipeline ─→ refreshed cards, inferred Memories,
-                     ↑                 Hypotheses, CoverageMap, LearningGoals
+                     ↑                 Hypotheses, coverage entries, LearningGoals
                      │  at startup for whatever is stale, then daily at local midnight
                      │
                 continuity reasoner ─→ rolling continuity text
@@ -210,10 +210,15 @@ size and timeout are tunable (`GOSSIPMEMO_EXTRACTION_BATCH_SIZE`,
 
 Raw Messages are durable evidence and are never rewritten. Memories are the
 durable semantic record, and support active, retracted, and superseded states,
-so a correction never erases history. Everything else — Person cards,
-Relationship cards, the UserModel, continuity, coverage — is a **regenerable
-projection** over active Memories. Deleting the projections and rebuilding them
-loses nothing.
+so a correction never erases history. Person cards, Relationship cards, the
+UserModel and continuity are **regenerable projections** over active Memories:
+deleting them and rebuilding them loses nothing.
+
+Coverage entries are the one exception. They are freely rewritten as
+understanding accumulates, so rebuilding them depends on the order the audits
+ran — a rebuild yields a different but equally valid set. Coverage is therefore
+**replayable accumulated state**, not a regenerable projection. Nothing
+unrecoverable rides on it: the evidence layer underneath is intact.
 
 ### The reasoners
 

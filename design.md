@@ -70,10 +70,11 @@ Message persisted
 Memory
   ├─ owner reasoning: projection call → epistemic review call
   │    └─ refreshed card + explicit inferred/Hypothesis actions
-  └─ coverage audit (bounded chunks) → CoverageMap → goal planning
+  └─ coverage audit (per root) → CoverageEntries → goal planning (per root)
 
-Context/turn reads deterministically select at most one open Hypothesis and one
-open/partial LearningGoal; the request path does not call an LLM.
+Context/turn reads select at most one open Hypothesis deterministically and
+sample three to five open/partial LearningGoals at random; the request path
+does not call an LLM.
 ```
 
 ### 3.1 Retain
@@ -138,13 +139,20 @@ server 提供的 ID。User owner 同样维护 Hypothesis，但不产生 inferred
 
 ### 3.5 Induction and projection refresh
 
-Induction 扫描 stale projections，并为每个受影响 owner 调度 reasoning；CoverageMap
-使用独立 composite `(updated_at, id)` cursor 增量 catch up。一次 projection refresh
-包含 reasoning、optimistic freshness check 和成功后的写回，详见下一节。
+Induction 扫描 stale projections，并为每个受影响 owner 调度 reasoning；coverage 的
+每个 root 各自持有 composite `(updated_at, id)` cursor 并独立增量 catch up，因此某个
+root 的 audit 失败不会回退其它 root 已推进的进度。一次 projection refresh 包含
+reasoning、optimistic freshness check 和成功后的写回，详见下一节。
 
-Coverage catch up 后，UserLearningGoalReasoner 才执行 goal planning。Coverage criteria
-只服务这一 reasoner；CoverageMap 不进入 extraction、Person/Relationship reasoning，
-也不直接进入 Hermes prompt。
+Coverage catch up 后，UserLearningGoalReasoner 才执行 goal planning。Coverage entries
+只服务这一 reasoner；它们不进入 extraction、Person/Relationship reasoning，也不直接
+进入 Hermes prompt——外泄给 agent 的只有它们支持的少量 LearningGoal。
+
+Coverage 不是可重建 projection，而是**可重放的累积状态**。entry 允许被反复改写扩充，
+所以重建结果依赖 audit 的执行顺序：删库重跑会得到不同但同样有效的 entries。这是接受的
+代价，因为纯证据层（Message 与 Memory）仍然完整、仍可重放，没有不可恢复的东西。
+Person/Relationship/UserModel card 和 rolling continuity 则仍是严格意义上的可重建
+projection。
 
 ### 3.6 Query synthesis
 
@@ -172,7 +180,8 @@ Query 默认不写入 Memory，也不修改 profile card。需要把 query 结�
 extraction：Message → Memory
 owner reasoning call 1：active evidence Memories → current projection
 owner reasoning call 2：same context + projection result → explicit epistemic actions
-coverage reasoning：changed evidence chunks → CoverageMap → LearningGoals
+coverage audit（每 root 一次）：该 root 的 active entries + 新增 evidence → entry add/modify
+goal planning（每 root 一次 + 一次 reconciliation）：该 root 的 entries → LearningGoals
 ```
 
 ### 4.2 Reasoning 什么时候触发
@@ -335,13 +344,24 @@ POST /v1/spaces/{space_id}/turns
 ```
 
 Context 返回带稳定 version 的 compact UserModel、rolling continuity、continuity-related
-Person cards，以及最多一条 user-owned open Hypothesis 和一条 open/partial LearningGoal。
-Turn 先持久化 user Message，再用 deterministic alias matching、SQLite FTS 和本轮文字选择
-相关 context；Person/Relationship guidance 只有 owner 被本轮激活时才返回。两条路径都不调用
-LLM。Hermes 必须将两类 guidance 分别标成 tentative understanding 和 optional learning
-invitation，不能伪装成 Memory/fact。
+Person cards，以及最多一条 user-owned open Hypothesis 和随机 3–5 条 open/partial
+LearningGoal。Turn 先持久化 user Message，再用 deterministic alias matching、SQLite FTS
+和本轮文字选择相关 context；Person/Relationship guidance 只有 owner 被本轮激活时才返回。
+两条路径都不调用 LLM。
 
-`conversation_key` 只保留为 Message source coordinate。Context version、CoverageMap 和长期
+两类 guidance 的选取方式不同，是刻意的。Hypothesis 是关于某个 owner 的断言，激活的
+Person 已经把它收窄到当轮主体，取最匹配的一条去确认是有意义的。LearningGoal 是长期
+方向而不是断言，「现在在聊什么」只有消费 agent 知道，服务端手上只有一个 query 字符串——
+硬做相关性就是用坏输入做难的事。因此服务端不排序，只取样，由 agent 决定用不用。
+取样意味着池子的多样性就是样本的全部价值，这正是 goal planning 必须按 root 扇出的理由。
+因为 goal 每次读取都重新取样，guidance 不参与 context version 的计算：version 只跟踪
+持久 context 状态，否则 warm caller 每轮都会被判定为 stale。
+
+Hermes 必须将两类 guidance 分别标成 tentative understanding 和 optional learning
+invitation，不能伪装成 Memory/fact；并且必须明确告诉 agent 这几条 goal 是可默认忽略的
+方向、不是要逐条询问的问题，否则并排列出的 3–5 条会把对话变成采访或问卷。
+
+`conversation_key` 只保留为 Message source coordinate。Context version、coverage 和长期
 Memory scope 都是 Space 级，不要求 Hermes session key 与历史 import key 同步。
 
 ### 5.4 Dossier reads
@@ -416,10 +436,11 @@ POST /v1/spaces/{space_id}/reason
 ### Epistemic guidance 与 user learning
 
 - Person/Relationship reasoner 显式维护 inferred Memory 与 Hypothesis；User reasoner 只维护 Hypothesis。
-- 每个 Space 从 20 个稳定 memoir/persona criteria 初始化空白 CoverageMap，并按 changed Memory chunks 增量更新。
-- CoverageMap catch up 后单独规划 LearningGoals；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
-- 私密、未知或 deferred 的区域不是自动提问目标；goal 是可拒绝的邀请，禁止直接病理诊断。
-- Hermes 每轮最多消费一条 Hypothesis 和一条 LearningGoal，不在请求路径增加 LLM latency。
+- Coverage 是一张递归的 entry 表：一条 entry 是某个 path 上「了解到什么程度」的总结，`root` 级 overview 就是 path 为空的那条。20 个稳定 memoir/persona 视角降级为 root 与 prompt 视角提示，不再是 `unknown/fragmentary/grounded/rich` 这样的刻度，也不再有独立的 boundary 记录。
+- Coverage audit 按 root 扇出增量更新，操作面只有 add 与 modify；entry 只写「知道什么」，找缺口是 goal planning 的创造性工作。
+- Coverage catch up 后单独规划 LearningGoals，同样按 root 扇出，只读 entries，沿纵向、横向、时间纵深和 entry 中出现的人四个方向扩展；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
+- Planner 忠实维护包括私密与敏感内容在内的未知方向；现在是否问、怎样问由消费 agent 决定。goal 是可拒绝的邀请，禁止直接病理诊断。
+- Hermes 每轮最多消费一条 Hypothesis 和随机 3–5 条 LearningGoal，并被明确告知默认忽略这些方向，不在请求路径增加 LLM latency。
 
 ### Query
 
@@ -436,7 +457,7 @@ POST /v1/spaces/{space_id}/reason
 - 每个 persistence 方法只进行短原子写入；调用方看不到 transaction interface，LLM 调用期间不持有 transaction。
 - Reasoning 失败不回滚 Message 或 Memory；projection 保持 stale 并可重试。
 - owner reasoning 的第二个 call 失败时，projection 和 epistemic actions 都不写入；两个阶段作为一次 optimistic refresh 提交。
-- CoverageMap 用 composite cursor 防止相同 timestamp 的 Memory 被跳过；retract/supersede 会显式进入 audit 并移除失效 evidence。
+- 每个 coverage root 用自己的 composite cursor 防止相同 timestamp 的 Memory 被跳过；retract/supersede 会显式进入 audit 并移除失效 evidence。单个 root 的 audit 失败只让该 root 停在原地重试。
 - Query 必须识别 stale projection，并补充读取比 projection 更新的 active Memories。
 - 重复 ingest 由 source identity 或 idempotency key 去重。
 - Memory retract 和 supersede 由 SQLite Adapter 保证单次 apply 的原子性，但领域流程不依赖跨阶段 transaction。
