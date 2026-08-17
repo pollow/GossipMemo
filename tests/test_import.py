@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 
 import pytest
 
+from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
-from gossipmemo.llm import ProviderGate
+from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
     CoverageAuditPatch,
     CoverageCriterionPatch,
@@ -18,7 +19,6 @@ from gossipmemo.models import (
     ManualMemoryRequest,
     MessageInput,
     SourceRef,
-    UserModelReasoningResult,
 )
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
@@ -111,6 +111,9 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
     class FakeModel:
         configured = True
         gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        user_name = "CurrentUser"
 
         def __init__(self):
             self.extractions = 0
@@ -130,12 +133,22 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 ]
             )
 
-        async def reason_user_model(self, memories, inferred=(), hypotheses=()):
-            del inferred, hypotheses
-            assert memories[0].content == "The user likes tea."
-            return UserModelReasoningResult(
-                profile_card={"summary": "Likes tea"}
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            return ChatCompletionRequest(
+                model="fake",
+                messages=list(messages),
+                response_format={"type": "json_object"} if structured else None,
             )
+
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            # Person/relationship/user_model reasoning now drives `prepare` and
+            # `complete` directly (see reasoners/owner.py); the projection
+            # stage is distinguished from the actions stage by prompt marker.
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Review the projection above" in combined:
+                return json.dumps({})
+            assert "The user likes tea." in combined
+            return json.dumps({"profile_card": {"summary": "Likes tea"}})
 
         async def reason_continuity(self, continuity, messages):
             assert continuity is not None
@@ -227,9 +240,18 @@ def test_import_reports_background_reasoning_failure(tmp_path):
     class FailingModel:
         configured = True
         gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        user_name = "CurrentUser"
 
-        async def reason_person(self, person, memories, inferred=(), hypotheses=()):
-            del person, memories, inferred, hypotheses
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            return ChatCompletionRequest(
+                model="fake",
+                messages=list(messages),
+                response_format={"type": "json_object"} if structured else None,
+            )
+
+        async def complete(self, request: ChatCompletionRequest) -> str:
             raise RuntimeError("reasoning failed")
 
         async def aclose(self):

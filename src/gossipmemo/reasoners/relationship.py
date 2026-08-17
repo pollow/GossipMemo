@@ -2,16 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
-from ..models import HypothesisView, MemoryView, RelationshipView
+from ..models import (
+    HypothesisView,
+    MemoryView,
+    RelationshipProjectionResult,
+    RelationshipReasoningResult,
+    RelationshipView,
+)
 from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
+from .owner import owner_reasoning
 
 if TYPE_CHECKING:
-    from ..llm import LlmModel
+    from ..llm import LlmTransport
 
 RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Reason carefully about the relationship between
 the two endpoint People in the supplied owner context. Linked memories indicate relevance to the
@@ -65,12 +74,27 @@ class _RelationshipTarget:
     hypotheses: tuple[HypothesisView, ...] = field(default_factory=tuple)
 
 
-def build_relationship_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
+async def _reason_relationship(
+    transport: "LlmTransport", relationship: RelationshipView, memories: Sequence[MemoryView],
+    inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+) -> RelationshipReasoningResult:
+    projection, actions = await owner_reasoning(
+        transport, RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories,
+        inferred_memories, hypotheses, RelationshipProjectionResult,
+    )
+    return RelationshipReasoningResult(
+        **projection.model_dump(), **actions.model_dump(exclude_none=True),
+    )
+
+
+def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
     """Refresh one stale Relationship projection per attempt.
 
     Mirrors the person reasoner: an in-flight watermark conflict simply
     causes the next `attempt` to recompute from the latest snapshot.
     """
+
+    reason_relationship = partial(_reason_relationship, model)
 
     def load_context(space_id: str) -> _RelationshipTarget | None:
         _, relationships, _ = store.stale_entities()
@@ -96,7 +120,7 @@ def build_relationship_reasoner(store: WorldStore, model: LlmModel) -> Descripto
             return None
         return (
             "reason-relationship",
-            model.reason_relationship,
+            reason_relationship,
             (context.relationship, context.memories, context.inferred, context.hypotheses),
         )
 

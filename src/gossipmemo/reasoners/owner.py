@@ -1,0 +1,406 @@
+"""Two-phase owner-reasoning skeleton shared by person, relationship, and
+user_model.
+
+Phase 1 asks for the projection (profile card / relationship facets)
+alone; phase 2 replays that exact projection as an assistant turn and asks
+only for inferred-memory and hypothesis actions against it. That split
+lets `structured()` validate the projection and the actions independently
+against their own schemas, and lets the digest fallback below prove the
+*actions* request (the larger of the two, since it embeds the first
+completion) fits before any HTTP call is made.
+
+Owner cards are full snapshots, not paginated evidence, so an oversized
+prompt can only be shrunk lossily: `_digest_evidence` compresses raw
+Memories into `OwnerEvidenceDigestView`s via `chunking.reduce_until_fits`,
+each digest call itself checked and, if needed, further chunked before
+being sent.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
+
+from pydantic import BaseModel
+
+from ..chunking import reduce_until_fits
+from ..models import (
+    ExtractedOwnerEvidenceDigest,
+    HypothesisView,
+    MemoryView,
+    OwnerEvidenceDigestView,
+    ReasoningActionsResult,
+)
+from ..priority import current_call_label, current_call_tier
+from ..prompts import (
+    actions_stage_prompt,
+    owner_evidence_digest_prompt,
+    owner_reasoning_prefix,
+    projection_stage_prompt,
+    schema_instruction,
+)
+
+if TYPE_CHECKING:
+    from ..llm import ChatCompletionRequest, ChatMessage, LlmTransport
+
+logger = logging.getLogger(__name__)
+
+
+def _llm() -> Any:
+    """Deferred import of `..llm`, breaking the reasoners<->llm import cycle.
+
+    This module pulls `ChatMessage`/`structured`/`LLMOutputError` from
+    `llm`, while `llm` pulls prompt constants back from `.reasoners`
+    (which imports this module). Resolving the dependency at call time
+    instead of at module load time means it never matters which of the
+    two a caller imports first -- both are always fully initialized by
+    the time a reasoner actually runs.
+    """
+
+    from .. import llm as llm_module
+
+    return llm_module
+
+
+async def owner_reasoning(
+    transport: "LlmTransport",
+    system_prompt: str,
+    target: BaseModel,
+    memories: Sequence[MemoryView],
+    inferred_memories: Sequence[MemoryView],
+    hypotheses: Sequence[HypothesisView],
+    projection_type: type[BaseModel],
+    actions_type: type[BaseModel] = ReasoningActionsResult,
+) -> tuple[BaseModel, BaseModel]:
+    """Run the shared two-call owner-reasoning shape over `transport`.
+
+    Comparison-only inferred memories and hypotheses are bounded first
+    (they may never grow to consume the evidence budget); if the actions
+    request still would not fit with full evidence, evidence is digested
+    and the whole prefix rebuilt before either call goes out.
+    """
+
+    llm = _llm()
+    bounded_inferred, bounded_hypotheses = _bounded_comparisons(
+        transport, system_prompt, target, inferred_memories, hypotheses,
+        projection_type, actions_type,
+    )
+    first_messages = _first_messages(
+        transport, system_prompt, target, memories, bounded_inferred,
+        bounded_hypotheses, projection_type,
+    )
+    if not _stage2_fits(transport, first_messages, actions_type):
+        digest = await _digest_evidence(
+            transport, target, memories, bounded_inferred, bounded_hypotheses,
+            system_prompt, projection_type, actions_type,
+        )
+        first_messages = _first_messages(
+            transport, system_prompt, target, digest, bounded_inferred,
+            bounded_hypotheses, projection_type,
+        )
+        if not _stage2_fits(transport, first_messages, actions_type):
+            raise ValueError("owner evidence digest did not fit context budget")
+
+    first, projection = await llm.structured(
+        transport, first_messages, projection_type,
+        tier=current_call_tier(), label=current_call_label(),
+    )
+    _, actions = await llm.structured(
+        transport,
+        first_messages + [
+            llm.ChatMessage(role="assistant", content=first),
+            llm.ChatMessage(
+                role="user",
+                content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+            ),
+        ],
+        actions_type,
+        tier=current_call_tier(), label=current_call_label(),
+    )
+    return projection, actions
+
+
+def _first_messages(
+    transport: "LlmTransport", system_prompt: str, target: BaseModel,
+    evidence: Sequence[Any], inferred: Sequence[MemoryView],
+    hypotheses: Sequence[HypothesisView], projection_type: type[BaseModel],
+) -> list["ChatMessage"]:
+    llm = _llm()
+    prefix = owner_reasoning_prefix(
+        target, list(evidence), list(inferred), list(hypotheses),
+        user_name=transport.user_name,
+    )
+    return [
+        llm.ChatMessage(role="system", content=system_prompt),
+        llm.ChatMessage(role="user", content=prefix),
+        llm.ChatMessage(
+            role="user",
+            content=projection_stage_prompt() + "\n" + schema_instruction(projection_type),
+        ),
+    ]
+
+
+def _stage2_estimate(
+    transport: "LlmTransport", first_messages: list["ChatMessage"], actions_type: type[BaseModel],
+) -> int:
+    llm = _llm()
+    request = transport.prepare(
+        first_messages + [
+            llm.ChatMessage(role="assistant", content=""),
+            llm.ChatMessage(
+                role="user",
+                content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+            ),
+        ],
+        structured=True,
+    )
+    # The second request contains the first completion as an assistant
+    # message. Reserve its configured maximum in addition to the normal
+    # output reserve already excluded by ContextBudget.
+    return (
+        transport.context_budget.estimate_request(request)
+        + transport.context_budget.output_reserve_tokens
+    )
+
+
+def _stage2_fits(
+    transport: "LlmTransport", first_messages: list["ChatMessage"], actions_type: type[BaseModel],
+) -> bool:
+    return transport.context_budget.report(
+        _stage2_estimate(transport, first_messages, actions_type)
+    ).fits
+
+
+def _bounded_comparisons(
+    transport: "LlmTransport", system_prompt: str, target: BaseModel,
+    inferred: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
+    projection_type: type[BaseModel], actions_type: type[BaseModel],
+) -> tuple[list[MemoryView], list[HypothesisView]]:
+    """Bound comparison-only state without turning it into evidence.
+
+    IDs are retained before prose. If even every ID skeleton cannot fit,
+    the oldest tail is omitted; omission remains a no-op by contract.
+    Comparison state gets at most one third of the usable input budget so
+    evidence always has room to be represented or digested.
+    """
+    context_budget = transport.context_budget
+    empty_first = _first_messages(transport, system_prompt, target, [], [], [], projection_type)
+    base = _stage2_estimate(transport, empty_first, actions_type)
+    ceiling = min(
+        context_budget.usable_input_tokens,
+        base + context_budget.usable_input_tokens // 3,
+    )
+    if base > ceiling:
+        raise ValueError("owner prompt scaffolding exceeds context budget")
+
+    chosen_inferred: list[MemoryView] = []
+    chosen_hypotheses: list[HypothesisView] = []
+
+    def fits(
+        candidate_inferred: Sequence[MemoryView],
+        candidate_hypotheses: Sequence[HypothesisView],
+    ) -> bool:
+        first = _first_messages(
+            transport, system_prompt, target, [], candidate_inferred,
+            candidate_hypotheses, projection_type,
+        )
+        return _stage2_estimate(transport, first, actions_type) <= ceiling
+
+    # Preserve actionable IDs first with empty prose, in the stable store
+    # order (newest first). Then spend remaining budget on bounded prose.
+    for item in inferred:
+        skeleton = item.model_copy(update={"content": ""})
+        if fits([*chosen_inferred, skeleton], chosen_hypotheses):
+            chosen_inferred.append(skeleton)
+    for item in hypotheses:
+        skeleton = item.model_copy(update={"content": ""})
+        if fits(chosen_inferred, [*chosen_hypotheses, skeleton]):
+            chosen_hypotheses.append(skeleton)
+
+    inferred_by_id = {item.id: item for item in inferred}
+    for index, skeleton in enumerate(tuple(chosen_inferred)):
+        original = inferred_by_id[skeleton.id]
+        expanded = original.model_copy(update={"content": original.content[:1200]})
+        candidate = [*chosen_inferred]
+        candidate[index] = expanded
+        if fits(candidate, chosen_hypotheses):
+            chosen_inferred = candidate
+
+    hypotheses_by_id = {item.id: item for item in hypotheses}
+    for index, skeleton in enumerate(tuple(chosen_hypotheses)):
+        original = hypotheses_by_id[skeleton.id]
+        expanded = original.model_copy(update={"content": original.content[:1200]})
+        candidate = [*chosen_hypotheses]
+        candidate[index] = expanded
+        if fits(chosen_inferred, candidate):
+            chosen_hypotheses = candidate
+    return chosen_inferred, chosen_hypotheses
+
+
+def _evidence_source_ids(item: MemoryView | OwnerEvidenceDigestView) -> set[str]:
+    if isinstance(item, MemoryView):
+        return {item.id}
+    return set(item.source_memory_ids)
+
+
+def _digest_request(transport: "LlmTransport", chunk: list[Any]) -> "ChatCompletionRequest":
+    llm = _llm()
+    return transport.prepare(
+        [
+            llm.ChatMessage(
+                role="system",
+                content="Compress evidence only; do not infer people or actions.\n\n"
+                + schema_instruction(ExtractedOwnerEvidenceDigest),
+            ),
+            llm.ChatMessage(role="user", content=owner_evidence_digest_prompt(chunk, transport.user_name)),
+        ],
+        structured=True,
+    )
+
+
+async def _digest_evidence(
+    transport: "LlmTransport", target: BaseModel, memories: Sequence[MemoryView],
+    inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
+    system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel],
+) -> list[OwnerEvidenceDigestView]:
+    llm = _llm()
+    context_budget = transport.context_budget
+
+    def chunks_for(
+        source: Sequence[MemoryView | OwnerEvidenceDigestView],
+    ) -> list[list[MemoryView | OwnerEvidenceDigestView]]:
+        chunks: list[list[MemoryView | OwnerEvidenceDigestView]] = []
+        current: list[MemoryView | OwnerEvidenceDigestView] = []
+        for memory in source:
+            # Segment oversized content so every digest request is valid.
+            pieces: list[Any] = [memory]
+            if isinstance(memory, MemoryView) and not context_budget.report(
+                context_budget.estimate_request(_digest_request(transport, [memory]))
+            ).fits:
+                lo, hi = 1, len(memory.content)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    candidate_piece = memory.model_copy(update={"content": memory.content[:mid]})
+                    if context_budget.report(
+                        context_budget.estimate_request(_digest_request(transport, [candidate_piece]))
+                    ).fits:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                width = lo
+                if width < 1:
+                    raise ValueError(
+                        f"single owner evidence segment exceeds context budget: {memory.id}"
+                    )
+                pieces = [
+                    memory.model_copy(update={"content": memory.content[i:i + width]})
+                    for i in range(0, len(memory.content), width)
+                ]
+            for piece in pieces:
+                candidate = current + [piece]
+                candidate_ids = set().union(*(_evidence_source_ids(item) for item in candidate))
+                source_id_limit = (
+                    32 if any(isinstance(item, MemoryView) for item in candidate) else 512
+                )
+                candidate_fits = context_budget.report(
+                    context_budget.estimate_request(_digest_request(transport, candidate))
+                ).fits and len(candidate_ids) <= source_id_limit
+                if current and not candidate_fits:
+                    chunks.append(current)
+                    current = []
+                current.append(piece)
+                if not context_budget.report(
+                    context_budget.estimate_request(_digest_request(transport, current))
+                ).fits:
+                    identifier = getattr(memory, "id", "digest")
+                    raise ValueError(
+                        f"single owner evidence segment exceeds context budget: {identifier}"
+                    )
+        if current:
+            chunks.append(current)
+        return chunks
+
+    async def digest_chunk(
+        chunk: list[MemoryView | OwnerEvidenceDigestView],
+    ) -> list[OwnerEvidenceDigestView]:
+        request = _digest_request(transport, chunk)
+        context_budget.check(context_budget.estimate_request(request))
+        allowed = set().union(*(_evidence_source_ids(item) for item in chunk))
+        recursive = all(isinstance(item, OwnerEvidenceDigestView) for item in chunk)
+        policy = transport.retry_policy
+        semantic_attempt = 0
+        while True:
+            _, result = await llm.structured(
+                transport, request.messages, ExtractedOwnerEvidenceDigest,
+                tier=current_call_tier(), label=current_call_label(),
+            )
+            if recursive and result.items:
+                # Reduce inputs already passed strict raw-ID validation.
+                # Ignore any model-copied IDs here and deterministically
+                # inherit the trusted server-side union.
+                return [OwnerEvidenceDigestView(
+                    summary="\n".join(item.summary for item in result.items)[:600],
+                    source_memory_ids=sorted(allowed),
+                    basis="compressed", uncertainty="", semantic_subject="",
+                )]
+            accepted = [
+                OwnerEvidenceDigestView.model_validate(item.model_dump(mode="json"))
+                for item in result.items
+                if item.source_memory_ids and set(item.source_memory_ids) <= allowed
+            ]
+            covered = set().union(*(set(item.source_memory_ids) for item in accepted), set())
+            if covered == allowed:
+                return accepted
+            if semantic_attempt >= policy.attempts:
+                raise llm.LLMOutputError(
+                    "owner evidence digest omitted or invented source Memory IDs"
+                )
+            delay = policy.delay(semantic_attempt)
+            logger.warning(
+                "llm_output_retry_scheduled",
+                extra={
+                    "attempt": semantic_attempt + 1,
+                    "result_type": "ExtractedOwnerEvidenceDigest",
+                    "reason": "source_memory_ids_mismatch",
+                    "delay_seconds": round(delay, 3),
+                },
+            )
+            await asyncio.sleep(delay)
+            semantic_attempt += 1
+
+    async def reduce_round(
+        source: Sequence[MemoryView | OwnerEvidenceDigestView],
+    ) -> list[OwnerEvidenceDigestView]:
+        output: list[OwnerEvidenceDigestView] = []
+        for chunk in chunks_for(source):
+            output.extend(await digest_chunk(chunk))
+        if not output:
+            raise ValueError("owner evidence digest made no progress")
+        return output
+
+    def final_first_messages(output: list[OwnerEvidenceDigestView]) -> list["ChatMessage"]:
+        return _first_messages(
+            transport, system_prompt, target, output, list(inferred_memories),
+            list(hypotheses), projection_type,
+        )
+
+    def target_fits(output: list[OwnerEvidenceDigestView]) -> bool:
+        return _stage2_fits(transport, final_first_messages(output), actions_type)
+
+    def progress_size(output: list[OwnerEvidenceDigestView]) -> int:
+        return context_budget.estimate_text(
+            owner_reasoning_prefix(
+                target, output, list(inferred_memories), list(hypotheses),
+                user_name=transport.user_name,
+            )
+        )
+
+    return await reduce_until_fits(
+        reduce_round, target_fits, progress_size, list(memories),
+        max_rounds=3, no_progress_message="owner evidence digest reduction made no progress",
+    )
+
+
+__all__ = ["owner_reasoning"]

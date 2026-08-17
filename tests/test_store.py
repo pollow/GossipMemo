@@ -514,21 +514,25 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")
 
+    import json
+
     from gossipmemo.models import (
         ExtractionResult,
         ExtractedPerson,
         ExtractedMemory,
-        PersonReasoningResult,
-        RelationshipReasoningResult,
     )
     from gossipmemo.app import create_app
     from gossipmemo.config import Settings
-    from gossipmemo.llm import ProviderGate
+    from gossipmemo.context_budget import ContextBudget
+    from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
     from gossipmemo.world import SocialMemoryWorld
 
     class FakeModel:
         configured = True
         gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        user_name = "CurrentUser"
 
         async def aclose(self):
             return None
@@ -546,13 +550,27 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                 ],
             )
 
-        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
-            del person, memories, inferred_memories, hypotheses
-            return PersonReasoningResult(profile_card={"summary": "likes tea"})
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            return ChatCompletionRequest(
+                model="fake",
+                messages=list(messages),
+                response_format={"type": "json_object"} if structured else None,
+            )
 
-        async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
-            del relationship, memories, inferred_memories, hypotheses
-            return RelationshipReasoningResult()
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            # Person/relationship reasoning now drives `prepare`/`complete`
+            # directly (see reasoners/owner.py); tell the projection stage
+            # from the actions stage by prompt marker, and the two owner
+            # projection shapes (profile_card vs. relationship facets) by
+            # which schema was requested.
+            combined = " ".join(str(message.content) for message in request.messages)
+            if "Review the projection above" in combined:
+                return json.dumps({})
+            if '"profile_card"' in combined:
+                return json.dumps({"profile_card": {"summary": "likes tea"}})
+            return json.dumps(
+                {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
+            )
 
         async def audit_coverage(self, coverage, memories, hypotheses=()):
             del coverage, memories, hypotheses

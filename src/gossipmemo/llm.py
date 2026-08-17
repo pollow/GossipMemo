@@ -198,6 +198,9 @@ class LlmTransport(Protocol):
     @property
     def retry_policy(self) -> RetryPolicy: ...
 
+    @property
+    def user_name(self) -> str: ...
+
     def prepare(
         self, messages: Sequence["ChatMessage"], *, structured: bool
     ) -> "ChatCompletionRequest": ...

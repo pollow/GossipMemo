@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
     ExtractionResult,
     ExtractedPerson,
@@ -17,17 +19,21 @@ from gossipmemo.models import (
     MessageInput,
     ModelMessage,
     MemoryView,
-    PersonReasoningResult,
     PersonView,
     QueryContext,
     QueryRequest,
     ExtractedRelationship,
-    RelationshipReasoningResult,
     SourceRef,
     SupersedeRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import LLMRequestError, OpenAICompatibleAdapter, ProviderGate
+from gossipmemo.llm import (
+    ChatCompletionRequest,
+    LLMRequestError,
+    OpenAICompatibleAdapter,
+    ProviderGate,
+    RetryPolicy,
+)
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
@@ -35,8 +41,22 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 
 class FakeModel:
+    """A double covering both the wide `LlmModel` seam (extract, continuity,
+    coverage, goal planning, synthesize -- still called by name) and the
+    narrow `LlmTransport` seam that person/relationship/user_model reasoning
+    now drives directly via `prepare`/`complete`.
+
+    `complete` inspects the outgoing request to tell an owner-reasoning
+    projection stage from its actions stage, since that is genuinely all a
+    transport-level double can see; it does not know which of the three
+    owner reasoners is asking.
+    """
+
     configured = True
     gate = ProviderGate()
+    context_budget = ContextBudget()
+    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+    user_name = "CurrentUser"
 
     async def aclose(self):
         return None
@@ -45,18 +65,26 @@ class FakeModel:
         del message, context, known_people, comparison_memories
         return ExtractionResult()
 
-    async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
-        del person, memories, inferred_memories, hypotheses
-        return PersonReasoningResult()
+    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="fake",
+            messages=list(messages),
+            response_format={"type": "json_object"} if structured else None,
+        )
 
-    async def reason_relationship(self, relationship, memories, inferred_memories=(), hypotheses=()):
-        del relationship, memories, inferred_memories, hypotheses
-        return RelationshipReasoningResult()
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        return self._owner_response(request)
 
-    async def reason_user_model(self, memories, inferred_memories=(), hypotheses=()):
-        del memories, inferred_memories, hypotheses
-        from gossipmemo.models import UserModelReasoningResult
-        return UserModelReasoningResult()
+    @staticmethod
+    def _owner_response(request: ChatCompletionRequest) -> str:
+        combined = " ".join(str(message.content) for message in request.messages)
+        if "Review the projection above" in combined:
+            return json.dumps({})
+        if '"profile_card"' in combined:
+            return json.dumps({"profile_card": {}})
+        return json.dumps(
+            {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
+        )
 
     async def reason_continuity(self, continuity, messages):
         del continuity
@@ -484,10 +512,12 @@ def test_induction_waits_for_daily_scheduler(tmp_path):
     calls: list[str] = []
 
     class InductionModel(FakeModel):
-        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
-            del inferred_memories, hypotheses
-            calls.append(person.display_name)
-            return PersonReasoningResult(profile_card={"memory_count": len(memories)})
+        async def complete(self, request):
+            combined = " ".join(str(message.content) for message in request.messages)
+            if '"profile_card"' in combined and "Review the projection" not in combined:
+                match = re.search(r'"display_name":\s*"([^"]*)"', combined)
+                calls.append(match.group(1) if match else "")
+            return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)
@@ -520,11 +550,11 @@ def test_induction_schedules_user_model_only_for_about_user_memory(tmp_path):
     calls: list[int] = []
 
     class UserModel(FakeModel):
-        async def reason_user_model(self, memories, inferred_memories=(), hypotheses=()):
-            del inferred_memories, hypotheses
-            calls.append(len(memories))
-            from gossipmemo.models import UserModelReasoningResult
-            return UserModelReasoningResult(profile_card={"count": len(memories)})
+        async def complete(self, request):
+            combined = " ".join(str(message.content) for message in request.messages)
+            if '"profile_card"' in combined and "Review the projection" not in combined:
+                calls.append(combined.count("- id="))
+            return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)
@@ -552,10 +582,12 @@ def test_startup_catches_up_stale_profiles(tmp_path):
     calls: list[str] = []
 
     class InductionModel(FakeModel):
-        async def reason_person(self, person, memories, inferred_memories=(), hypotheses=()):
-            del inferred_memories, hypotheses
-            calls.append(person.display_name)
-            return PersonReasoningResult(profile_card={"memory_count": len(memories)})
+        async def complete(self, request):
+            combined = " ".join(str(message.content) for message in request.messages)
+            if '"profile_card"' in combined and "Review the projection" not in combined:
+                match = re.search(r'"display_name":\s*"([^"]*)"', combined)
+                calls.append(match.group(1) if match else "")
+            return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)

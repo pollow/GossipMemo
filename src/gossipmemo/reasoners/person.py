@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 
-from ..models import HypothesisView, MemoryView, PersonView
+from ..models import HypothesisView, MemoryView, PersonProjectionResult, PersonReasoningResult, PersonView
 from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
+from .owner import owner_reasoning
 
 if TYPE_CHECKING:
-    from ..llm import LlmModel
+    from ..llm import LlmTransport
 
 PERSON_REASONING_SYSTEM_PROMPT = """Reason carefully about one named Person from the
 supplied owner context. Linked memories indicate
@@ -66,13 +69,28 @@ class _PersonTarget:
     hypotheses: tuple[HypothesisView, ...] = field(default_factory=tuple)
 
 
-def build_person_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
+async def _reason_person(
+    transport: "LlmTransport", person: PersonView, memories: Sequence[MemoryView],
+    inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+) -> PersonReasoningResult:
+    projection, actions = await owner_reasoning(
+        transport, PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories,
+        hypotheses, PersonProjectionResult,
+    )
+    return PersonReasoningResult(
+        profile_card=projection.profile_card, **actions.model_dump(exclude_none=True),
+    )
+
+
+def build_person_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
     """Refresh one stale Person card per attempt.
 
     If Extract updates the same Person while an LLM call is in flight, the
     optimistic watermark check in `apply_person_reasoning` fails and the next
     `attempt` recomputes from the latest snapshot without taking a lock.
     """
+
+    reason_person = partial(_reason_person, model)
 
     def load_context(space_id: str) -> _PersonTarget | None:
         people, _, _ = store.stale_entities()
@@ -98,7 +116,7 @@ def build_person_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReaso
             return None
         return (
             "reason-person",
-            model.reason_person,
+            reason_person,
             (context.person, context.memories, context.inferred, context.hypotheses),
         )
 

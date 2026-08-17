@@ -2,15 +2,25 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from functools import partial
 from typing import TYPE_CHECKING
 
-from ..models import MemoryView
+from ..models import (
+    HypothesisView,
+    MemoryView,
+    PersonProjectionResult,
+    UserModelReasoningResult,
+    UserModelView,
+    UserReasoningActionsResult,
+)
 from ..prompts import _json
 from ..store import WorldStore
 from .base import DescriptorReasoner
+from .owner import owner_reasoning
 
 if TYPE_CHECKING:
-    from ..llm import LlmModel
+    from ..llm import LlmTransport
 
 USER_MODEL_REASONING_SYSTEM_PROMPT = """Reason carefully about the fixed current user from
 active memories marked about_user. Capture preferences, communication preferences, goals, current
@@ -32,7 +42,23 @@ def user_model_reasoning_prompt(
     )
 
 
-def build_user_model_reasoner(store: WorldStore, model: LlmModel) -> DescriptorReasoner:
+async def _reason_user_model(
+    transport: "LlmTransport", memories: Sequence[MemoryView],
+    inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+) -> UserModelReasoningResult:
+    projection, actions = await owner_reasoning(
+        transport, USER_MODEL_REASONING_SYSTEM_PROMPT, UserModelView(space_id="current"),
+        memories, inferred_memories, hypotheses, PersonProjectionResult,
+        UserReasoningActionsResult,
+    )
+    return UserModelReasoningResult(
+        profile_card=projection.profile_card, hypothesis_actions=actions.hypothesis_actions,
+    )
+
+
+def build_user_model_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
+    reason_user_model = partial(_reason_user_model, model)
+
     def load_context(space_id: str):
         _, _, user_models = store.stale_entities()
         if space_id not in user_models:
@@ -49,7 +75,7 @@ def build_user_model_reasoner(store: WorldStore, model: LlmModel) -> DescriptorR
 
     def call(space_id: str, context):
         _, evidence, inferred, hypotheses = context
-        return "reason-user-model", model.reason_user_model, (evidence, inferred, hypotheses)
+        return "reason-user-model", reason_user_model, (evidence, inferred, hypotheses)
 
     def apply(space_id: str, context, result) -> bool:
         watermark, _, _, hypotheses = context
