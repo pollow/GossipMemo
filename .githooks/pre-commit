@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Format staged Python files with autopep8 and re-stage the results.
+set -euo pipefail
+
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR -z |
+    tr '\0' '\n' | grep -E '\.py$' || true)
+
+if [ ${#staged[@]} -eq 0 ]; then
+    exit 0
+fi
+
+UV_CACHE_DIR="${UV_CACHE_DIR:-/tmp/gossipmemo-uv-cache}" \
+    uv run autopep8 --in-place "${staged[@]}"
+
+git add -- "${staged[@]}"
