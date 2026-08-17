@@ -184,6 +184,7 @@ class ChatCompletionResponse(BaseModel):
 
     choices: list[ChatCompletionChoice] = Field(min_length=1)
 
+
 @dataclass(frozen=True)
 class RetryPolicy:
     """How long to wait before retrying, and how many times to bother.
@@ -205,14 +206,10 @@ class RetryPolicy:
             return jittered
         return max(jittered, min(retry_after, self.max_seconds))
 
+
 @runtime_checkable
 class LlmTransport(Protocol):
-    """The narrow transport seam: one provider HTTP request, nothing else.
-
-    This sits alongside the wide :class:`LlmModel` interface rather than
-    replacing it. `OpenAICompatibleAdapter` satisfies both today. A later
-    commit moves individual reasoners onto `LlmTransport` + `structured()`
-    one family at a time, once prompt assembly has left `llm.py`.
+    """What a reasoner needs from the provider, and nothing it doesn't.
 
     `prepare` is what keeps this protocol honest: request-shaping config
     (model name, temperature, max_tokens) belongs to the transport, so
@@ -220,6 +217,15 @@ class LlmTransport(Protocol):
     `complete` would send. Chunking can then estimate that request against
     `context_budget` with no drift between what was measured and what goes
     out, and `structured` needs no access to adapter internals.
+
+    Two members are not about transport at all: `user_name` and
+    `extraction_policy` are server configuration that reasoner prompts
+    need, and this is the only object a reasoner is handed today, so they
+    arrived here as the alternative to reaching past the protocol. They
+    would sit more naturally on the reasoner factories, which would mean
+    threading `Settings` into `SocialMemoryWorld` -- a call worth making
+    deliberately rather than as a side effect of the split. Until then,
+    a transport double must supply both.
     """
 
     @property
