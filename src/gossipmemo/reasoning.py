@@ -2,14 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Protocol
+from collections.abc import Callable, Sequence
 
-
-class ReasoningStage(Protocol):
-    name: str
-
-    async def run_until_caught_up(self, space_id: str) -> None: ...
+from .reasoners import Reasoner
 
 
 DEFAULT_REASONING_PIPELINE = (
@@ -19,24 +14,35 @@ DEFAULT_REASONING_PIPELINE = (
     "coverage",
     "learning_goals",
 )
+
+
+async def catch_up(
+    reasoner: Reasoner, space_id: str, should_continue: Callable[[], bool]
+) -> None:
+    """Drive one reasoner until it reports no work left, or we are stopping.
+
+    The loop lives here rather than in the reasoner: a reasoner owns one
+    bounded attempt (load, call, commit, "call me again?"), and the caller
+    owns whether to keep going at all.
+    """
+    while should_continue() and await reasoner.attempt(space_id):
+        pass
+
+
 class ReasoningPipeline:
-    """Run opaque stage adapters in order; stage-specific knowledge stays outside."""
+    """Run reasoners in order, each to catch-up, in a single space."""
 
-    def __init__(self, stages: Sequence[ReasoningStage]) -> None:
-        self._stages = tuple(stages)
-
-    async def run_until_caught_up(self, space_id: str) -> None:
-        for stage in self._stages:
-            await stage.run_until_caught_up(space_id)
-
-
-class FunctionStage:
-    def __init__(self, name: str, runner: Callable[[str], Awaitable[None]]) -> None:
-        self.name = name
-        self._runner = runner
+    def __init__(
+        self,
+        reasoners: Sequence[Reasoner],
+        should_continue: Callable[[], bool] = lambda: True,
+    ) -> None:
+        self._reasoners = tuple(reasoners)
+        self._should_continue = should_continue
 
     async def run_until_caught_up(self, space_id: str) -> None:
-        await self._runner(space_id)
+        for reasoner in self._reasoners:
+            await catch_up(reasoner, space_id, self._should_continue)
 
 
-__all__ = ["DEFAULT_REASONING_PIPELINE", "FunctionStage", "ReasoningPipeline", "ReasoningStage"]
+__all__ = ["DEFAULT_REASONING_PIPELINE", "ReasoningPipeline", "catch_up"]

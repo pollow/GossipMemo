@@ -4,26 +4,60 @@ import asyncio
 
 import pytest
 
-from gossipmemo.reasoning import FunctionStage, ReasoningPipeline
+from gossipmemo.reasoning import ReasoningPipeline, catch_up
+
+
+class RecordingReasoner:
+    """A reasoner that reports `attempts` units of work, then stops."""
+
+    def __init__(self, name: str, events: list[str], attempts: int = 1, boom: bool = False) -> None:
+        self.name = name
+        self._events = events
+        self._remaining = attempts
+        self._boom = boom
+
+    async def attempt(self, space_id: str) -> bool:
+        self._events.append(f"{self.name}-{space_id}")
+        await asyncio.sleep(0)
+        if self._boom:
+            raise RuntimeError("boom")
+        self._remaining -= 1
+        return self._remaining > 0
 
 
 @pytest.mark.asyncio
 async def test_pipeline_is_strictly_sequential_and_stops_on_failure():
     events: list[str] = []
-
-    async def first(space: str) -> None:
-        events.append(f"start-{space}")
-        await asyncio.sleep(0)
-        events.append("first-done")
-
-    async def failed(_: str) -> None:
-        events.append("second-start")
-        raise RuntimeError("boom")
-
-    pipeline = ReasoningPipeline((FunctionStage("one", first), FunctionStage("two", failed), FunctionStage("three", lambda _: asyncio.sleep(0))))
+    pipeline = ReasoningPipeline(
+        (
+            RecordingReasoner("one", events),
+            RecordingReasoner("two", events, boom=True),
+            RecordingReasoner("three", events),
+        )
+    )
     with pytest.raises(RuntimeError, match="boom"):
         await pipeline.run_until_caught_up("s")
-    assert events == ["start-s", "first-done", "second-start"]
+    assert events == ["one-s", "two-s"]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runs_each_reasoner_to_catch_up():
+    events: list[str] = []
+    pipeline = ReasoningPipeline(
+        (RecordingReasoner("one", events, attempts=3), RecordingReasoner("two", events))
+    )
+    await pipeline.run_until_caught_up("s")
+    assert events == ["one-s", "one-s", "one-s", "two-s"]
+
+
+@pytest.mark.asyncio
+async def test_catch_up_stops_between_attempts_when_asked():
+    events: list[str] = []
+    reasoner = RecordingReasoner("one", events, attempts=5)
+    # The reasoner still has work; the loop re-checks before each attempt,
+    # so it stops mid-catch-up rather than draining.
+    await catch_up(reasoner, "s", lambda: not events)
+    assert events == ["one-s"]
 
 
 @pytest.mark.asyncio

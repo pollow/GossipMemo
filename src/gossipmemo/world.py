@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Coroutine
+from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -34,7 +34,7 @@ from .reasoners import (
     build_relationship_reasoner,
     build_user_model_reasoner,
 )
-from .reasoning import DEFAULT_REASONING_PIPELINE, FunctionStage, ReasoningPipeline
+from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline, catch_up
 from .store import SqliteWorldStore
 
 
@@ -76,10 +76,8 @@ class SocialMemoryWorld:
         self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
         self._extraction_reasoner: Reasoner = build_extraction_reasoner(self.store, self.model)
         self.reasoning_pipeline = ReasoningPipeline(
-            [
-                FunctionStage(name, self._stage_runner(reasoners[name]))
-                for name in reasoning_pipeline_order
-            ]
+            [reasoners[name] for name in reasoning_pipeline_order],
+            should_continue=lambda: not self._stopping,
         )
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
@@ -293,20 +291,16 @@ class SocialMemoryWorld:
             context_status=context_status,
         )
 
-    def _stage_runner(self, reasoner: Reasoner) -> Callable[[str], Coroutine[Any, Any, None]]:
-        # The driver owns this loop and the `_stopping` check; the reasoner
-        # owns everything inside one `attempt` (load, call, commit).
-        async def run(space_id: str) -> None:
-            while not self._stopping and await reasoner.attempt(space_id):
-                pass
-
-        return run
+    def _catch_up(self, reasoner: Reasoner, space_id: str) -> Coroutine[Any, Any, None]:
+        # The driver owns the `_stopping` check; the reasoner owns
+        # everything inside one `attempt` (load, call, commit).
+        return catch_up(reasoner, space_id, lambda: not self._stopping)
 
     def _schedule_continuity_reason(self, space_id: str) -> None:
         logger.info("continuity_scheduled", extra={"space_id": space_id})
         self._spawn(
             ("continuity", space_id, space_id),
-            self._stage_runner(self._continuity_reasoner)(space_id),
+            self._catch_up(self._continuity_reasoner, space_id),
         )
 
     def _drain_extraction_batches(self, space_id: str) -> None:
@@ -360,7 +354,7 @@ class SocialMemoryWorld:
         logger.info("extraction_scheduled", extra={"space_id": space_id})
         self._spawn(
             ("extraction", space_id, space_id),
-            self._stage_runner(self._extraction_reasoner)(space_id),
+            self._catch_up(self._extraction_reasoner, space_id),
         )
 
     def _next_induction_delay(self) -> float:
