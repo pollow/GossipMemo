@@ -469,6 +469,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         guidance_items = guidance.get("items", []) if isinstance(guidance, Mapping) else []
         if isinstance(guidance_items, list):
             seen_guidance: set[str] = set()
+            goal_lines: list[str] = []
             for item in guidance_items[:8]:
                 if not isinstance(item, Mapping):
                     continue
@@ -477,9 +478,22 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 if not content or item_id in seen_guidance:
                     continue
                 seen_guidance.add(item_id)
-                label = "Tentative hypothesis" if item.get(
-                    "kind") == "hypothesis" else "Optional learning goal"
-                lines.append(f"{label}: {content}")
+                if item.get("kind") == "hypothesis":
+                    lines.append(f"Tentative hypothesis: {content}")
+                else:
+                    goal_lines.append(f"Optional learning goal: {content}")
+            if goal_lines:
+                # Several goals arrive at once and they are a random sample of
+                # open directions, not a shortlist chosen for this moment. Say
+                # so, or the natural reading is a checklist to work through.
+                lines.append(
+                    "About the optional learning goals below: they are a random sample of "
+                    "long-term directions, not questions to ask and not a checklist. Ignore "
+                    "them by default. Use one only if the conversation already touches it, "
+                    "and then in your own words — confirm, follow up, keep observing, or let "
+                    "it go, as the moment warrants. Never walk through them in turn; that "
+                    "turns the conversation into an interview.")
+                lines.extend(goal_lines)
         people = bundle.get("people", []) if isinstance(bundle, Mapping) else []
         people = list(people) + list(result.get("known_people", []))
         seen_people: set[str] = set()

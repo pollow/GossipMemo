@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import sqlite3
 import uuid
@@ -255,8 +256,15 @@ class PersonMergeError(ValueError):
 class SqliteWorldStore:
     """SQLite Adapter. Each method owns its short atomic write internally."""
 
-    def __init__(self, path: Path):
+    GUIDANCE_GOAL_MIN = 3
+    GUIDANCE_GOAL_MAX = 5
+
+    def __init__(self, path: Path, rng: random.Random | None = None):
         self.path = path
+        # Learning goals are sampled rather than ranked (see `_guidance`), so
+        # the source of randomness is a constructor dependency: a caller that
+        # needs reproducible sampling passes a seeded Random.
+        self.rng = rng if rng is not None else random.Random()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -2047,7 +2055,19 @@ class SqliteWorldStore:
             return True
 
     def _guidance(self, connection: sqlite3.Connection, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
-        """Return a bounded, deterministic set; coverage never leaves this method."""
+        """Return a bounded set; coverage itself never leaves this method.
+
+        Hypotheses and learning goals are selected differently on purpose.
+        A hypothesis is a claim about a specific owner, so the activated
+        people already narrow it to the current subject and the single best
+        match is a useful thing to confirm. A learning goal is a direction
+        rather than a claim: only the consuming agent knows what the
+        conversation is currently about, and this method has nothing but a
+        query string to judge with. So goals are not ranked at all — a random
+        3-5 are offered and the agent decides which, if any, fit. Diversity
+        of the pool is what makes the sample useful, and that is the
+        planner's job (it fans out per coverage root).
+        """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
         rows = connection.execute(
@@ -2057,10 +2077,9 @@ class SqliteWorldStore:
             "ORDER BY updated_at DESC, id",
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
-        updated: dict[str, str] = {}
-        items = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
-                              owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
-        updated.update({row['id']: row['updated_at'] for row in rows})
+        hypotheses = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
+                                   owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
+        updated = {row['id']: row['updated_at'] for row in rows}
         goals = connection.execute(
             f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
             f"WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' OR (focus_kind = 'person' AND focus_id IN ({placeholders})) OR "
@@ -2068,9 +2087,9 @@ class SqliteWorldStore:
             "ORDER BY updated_at DESC, id",
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
-        items.extend(GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
-                     owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status']) for row in goals)
-        updated.update({row['id']: row['updated_at'] for row in goals})
+        learning_goals = [GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
+                                       owner_kind=row['focus_kind'], owner_id=row['focus_id'],
+                                       status=row['status']) for row in goals]
         # Lexical relevance is only a tie-breaker over recency. Character
         # bigrams keep short/non-space-separated text useful (including CJK).
         folded = query.casefold()
@@ -2081,11 +2100,10 @@ class SqliteWorldStore:
             relevance = (1000 if folded and folded in text else 0) + \
                 sum(text.count(g) for g in grams)
             return (relevance, updated[item.id], item.id)
-        by_kind: dict[str, list[GuidanceItem]] = {"hypothesis": [], "learning_goal": []}
-        for item in items:
-            by_kind[item.kind].append(item)
-        selected = [sorted(by_kind[k], key=rank, reverse=True)[0]
-                    for k in ("hypothesis", "learning_goal") if by_kind[k]]
+        selected = sorted(hypotheses, key=rank, reverse=True)[:1]
+        sample_size = min(len(learning_goals),
+                          self.rng.randint(self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
+        selected.extend(self.rng.sample(learning_goals, sample_size))
         selected.sort(key=lambda item: (item.kind, item.id))
         return GuidanceBundle(items=selected)
 
@@ -2113,10 +2131,13 @@ class SqliteWorldStore:
                     people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
                                              profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
             guidance = self._guidance(connection, space_id)
+            # Guidance is deliberately outside the version: learning goals are
+            # sampled fresh on every read, so hashing them would invalidate the
+            # caller's cached bundle every turn and defeat the whole point of
+            # the version. The version tracks the durable context state.
             payload = {"user_model": user_view.model_dump(mode="json") if user_view else None,
                        "continuity": continuity.model_dump(mode="json") if continuity else None,
-                       "people": [item.model_dump(mode="json") for item in people],
-                       "guidance": guidance.model_dump(mode="json")}
+                       "people": [item.model_dump(mode="json") for item in people]}
             version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
             return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people, guidance=guidance)
 

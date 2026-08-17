@@ -441,6 +441,10 @@ coverage root revision 之和做 optimistic compare-and-swap。私密方向不�
 忠实维护包括敏感内容在内的未知方向，**现在是否询问、怎样询问由消费 agent 决定**。
 deferred 不进入 chat guidance。创建 Goal 本身不提高 coverage。
 
+消费端不对 goal 做相关性排序：在 focus 过滤（`user`，或指向已激活 Person / 相关 Relationship）
+之后，随机取 3–5 条随 turn 返回。「现在在聊什么」只有消费 agent 知道，服务端手上只有一个
+query 字符串。样本的价值因此完全来自池子的多样性——这正是 planner 按 root 扇出的理由。
+
 ## 9. Projection 与 canonical data
 
 数据分为两类：

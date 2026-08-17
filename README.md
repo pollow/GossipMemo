@@ -317,11 +317,22 @@ user message and returns, in the same response:
   and a failure here never blocks the turn
 
 `guidance` is how the system asks for what it is missing. It carries **at most
-one open Hypothesis and at most one open or partial LearningGoal**, selected
-deterministically: recency first, with character-bigram overlap against the
-message as a tie-break (bigrams so that CJK and unspaced text still rank). The
-CoverageMap itself never leaves the server — only the one question it justifies.
-The agent is free to weave that question into its reply or ignore it.
+one open Hypothesis and a random three to five open or partial LearningGoals**.
+The two are selected differently on purpose. A Hypothesis is a claim about a
+specific owner, so the activated People already narrow it to the current
+subject and the single best match is worth confirming: recency first, with
+character-bigram overlap against the message as a tie-break (bigrams so that
+CJK and unspaced text still rank). A LearningGoal is a long-term direction
+rather than a claim, and only the agent knows what the conversation is
+currently about — so the server does not rank goals at all. It samples, and the
+agent decides which, if any, fit. Coverage entries themselves never leave the
+server. The agent is free to act on guidance or ignore it; the Hermes
+integration renders the goals with an explicit instruction to ignore them by
+default, so several directions at once do not turn the chat into an interview.
+
+Because goals are sampled fresh on every read, `guidance` is deliberately
+excluded from `version`: the version tracks the durable context state, so a
+warm caller is not invalidated every turn.
 
 An empty bundle is a valid cold-start result. The current session's raw messages
 carry continuity while long-term memory accumulates.

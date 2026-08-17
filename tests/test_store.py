@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1506,6 +1507,78 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
     # This models a process restart: stale discovery must notice the second row
     # even though it shares the persisted timestamp.
     assert store.stale_coverage_spaces() == ["personal"]
+
+
+def _seeded_store(tmp_path, seed: int, goal_count: int) -> SqliteWorldStore:
+    world = SqliteWorldStore(tmp_path / f"guidance-{seed}.db", rng=random.Random(seed))
+    world.initialize()
+    world.ensure_space("s")
+    with world._connect() as connection:
+        for index in range(goal_count):
+            connection.execute(
+                "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
+                "created_at,updated_at) VALUES (?,'s',?,'context','[]','1','1')",
+                (f"g{index:02d}", f"goal {index}"),
+            )
+    return world
+
+
+def test_guidance_samples_three_to_five_learning_goals(tmp_path):
+    """Goals are sampled, not ranked: only the count and the pool are promised."""
+    sizes = set()
+    for seed in range(20):
+        world = _seeded_store(tmp_path, seed, goal_count=30)
+        ids = [item.id for item in world.guidance_bundle("s").items]
+        assert all(item.startswith("g") for item in ids)
+        assert len(set(ids)) == len(ids)
+        sizes.add(len(ids))
+    assert sizes == {3, 4, 5}
+
+
+def test_guidance_ignores_query_relevance_for_learning_goals(tmp_path):
+    """A seeded store returns the same sample whatever the query says."""
+    world = _seeded_store(tmp_path, 7, goal_count=30)
+    first = [item.id for item in world.guidance_bundle("s", [], "goal 3").items]
+    world.rng.seed(7)
+    second = [item.id for item in world.guidance_bundle("s", [], "something else").items]
+    assert first == second
+
+
+def test_guidance_sampling_still_respects_the_focus_filter(tmp_path):
+    """Sampling replaces ranking, not the deterministic focus gate."""
+    world = _seeded_store(tmp_path, 11, goal_count=0)
+    world.add_manual_memory("s", ManualMemoryRequest(content="Alice is a friend",
+                                                     people=["Alice"]))
+    with world._connect() as connection:
+        person_id = connection.execute(
+            "SELECT id FROM people WHERE display_name = 'Alice'").fetchone()["id"]
+        for index in range(10):
+            connection.execute(
+                "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
+                "focus_kind,focus_id,created_at,updated_at) "
+                "VALUES (?,'s',?,'context','[]','person',?,'1','1')",
+                (f"p{index:02d}", f"about Alice {index}", person_id),
+            )
+        connection.execute(
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,status,"
+            "created_at,updated_at) VALUES ('retired','s','old','context','[]','retired','1','1')")
+    assert world.guidance_bundle("s").items == []
+    activated = [item.id for item in world.guidance_bundle("s", [person_id]).items]
+    assert activated and all(item.startswith("p") for item in activated)
+
+
+def test_guidance_returns_the_whole_small_goal_pool(tmp_path):
+    world = _seeded_store(tmp_path, 1, goal_count=2)
+    assert sorted(item.id for item in world.guidance_bundle("s").items) == ["g00", "g01"]
+
+
+def test_context_version_is_stable_while_guidance_is_sampled(tmp_path):
+    world = _seeded_store(tmp_path, 3, goal_count=30)
+    first = world.context_bundle("s")
+    second = world.context_bundle("s")
+    assert first.version == second.version
+    assert [item.id for item in first.guidance.items] != [
+        item.id for item in second.guidance.items]
 
 
 def test_initialize_enables_wal_and_a_short_busy_timeout(store):

@@ -60,3 +60,27 @@ def test_hermes_labels_guidance_as_tentative_or_optional():
     assert "Tentative hypothesis: Maybe true" in formatted
     assert "Optional learning goal: Learn more" in formatted
     assert "Memory" not in formatted
+
+
+def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
+    """Several goals at once read as an interview script without this framing."""
+    formatted = GossipMemoMemoryProvider._format_context({
+        "guidance": {"items": [
+            {"id": "h", "kind": "hypothesis", "content": "Maybe true"},
+            {"id": "g1", "kind": "learning_goal", "content": "First"},
+            {"id": "g2", "kind": "learning_goal", "content": "Second"},
+        ]}
+    })
+    lines = formatted.splitlines()
+    note = next(line for line in lines if line.startswith("About the optional learning goals"))
+    assert "Ignore them by default" in note
+    assert "not questions to ask" in note
+    assert "interview" in note
+    # The note must precede the goals it frames, and must not appear when the
+    # bundle carries hypotheses only.
+    assert lines.index(note) < lines.index("Optional learning goal: First")
+    assert lines.index("Tentative hypothesis: Maybe true") < lines.index(note)
+    hypothesis_only = GossipMemoMemoryProvider._format_context({
+        "guidance": {"items": [{"id": "h", "kind": "hypothesis", "content": "Maybe true"}]}
+    })
+    assert "About the optional learning goals" not in hypothesis_only
