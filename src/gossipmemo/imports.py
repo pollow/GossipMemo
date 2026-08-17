@@ -37,7 +37,8 @@ def _records(path: Path, raw: str) -> list[Any]:
         return _jsonl_records(path, raw)
     if isinstance(parsed, dict):
         if "messages" not in parsed:
-            raise ValueError(f"chat file {path} JSON object must contain messages")
+            raise ValueError(
+                f"chat file {path} JSON object must contain messages")
         parsed = parsed["messages"]
     if not isinstance(parsed, list):
         raise ValueError(
@@ -92,7 +93,8 @@ def _message(
     if not isinstance(source_metadata, dict):
         raise ValueError(f"{label} source.metadata must be an object")
     provider = source_data.get("provider", "import")
-    conversation_key = source_data.get("conversation_key") or conversation_default
+    conversation_key = source_data.get(
+        "conversation_key") or conversation_default
     item_id = source_data.get("item_id")
     if item_id is None:
         item_id = str(record_number - 1)
@@ -125,7 +127,8 @@ def _message(
             ),
         )
     except ValidationError as error:
-        raise ValueError(f"{label} is invalid: {error.errors()[0]['msg']}") from error
+        raise ValueError(
+            f"{label} is invalid: {error.errors()[0]['msg']}") from error
 
 
 __all__ = ["load_chat_messages"]

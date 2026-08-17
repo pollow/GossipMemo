@@ -61,9 +61,11 @@ def _evidence_lines(memories: list[MemoryView] | tuple[MemoryView, ...] | list[A
     lines = []
     for m in memories:
         if hasattr(m, "source_memory_ids"):
-            lines.append("- digest=" + json.dumps(m.model_dump(mode="json"), ensure_ascii=False, separators=(",", ":")) + " (compressed evidence; IDs refer to original Memories)")
+            lines.append("- digest=" + json.dumps(m.model_dump(mode="json"), ensure_ascii=False,
+                         separators=(",", ":")) + " (compressed evidence; IDs refer to original Memories)")
         else:
-            lines.append(f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} text={json.dumps(m.content, ensure_ascii=False)}")
+            lines.append(
+                f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} text={json.dumps(m.content, ensure_ascii=False)}")
     return "\n".join(lines) or "- (none)"
 
 
@@ -87,17 +89,21 @@ def owner_reasoning_prefix(
         + _json(target) + "\n</target>\n<evidence-memories>\n"
         + _evidence_lines(evidence_memories) + "\n</evidence-memories>\n"
         + "<current-inferred-memories comparison-only=\"true\">\n"
-        + _evidence_lines(inferred_memories) + "\n</current-inferred-memories>\n"
-        + "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
+        + _evidence_lines(inferred_memories) +
+        "\n</current-inferred-memories>\n"
+        + "<open-hypotheses comparison-only=\"true\">\n" +
+        _hypothesis_lines(hypotheses)
         + "\n</open-hypotheses>\nOnly evidence-memories are evidence. Current inferred memories and open hypotheses may be reviewed for duplication or explicit lifecycle actions, never used as support."
     )
+
 
 def owner_evidence_digest_prompt(memories: list[Any], user_name: str = "CurrentUser") -> str:
     return ("Compress supplied raw evidence only. Preserve chronology, basis, uncertainty, "
             "contradictions, semantic subject, and exact source_memory_ids. Do not infer people, "
             "traits, or actions; never invent IDs. Return exactly one digest item covering every "
             "supplied source ID.\n" + _json([
-                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
+                item.model_dump(mode="json") if isinstance(
+                    item, BaseModel) else item
                 for item in memories
             ]))
 

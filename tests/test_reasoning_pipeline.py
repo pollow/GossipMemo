@@ -45,7 +45,8 @@ async def test_pipeline_is_strictly_sequential_and_stops_on_failure():
 async def test_pipeline_runs_each_reasoner_to_catch_up():
     events: list[str] = []
     pipeline = ReasoningPipeline(
-        (RecordingReasoner("one", events, attempts=3), RecordingReasoner("two", events))
+        (RecordingReasoner("one", events, attempts=3),
+         RecordingReasoner("two", events))
     )
     await pipeline.run_until_caught_up("s")
     assert events == ["one-s", "one-s", "one-s", "two-s"]
@@ -66,12 +67,15 @@ async def test_world_daily_scan_deduplicates_pipeline_tasks_per_space(tmp_path, 
     from gossipmemo.store import SqliteWorldStore
     from gossipmemo.world import SocialMemoryWorld
 
-    world = SocialMemoryWorld(SqliteWorldStore(tmp_path / "world.db"), object())
-    monkeypatch.setattr(world.store, "stale_entities", lambda: ([("space", "p")], [], []))
+    world = SocialMemoryWorld(SqliteWorldStore(
+        tmp_path / "world.db"), object())
+    monkeypatch.setattr(world.store, "stale_entities",
+                        lambda: ([("space", "p")], [], []))
     monkeypatch.setattr(world.store, "stale_coverage_spaces", lambda: [])
     world._schedule_all_stale()
     world._schedule_all_stale()
-    assert sum(key == ("reasoning-pipeline", "space", "space") for key in world._scheduled) == 1
+    assert sum(key == ("reasoning-pipeline", "space", "space")
+               for key in world._scheduled) == 1
     world._stopping = True
     await asyncio.gather(*world._tasks, return_exceptions=True)
 
@@ -80,7 +84,8 @@ def test_context_budget_handles_cjk_json_and_reports_fit():
     from gossipmemo.context_budget import ContextBudget
 
     budget = ContextBudget(110, 20, 10)
-    estimate = budget.estimate_request({"messages": [{"role": "user", "content": "你好" * 20}]})
+    estimate = budget.estimate_request(
+        {"messages": [{"role": "user", "content": "你好" * 20}]})
     report = budget.report(estimate)
     assert report.fits
     assert budget.estimate_text("你好") > budget.estimate_text("hi")
@@ -99,7 +104,8 @@ async def test_adapter_rejects_oversized_request_before_http_client():
     from gossipmemo.llm import OpenAICompatibleAdapter
     from gossipmemo.transport import ChatMessage
 
-    adapter = OpenAICompatibleAdapter("http://example.test", "key", "model", context_budget=ContextBudget(100, 90, 5))
+    adapter = OpenAICompatibleAdapter(
+        "http://example.test", "key", "model", context_budget=ContextBudget(100, 90, 5))
     called = False
 
     async def no_client():
@@ -108,7 +114,8 @@ async def test_adapter_rejects_oversized_request_before_http_client():
         raise AssertionError("HTTP client must not be created")
 
     adapter._get_client = no_client  # type: ignore[method-assign]
-    request = adapter.prepare([ChatMessage(role="user", content="超大文本" * 100)], structured=False)
+    request = adapter.prepare(
+        [ChatMessage(role="user", content="超大文本" * 100)], structured=False)
     with pytest.raises(ValueError, match=r"estimated .* limit"):
         await adapter.complete(request)
     assert not called

@@ -56,17 +56,20 @@ def _normalise_messages(messages: Any) -> list[Json]:
         items: Iterable[Any] = [messages]
     else:
         if isinstance(messages, (str, bytes)):
-            raise TypeError("messages must be a mapping or iterable of mappings")
+            raise TypeError(
+                "messages must be a mapping or iterable of mappings")
         try:
             items = iter(messages)
         except TypeError as exc:
-            raise TypeError("messages must be a mapping or iterable of mappings") from exc
+            raise TypeError(
+                "messages must be a mapping or iterable of mappings") from exc
 
     result: list[Json] = []
     for item in items:
         value = _jsonable(item)
         if not isinstance(value, Mapping):
-            raise TypeError("each message must be a mapping or model with model_dump()")
+            raise TypeError(
+                "each message must be a mapping or model with model_dump()")
         result.append(dict(value))
     if not result:
         raise ValueError("messages must contain at least one message")
@@ -100,7 +103,8 @@ def _normalise_turn_message(
         result.pop("source", None)
     if result.get("source") is not None and not isinstance(result["source"], Mapping):
         raise TypeError("source must be a mapping or model")
-    key = idempotency_key if idempotency_key is not None else result.get("idempotency_key")
+    key = idempotency_key if idempotency_key is not None else result.get(
+        "idempotency_key")
     if key is None or not str(key).strip():
         key = uuid.uuid4().hex
     result["idempotency_key"] = str(key).strip()
@@ -171,7 +175,8 @@ class _ClientCommon:
         if not isinstance(space_id, str) or not space_id.strip():
             raise ValueError("space_id is required")
         self.base_url = base_url.rstrip("/")
-        self.api_key = api_key.strip() if isinstance(api_key, str) else str(api_key or "")
+        self.api_key = api_key.strip() if isinstance(
+            api_key, str) else str(api_key or "")
         self.space_id = space_id.strip()
         self.timeout = timeout
         self._headers: dict[str, str] = {
@@ -184,7 +189,8 @@ class _ClientCommon:
                 token = f"Bearer {token}"
             self._headers["Authorization"] = token
         if headers:
-            self._headers.update({str(key): str(value) for key, value in headers.items()})
+            self._headers.update({str(key): str(value)
+                                 for key, value in headers.items()})
 
     def _url(self, path: str) -> str:
         if not path.startswith("/"):
@@ -194,6 +200,7 @@ class _ClientCommon:
     def _space_path(self, suffix: str) -> str:
         space = quote(self.space_id, safe="")
         return f"/v1/spaces/{space}/{suffix.lstrip('/')}"
+
 
 class GossipMemo(_ClientCommon):
     """Synchronous GossipMemo client.
@@ -217,7 +224,8 @@ class GossipMemo(_ClientCommon):
     ) -> None:
         super().__init__(base_url, api_key, space_id, timeout=timeout, headers=headers)
         self._owns_client = client is None
-        self._client = client or httpx.Client(timeout=timeout, transport=transport)
+        self._client = client or httpx.Client(
+            timeout=timeout, transport=transport)
 
     def _request(self, method: str, path: str, payload: Any = None) -> Any:
         url = self._url(path)
@@ -309,7 +317,8 @@ class GossipMemo(_ClientCommon):
                 idempotency_key,
             )
         ):
-            raise ValueError("pass either messages or single-message fields, not both")
+            raise ValueError(
+                "pass either messages or single-message fields, not both")
         if messages is None:
             if content is None:
                 raise TypeError("ingest requires messages or content")
@@ -331,7 +340,8 @@ class GossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
             }
         return self._request(
-            "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
+            "POST", self._space_path("ingest"), {
+                "messages": _normalise_messages(messages)}
         )
 
     def query(
@@ -426,7 +436,8 @@ class GossipMemo(_ClientCommon):
         }
         identifier = quote(memory_id, safe="")
         return self._request(
-            "POST", self._space_path(f"memories/{identifier}/supersede"), payload
+            "POST", self._space_path(
+                f"memories/{identifier}/supersede"), payload
         )
 
     def person_dossier(self, person_id: str) -> Any:
@@ -440,10 +451,12 @@ class GossipMemo(_ClientCommon):
     def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
         """Merge a confirmed source person into the canonical target person."""
         if not str(source_person_id).strip() or not str(target_person_id).strip():
-            raise ValueError("source_person_id and target_person_id are required")
+            raise ValueError(
+                "source_person_id and target_person_id are required")
         return self._request(
             "POST",
-            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
+            self._space_path(
+                f"people/{quote(str(source_person_id), safe='')}/merge"),
             {"target_person_id": str(target_person_id)},
         )
 
@@ -454,7 +467,8 @@ class GossipMemo(_ClientCommon):
             raise ValueError("relationship_id is required")
         return self._request(
             "GET",
-            self._space_path(f"relationships/{quote(relationship_id, safe='')}"),
+            self._space_path(
+                f"relationships/{quote(relationship_id, safe='')}"),
         )
 
     def close(self) -> None:
@@ -484,7 +498,8 @@ class AsyncGossipMemo(_ClientCommon):
     ) -> None:
         super().__init__(base_url, api_key, space_id, timeout=timeout, headers=headers)
         self._owns_client = client is None
-        self._client = client or httpx.AsyncClient(timeout=timeout, transport=transport)
+        self._client = client or httpx.AsyncClient(
+            timeout=timeout, transport=transport)
 
     async def _request(self, method: str, path: str, payload: Any = None) -> Any:
         url = self._url(path)
@@ -570,7 +585,8 @@ class AsyncGossipMemo(_ClientCommon):
                 idempotency_key,
             )
         ):
-            raise ValueError("pass either messages or single-message fields, not both")
+            raise ValueError(
+                "pass either messages or single-message fields, not both")
         if messages is None:
             if content is None:
                 raise TypeError("ingest requires messages or content")
@@ -592,7 +608,8 @@ class AsyncGossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
             }
         return await self._request(
-            "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
+            "POST", self._space_path("ingest"), {
+                "messages": _normalise_messages(messages)}
         )
 
     async def query(
@@ -679,7 +696,8 @@ class AsyncGossipMemo(_ClientCommon):
         }
         identifier = quote(memory_id, safe="")
         return await self._request(
-            "POST", self._space_path(f"memories/{identifier}/supersede"), payload
+            "POST", self._space_path(
+                f"memories/{identifier}/supersede"), payload
         )
 
     async def person_dossier(self, person_id: str) -> Any:
@@ -691,10 +709,12 @@ class AsyncGossipMemo(_ClientCommon):
     async def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
         """Merge a confirmed source person into the canonical target person."""
         if not str(source_person_id).strip() or not str(target_person_id).strip():
-            raise ValueError("source_person_id and target_person_id are required")
+            raise ValueError(
+                "source_person_id and target_person_id are required")
         return await self._request(
             "POST",
-            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
+            self._space_path(
+                f"people/{quote(str(source_person_id), safe='')}/merge"),
             {"target_person_id": str(target_person_id)},
         )
 
@@ -703,7 +723,8 @@ class AsyncGossipMemo(_ClientCommon):
             raise ValueError("relationship_id is required")
         return await self._request(
             "GET",
-            self._space_path(f"relationships/{quote(relationship_id, safe='')}"),
+            self._space_path(
+                f"relationships/{quote(relationship_id, safe='')}"),
         )
 
     async def close(self) -> None:

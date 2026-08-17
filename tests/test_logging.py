@@ -48,7 +48,8 @@ def test_json_formatter_includes_request_id_but_not_message_content():
 
 @pytest.mark.asyncio
 async def test_http_request_id_is_preserved_or_replaced():
-    app = create_app(_settings(), world=object())  # Lifespan is not entered here.
+    # Lifespan is not entered here.
+    app = create_app(_settings(), world=object())
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver"

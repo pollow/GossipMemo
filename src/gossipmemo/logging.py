@@ -9,7 +9,8 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
-request_id_context: ContextVar[str | None] = ContextVar("request_id", default=None)
+request_id_context: ContextVar[str | None] = ContextVar(
+    "request_id", default=None)
 
 
 class StructuredFormatter(logging.Formatter):
@@ -44,7 +45,8 @@ class StructuredFormatter(logging.Formatter):
         if request_id and "request_id" not in fields:
             fields["request_id"] = request_id
         if self.mode == "text":
-            suffix = " ".join(f"{key}={value!r}" for key, value in sorted(fields.items()))
+            suffix = " ".join(f"{key}={value!r}" for key,
+                              value in sorted(fields.items()))
             return f"{record.levelname} {record.name} {record.getMessage()}" + (f" {suffix}" if suffix else "")
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
@@ -80,4 +82,5 @@ def elapsed_ms(start: float) -> float:
     return round((time.perf_counter() - start) * 1000, 2)
 
 
-__all__ = ["StructuredFormatter", "configure_logging", "elapsed_ms", "request_id_context"]
+__all__ = ["StructuredFormatter", "configure_logging",
+           "elapsed_ms", "request_id_context"]

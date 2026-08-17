@@ -60,7 +60,8 @@ def _continuity_request(
         [
             ChatMessage(
                 role="system",
-                content=CONTINUITY_SYSTEM_PROMPT + "\n\n" + schema_instruction(ContinuityReasoningResult),
+                content=CONTINUITY_SYSTEM_PROMPT + "\n\n" +
+                schema_instruction(ContinuityReasoningResult),
             ),
             ChatMessage(role="user", content=continuity_prompt(prior, chunk)),
         ],
@@ -89,7 +90,8 @@ def _fit_continuity_prior(
         else:
             hi = middle - 1
     candidate = prior.model_copy(update={"text": text[:lo]})
-    context_budget.check(context_budget.estimate_request(request_for(candidate, chunk)))
+    context_budget.check(context_budget.estimate_request(
+        request_for(candidate, chunk)))
     return candidate
 
 
@@ -117,7 +119,8 @@ async def _reason_continuity(
     chunk_prior = ContinuityView(
         text=(continuity.text if continuity and continuity.text else "summary"),
         related_person_ids=(
-            continuity.related_person_ids if continuity and continuity.related_person_ids else ["person"]
+            continuity.related_person_ids if continuity and continuity.related_person_ids else [
+                "person"]
         ),
         through_message_id=(
             continuity.through_message_id if continuity and continuity.through_message_id else "continuity"
@@ -126,11 +129,13 @@ async def _reason_continuity(
 
     def fits(chunk: Sequence[ModelMessage]) -> bool:
         return context_budget.report(
-            context_budget.estimate_request(request_for(chunk_prior, list(chunk)))
+            context_budget.estimate_request(
+                request_for(chunk_prior, list(chunk)))
         ).fits
 
     def check(chunk: Sequence[ModelMessage]) -> None:
-        context_budget.check(context_budget.estimate_request(request_for(chunk_prior, list(chunk))))
+        context_budget.check(context_budget.estimate_request(
+            request_for(chunk_prior, list(chunk))))
 
     chunks = greedy_chunks(source, fits, check)
     # A small normal update deliberately remains one call. Large updates
@@ -167,7 +172,8 @@ def build_continuity_reasoner(store: WorldStore, model: LlmTransport) -> Descrip
 
     def apply(space_id: str, context, result) -> bool:
         continuity, messages = context
-        logger.info("continuity_extracted", extra={"space_id": space_id, "message_count": len(messages)})
+        logger.info("continuity_extracted", extra={
+                    "space_id": space_id, "message_count": len(messages)})
         expected = continuity.through_message_id if continuity else None
         return store.apply_continuity_reasoning(space_id, expected, result)
 
@@ -181,4 +187,5 @@ def build_continuity_reasoner(store: WorldStore, model: LlmTransport) -> Descrip
     )
 
 
-__all__ = ["CONTINUITY_SYSTEM_PROMPT", "build_continuity_reasoner", "continuity_prompt"]
+__all__ = ["CONTINUITY_SYSTEM_PROMPT",
+           "build_continuity_reasoner", "continuity_prompt"]

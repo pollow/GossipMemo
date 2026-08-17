@@ -42,10 +42,13 @@ def coverage_audit_prompt(
 ) -> str:
     """Immutable audit prefix plus one bounded evidence chunk."""
     return (
-        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" + COVERAGE_METHOD + "\n</coverage-rubric>\n"
-        "<current-coverage-map>\n" + _json(coverage) + "\n</current-coverage-map>\n"
+        "<coverage-rubric>\n" + COVERAGE_RUBRIC + "\n" +
+        COVERAGE_METHOD + "\n</coverage-rubric>\n"
+        "<current-coverage-map>\n" +
+        _json(coverage) + "\n</current-coverage-map>\n"
         "<new-evidence>\n" + _evidence_lines(memories) + "\n</new-evidence>\n"
-        "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
+        "<open-hypotheses comparison-only=\"true\">\n" +
+        _hypothesis_lines(hypotheses)
         + "\n</open-hypotheses>\nApply a patch only for this chunk. Preserve prior coverage unless new evidence changes it. "
         "Hypotheses may add a boundary or conflict with hypothesis_id, never evidence; a hypothesis never raises a coverage level. "
         "Each criterion patch needs only its stable parent criterion_id. Keep inventories compact and additive."
@@ -57,7 +60,8 @@ def _structured_request(
 ) -> ChatCompletionRequest:
     return transport.prepare(
         [
-            ChatMessage(role="system", content=system_prompt + "\n\n" + schema_instruction(result_type)),
+            ChatMessage(role="system", content=system_prompt +
+                        "\n\n" + schema_instruction(result_type)),
             ChatMessage(role="user", content=user_prompt),
         ],
         structured=True,
@@ -105,7 +109,8 @@ def _bounded_coverage_context(
     def fits(candidate_coverage: CoverageMapView, candidate_hypotheses: Sequence[HypothesisView]) -> bool:
         request = _structured_request(
             transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(candidate_coverage, [], list(candidate_hypotheses)),
+            coverage_audit_prompt(candidate_coverage, [],
+                                  list(candidate_hypotheses)),
             CoverageAuditPatch,
         )
         return context_budget.report(context_budget.estimate_request(request)).fits
@@ -123,7 +128,8 @@ def _bounded_coverage_context(
         raise ValueError("coverage prompt scaffolding exceeds context budget")
     chosen: list[HypothesisView] = []
     for hypothesis in hypotheses:
-        skeleton = hypothesis.model_copy(update={"content": "", "evidence": []})
+        skeleton = hypothesis.model_copy(
+            update={"content": "", "evidence": []})
         if fits(bounded, [*chosen, skeleton]):
             chosen.append(skeleton)
     return bounded, chosen
@@ -157,7 +163,8 @@ async def _audit_coverage(
     context_budget = transport.context_budget
     normal = _structured_request(
         transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-        coverage_audit_prompt(coverage, list(memories), list(hypotheses)), CoverageAuditPatch,
+        coverage_audit_prompt(coverage, list(memories),
+                              list(hypotheses)), CoverageAuditPatch,
     )
     if context_budget.report(context_budget.estimate_request(normal)).fits:
         _, result = await structured(
@@ -166,19 +173,22 @@ async def _audit_coverage(
         )
         return result
 
-    bounded_coverage, bounded_hypotheses = _bounded_coverage_context(transport, coverage, hypotheses)
+    bounded_coverage, bounded_hypotheses = _bounded_coverage_context(
+        transport, coverage, hypotheses)
 
     def request_for(chunk: Sequence[MemoryView]) -> ChatCompletionRequest:
         return _structured_request(
             transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(bounded_coverage, list(chunk), bounded_hypotheses), CoverageAuditPatch,
+            coverage_audit_prompt(bounded_coverage, list(
+                chunk), bounded_hypotheses), CoverageAuditPatch,
         )
 
     def fits(chunk: Sequence[MemoryView]) -> bool:
         return context_budget.report(context_budget.estimate_request(request_for(chunk))).fits
 
     def check(chunk: Sequence[MemoryView]) -> None:
-        context_budget.check(context_budget.estimate_request(request_for(chunk)))
+        context_budget.check(
+            context_budget.estimate_request(request_for(chunk)))
 
     patches: list[CoverageAuditPatch] = []
     for chunk in greedy_chunks(list(memories), fits, check):
@@ -187,15 +197,21 @@ async def _audit_coverage(
             transport, request.messages, CoverageAuditPatch,
             tier=current_call_tier(), label=current_call_label(),
         )
-        patches.append(_filter_coverage_patch(result, {memory.id for memory in chunk}))
+        patches.append(_filter_coverage_patch(
+            result, {memory.id for memory in chunk}))
 
     return CoverageAuditPatch(
         criteria=[item for patch in patches for item in patch.criteria],
-        boundary_upserts=[item for patch in patches for item in patch.boundary_upserts],
-        boundary_transitions=[item for patch in patches for item in patch.boundary_transitions],
-        life_periods=[item for patch in patches for item in patch.life_periods],
-        relationship_arcs=[item for patch in patches for item in patch.relationship_arcs],
-        behavioral_contexts=[item for patch in patches for item in patch.behavioral_contexts],
+        boundary_upserts=[
+            item for patch in patches for item in patch.boundary_upserts],
+        boundary_transitions=[
+            item for patch in patches for item in patch.boundary_transitions],
+        life_periods=[
+            item for patch in patches for item in patch.life_periods],
+        relationship_arcs=[
+            item for patch in patches for item in patch.relationship_arcs],
+        behavioral_contexts=[
+            item for patch in patches for item in patch.behavioral_contexts],
     )
 
 
@@ -221,7 +237,8 @@ def build_coverage_reasoner(store: WorldStore, model: "LlmTransport") -> Descrip
         coverage, memories, hypotheses, _ = context
         return store.apply_coverage_audit(
             space_id, coverage.source_watermark, coverage.source_cursor_id, result,
-            {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries},
+            {memory.id for memory in memories}, {
+                boundary.id for boundary in coverage.boundaries},
             {hypothesis.id for hypothesis in hypotheses},
         )
 
@@ -234,4 +251,5 @@ def build_coverage_reasoner(store: WorldStore, model: "LlmTransport") -> Descrip
     return DescriptorReasoner("coverage", load_context, call, apply, continue_when)
 
 
-__all__ = ["COVERAGE_AUDIT_SYSTEM_PROMPT", "build_coverage_reasoner", "coverage_audit_prompt"]
+__all__ = ["COVERAGE_AUDIT_SYSTEM_PROMPT",
+           "build_coverage_reasoner", "coverage_audit_prompt"]

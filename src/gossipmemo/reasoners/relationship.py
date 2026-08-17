@@ -77,7 +77,8 @@ def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> Des
 
     def load_context(space_id: str) -> _RelationshipTarget | None:
         _, relationships, _ = store.stale_entities()
-        targets = [relationship_id for sid, relationship_id in relationships if sid == space_id]
+        targets = [relationship_id for sid,
+                   relationship_id in relationships if sid == space_id]
         if not targets:
             return None
         relationship_id = targets[0]
@@ -88,9 +89,11 @@ def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> Des
         relationship, memories, watermark = context
         if not relationship.stale:
             return _RelationshipTarget(relationship_id, more_targets)
-        inferred, hypotheses = store.owner_review_context(space_id, "relationship", relationship_id)
+        inferred, hypotheses = store.owner_review_context(
+            space_id, "relationship", relationship_id)
         return _RelationshipTarget(
-            relationship_id, more_targets, relationship, tuple(memories), watermark,
+            relationship_id, more_targets, relationship, tuple(
+                memories), watermark,
             tuple(inferred), tuple(hypotheses),
         )
 
@@ -100,7 +103,8 @@ def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> Des
         return (
             "reason-relationship",
             reason_relationship,
-            (context.relationship, context.memories, context.inferred, context.hypotheses),
+            (context.relationship, context.memories,
+             context.inferred, context.hypotheses),
         )
 
     def apply(space_id: str, context: _RelationshipTarget, result) -> bool:

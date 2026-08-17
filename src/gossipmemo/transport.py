@@ -257,6 +257,7 @@ class LlmTransport(Protocol):
 
     async def aclose(self) -> None: ...
 
+
 def _message_content(content: str | list[Any] | None) -> str:
     if isinstance(content, str):
         if not content.strip():
@@ -276,7 +277,9 @@ def _message_content(content: str | list[Any] | None) -> str:
             return result
     raise LLMProtocolError("LLM response did not contain assistant text")
 
+
 _ResultT = TypeVar("_ResultT", bound=BaseModel)
+
 
 def _parse_model_output(content: str, result_type: type[_ResultT]) -> _ResultT:
     """Parse JSON output, accepting the common fenced-JSON variant."""
@@ -294,13 +297,15 @@ def _parse_model_output(content: str, result_type: type[_ResultT]) -> _ResultT:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as error:
-        raise LLMOutputError("LLM structured output was not valid JSON") from error
+        raise LLMOutputError(
+            "LLM structured output was not valid JSON") from error
     try:
         return result_type.model_validate(value)
     except ValidationError as error:
         raise LLMOutputError(
             f"LLM structured output did not match {result_type.__name__}"
         ) from error
+
 
 async def structured(
     transport: LlmTransport,

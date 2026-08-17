@@ -41,7 +41,8 @@ def test_complete_acquires_gate_around_the_request() -> None:
 
     async def run() -> str:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client)
             adapter_holder["adapter"] = adapter
             request = ChatCompletionRequest(
                 model="m",
@@ -145,7 +146,8 @@ class FakeTransport:
 def test_structured_needs_nothing_beyond_the_protocol() -> None:
     """`structured()` drives a transport that has only the protocol members."""
 
-    transport = FakeTransport(["not json", json.dumps({"memories": [], "people": []})])
+    transport = FakeTransport(
+        ["not json", json.dumps({"memories": [], "people": []})])
     assert isinstance(transport, LlmTransport)
 
     content, result = asyncio.run(

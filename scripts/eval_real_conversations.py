@@ -114,7 +114,8 @@ def to_messages(fixture: Fixture) -> list[MessageInput]:
         MessageInput(
             author=message.role,
             content=message.content,
-            occurred_at=session_time + timedelta(seconds=int(message.source_id)),
+            occurred_at=session_time +
+            timedelta(seconds=int(message.source_id)),
             idempotency_key=f"eval:{fixture.number}:{message.source_id}",
             source=SourceRef(
                 provider="gossipmemo_fixture",
@@ -136,7 +137,8 @@ def load_json(value: str | None, default: Any) -> Any:
 def dump_state(store: SqliteWorldStore, space_id: str) -> dict[str, Any]:
     with store._connect() as connection:
         people_rows = connection.execute(
-            "SELECT * FROM people WHERE space_id = ? ORDER BY display_name", (space_id,)
+            "SELECT * FROM people WHERE space_id = ? ORDER BY display_name", (
+                space_id,)
         ).fetchall()
         aliases = connection.execute(
             "SELECT person_id, value FROM person_aliases WHERE space_id = ? "
@@ -145,7 +147,8 @@ def dump_state(store: SqliteWorldStore, space_id: str) -> dict[str, Any]:
         ).fetchall()
         aliases_by_person: dict[str, list[str]] = {}
         for alias in aliases:
-            aliases_by_person.setdefault(alias["person_id"], []).append(alias["value"])
+            aliases_by_person.setdefault(
+                alias["person_id"], []).append(alias["value"])
         people = [
             {
                 "id": row["id"],
@@ -177,7 +180,8 @@ def dump_state(store: SqliteWorldStore, space_id: str) -> dict[str, Any]:
             for row in relationship_rows
         ]
         memory_rows = connection.execute(
-            "SELECT * FROM memories WHERE space_id = ? ORDER BY created_at", (space_id,)
+            "SELECT * FROM memories WHERE space_id = ? ORDER BY created_at", (
+                space_id,)
         ).fetchall()
         memories: list[dict[str, Any]] = []
         for row in memory_rows:

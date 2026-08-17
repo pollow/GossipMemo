@@ -17,9 +17,11 @@ def _handler(request: httpx.Request) -> httpx.Response:
 
 
 def test_sync_context_and_turn_payload_validation():
-    client = GossipMemo("http://test", client=httpx.Client(transport=httpx.MockTransport(_handler)))
+    client = GossipMemo(
+        "http://test", client=httpx.Client(transport=httpx.MockTransport(_handler)))
     assert client.context()["version"] == "v1"
-    assert client.turn(" hello ", idempotency_key="stable")["message_id"] == "m"
+    assert client.turn(" hello ", idempotency_key="stable")[
+        "message_id"] == "m"
     try:
         client.prepare_turn({"author": "assistant", "content": "bad"})
     except ValueError:
@@ -30,7 +32,8 @@ def test_sync_context_and_turn_payload_validation():
 
 def test_async_context_and_turn_payload_validation():
     async def run():
-        client = AsyncGossipMemo("http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)))
+        client = AsyncGossipMemo(
+            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)))
         assert (await client.context())["version"] == "v1"
         assert (await client.turn("hello", idempotency_key="stable"))["message_id"] == "m"
         await client.close()
@@ -58,8 +61,10 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
             if len(calls) == 2:
                 return {"context_update": None, "known_people": [], "memory_recall": []}
             raise RuntimeError("offline")
+
         def ingest(self, messages):
             ingested.append(messages)
+
         def close(self): pass
 
     provider = GossipMemoMemoryProvider(client_factory=lambda **_: Fake())
@@ -67,7 +72,8 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
     try:
         # The first request is still in flight after prefetch's bounded wait.
         first_result = []
-        caller = threading.Thread(target=lambda: first_result.append(provider.prefetch("hi")))
+        caller = threading.Thread(
+            target=lambda: first_result.append(provider.prefetch("hi")))
         caller.start()
         assert started.wait(1)
         caller.join(1)
@@ -83,7 +89,8 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
         with provider._prefetch_lock:
             provider._prefetch_cache.clear()
         text = provider.prefetch("second")
-        assert "calm" in text and "thread" in text and text.count("Person: Alice") == 1
+        assert "calm" in text and "thread" in text and text.count(
+            "Person: Alice") == 1
         assert calls[1][1]["context_version"] == "v1"
 
         # Preparation failures are non-fatal, but the pre-registered key is

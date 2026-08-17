@@ -127,7 +127,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
         """Check local configuration only; do not make a network request."""
 
         config = _load_config(os.environ.get("HERMES_HOME"))
-        configured_url = _env_first(*_ENV_BASE_URL) or str(config.get("base_url", "")).strip()
+        configured_url = _env_first(
+            *_ENV_BASE_URL) or str(config.get("base_url", "")).strip()
         # A local unauthenticated server is valid, but an unconfigured plugin
         # should not activate merely because localhost is the SDK default.
         configured = bool(configured_url or _env_first(_ENV_API_KEY))
@@ -181,12 +182,14 @@ class GossipMemoMemoryProvider(MemoryProvider):
             value = values.get(key)
             if value is not None and str(value).strip():
                 existing[key] = str(value).strip()
-        path.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        path.write_text(json.dumps(existing, indent=2,
+                        ensure_ascii=False) + "\n", encoding="utf-8")
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         hermes_home = str(kwargs.get("hermes_home", "") or "")
         config_value = kwargs.get("config")
-        config = dict(config_value) if isinstance(config_value, Mapping) else _load_config(hermes_home)
+        config = dict(config_value) if isinstance(
+            config_value, Mapping) else _load_config(hermes_home)
 
         base_url = (
             _env_first(*_ENV_BASE_URL)
@@ -204,7 +207,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
         )
         self._session_id = str(session_id or "")
         self._user_id = str(
-            kwargs.get("user_id") or kwargs.get("agent_identity") or "hermes-user"
+            kwargs.get("user_id") or kwargs.get(
+                "agent_identity") or "hermes-user"
         )
         self._source_provider = str(kwargs.get("source_provider") or "hermes")
         # Hermes advises external providers not to ingest cron/subagent system
@@ -224,7 +228,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
         except TypeError:
             # A tiny positional fallback is useful for adapters that wrap the
             # SDK client with a three-argument factory.
-            self._client = self._client_factory(base_url, api_key, self._space_id)
+            self._client = self._client_factory(
+                base_url, api_key, self._space_id)
         self._queue = queue.Queue()
         self._writer = threading.Thread(
             target=self._write_loop,
@@ -323,7 +328,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     break
         if not idem:
             idem = uuid.uuid4().hex
-        messages = self._turn_messages(user_content, assistant_content, session_id)
+        messages = self._turn_messages(
+            user_content, assistant_content, session_id)
         messages[0]["idempotency_key"] = idem
         # The same stable key is used by the turn façade and this asynchronous
         # assistant write, so a slow prefetch cannot create a duplicate user row.
@@ -336,9 +342,11 @@ class GossipMemoMemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             cached = dict(self._context_cache.get(key, {}))
             pending = self._pending_turns.setdefault(key, [])
-            entry = next((item for item in pending if item.get("content") == query), None)
+            entry = next(
+                (item for item in pending if item.get("content") == query), None)
             if entry is None:
-                entry = {"content": query, "idempotency_key": uuid.uuid4().hex, "started": False}
+                entry = {"content": query,
+                         "idempotency_key": uuid.uuid4().hex, "started": False}
                 pending.append(entry)
             idem = entry["idempotency_key"]
             event = entry.setdefault("event", threading.Event())
@@ -357,7 +365,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 context_version=cached.get("version"),
                 memory_limit=5,
                 idempotency_key=idem,
-                source={"provider": self._source_provider, "conversation_key": key},
+                source={"provider": self._source_provider,
+                        "conversation_key": key},
             )
         except Exception:
             with self._prefetch_lock:
@@ -405,8 +414,10 @@ class GossipMemoMemoryProvider(MemoryProvider):
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
                 logger.debug("GossipMemo prefetch failed: %s", exc)
 
-        thread = threading.Thread(target=_prefetch, name="gossipmemo-prefetch", daemon=True)
-        self._prefetch_threads = [item for item in self._prefetch_threads if item.is_alive()]
+        thread = threading.Thread(
+            target=_prefetch, name="gossipmemo-prefetch", daemon=True)
+        self._prefetch_threads = [
+            item for item in self._prefetch_threads if item.is_alive()]
         self._prefetch_threads.append(thread)
         thread.start()
 
@@ -414,7 +425,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
         key = session_id or self._session_id or "default"
         with self._prefetch_lock:
             cached_entry = self._prefetch_cache.pop(key, {})
-        cached = cached_entry.get("formatted", "") if isinstance(cached_entry, Mapping) else ""
+        cached = cached_entry.get("formatted", "") if isinstance(
+            cached_entry, Mapping) else ""
         if cached or not query.strip() or not self._client:
             return cached
 
@@ -437,7 +449,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
                 logger.debug("GossipMemo first-turn prefetch failed: %s", exc)
 
-        thread = threading.Thread(target=_first_fetch, name="gossipmemo-prefetch-first", daemon=True)
+        thread = threading.Thread(
+            target=_first_fetch, name="gossipmemo-prefetch-first", daemon=True)
         thread.start()
         thread.join(timeout=0.25)
         if result:
@@ -451,17 +464,26 @@ class GossipMemoMemoryProvider(MemoryProvider):
         if not isinstance(result, Mapping):
             return ""
         lines: list[str] = ["[GossipMemo context]"]
-        bundle = result.get("bundle") if isinstance(result.get("bundle"), Mapping) else result
-        user_model = bundle.get("user_model") if isinstance(bundle, Mapping) else None
+        bundle = result.get("bundle") if isinstance(
+            result.get("bundle"), Mapping) else result
+        user_model = bundle.get("user_model") if isinstance(
+            bundle, Mapping) else None
         if user_model:
-            card = user_model.get("profile_card") if isinstance(user_model, Mapping) else user_model
-            if card: lines.append(f"User model: {_compact(card, 900)}")
-        continuity = bundle.get("continuity") if isinstance(bundle, Mapping) else None
+            card = user_model.get("profile_card") if isinstance(
+                user_model, Mapping) else user_model
+            if card:
+                lines.append(f"User model: {_compact(card, 900)}")
+        continuity = bundle.get("continuity") if isinstance(
+            bundle, Mapping) else None
         if continuity:
-            text = continuity.get("text") if isinstance(continuity, Mapping) else continuity
-            if _compact(text): lines.append(f"Continuity: {_compact(text, 900)}")
-        guidance = result.get("guidance", {}) if isinstance(result.get("guidance"), Mapping) else (bundle.get("guidance", {}) if isinstance(bundle, Mapping) else {})
-        guidance_items = guidance.get("items", []) if isinstance(guidance, Mapping) else []
+            text = continuity.get("text") if isinstance(
+                continuity, Mapping) else continuity
+            if _compact(text):
+                lines.append(f"Continuity: {_compact(text, 900)}")
+        guidance = result.get("guidance", {}) if isinstance(result.get("guidance"), Mapping) else (
+            bundle.get("guidance", {}) if isinstance(bundle, Mapping) else {})
+        guidance_items = guidance.get(
+            "items", []) if isinstance(guidance, Mapping) else []
         if isinstance(guidance_items, list):
             seen_guidance: set[str] = set()
             for item in guidance_items[:8]:
@@ -472,24 +494,31 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 if not content or item_id in seen_guidance:
                     continue
                 seen_guidance.add(item_id)
-                label = "Tentative hypothesis" if item.get("kind") == "hypothesis" else "Optional learning goal"
+                label = "Tentative hypothesis" if item.get(
+                    "kind") == "hypothesis" else "Optional learning goal"
                 lines.append(f"{label}: {content}")
-        people = bundle.get("people", []) if isinstance(bundle, Mapping) else []
+        people = bundle.get("people", []) if isinstance(
+            bundle, Mapping) else []
         people = list(people) + list(result.get("known_people", []))
         seen_people: set[str] = set()
         if isinstance(people, list):
             for person in people:
                 if not isinstance(person, Mapping):
                     continue
-                name = _compact(person.get("display_name") or person.get("id"), 160)
+                name = _compact(person.get("display_name")
+                                or person.get("id"), 160)
                 stable_id = str(person.get("id") or name)
-                if not name or stable_id in seen_people: continue
+                if not name or stable_id in seen_people:
+                    continue
                 seen_people.add(stable_id)
                 profile = _compact(person.get("profile_card"), 700)
                 if name:
-                    lines.append(f"Person: {name}" + (f" — {profile}" if profile else ""))
-                if len(seen_people) >= 12: break
-        memories = list(bundle.get("memories", [])) if isinstance(bundle, Mapping) else []
+                    lines.append(f"Person: {name}" +
+                                 (f" — {profile}" if profile else ""))
+                if len(seen_people) >= 12:
+                    break
+        memories = list(bundle.get("memories", [])) if isinstance(
+            bundle, Mapping) else []
         memories += list(result.get("memory_recall", []))
         seen_memories: set[str] = set()
         if isinstance(memories, list):
@@ -497,12 +526,14 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 if not isinstance(memory, Mapping):
                     continue
                 content = _compact(memory.get("content"), 700)
-                if not content or content in seen_memories: continue
+                if not content or content in seen_memories:
+                    continue
                 seen_memories.add(content)
                 basis = _compact(memory.get("basis"), 60)
                 if content:
                     lines.append(f"Memory ({basis or 'unknown'}): {content}")
-                if len(seen_memories) >= 20: break
+                if len(seen_memories) >= 20:
+                    break
         relationships = result.get("relationships")
         if isinstance(relationships, list):
             for relationship in relationships[:12]:
@@ -595,8 +626,10 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 result = client.query(
                     query,
                     people=args.get("people") or [],
-                    include_relationships=bool(args.get("include_relationships", True)),
-                    expand_relationships=int(args.get("expand_relationships", 0)),
+                    include_relationships=bool(
+                        args.get("include_relationships", True)),
+                    expand_relationships=int(
+                        args.get("expand_relationships", 0)),
                     include_evidence=bool(args.get("include_evidence", True)),
                     limit=min(max(int(args.get("limit", 30)), 1), 100),
                 )
@@ -658,8 +691,10 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     return _json_result({"error": "memory_id is required"})
                 return _json_result(client.retract(memory_id, reason=args.get("reason")))
             if tool_name == "gossipmemo_merge_people":
-                source_person_id = str(args.get("source_person_id", "")).strip()
-                target_person_id = str(args.get("target_person_id", "")).strip()
+                source_person_id = str(
+                    args.get("source_person_id", "")).strip()
+                target_person_id = str(
+                    args.get("target_person_id", "")).strip()
                 if not source_person_id or not target_person_id:
                     return _json_result(
                         {"error": "source_person_id and target_person_id are required"}
@@ -694,9 +729,11 @@ class GossipMemoMemoryProvider(MemoryProvider):
             try:
                 client.add_memory(content)
             except Exception as exc:  # noqa: BLE001 - mirror is best effort.
-                logger.debug("GossipMemo built-in memory mirror failed: %s", exc)
+                logger.debug(
+                    "GossipMemo built-in memory mirror failed: %s", exc)
 
-        threading.Thread(target=_store, name="gossipmemo-memory-write", daemon=True).start()
+        threading.Thread(
+            target=_store, name="gossipmemo-memory-write", daemon=True).start()
 
     def shutdown(self) -> None:
         queue_value = self._queue

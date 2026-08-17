@@ -77,9 +77,11 @@ def test_extraction_prompt_separates_recent_context_from_new_evidence():
 def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
     prompt = extraction_prompt(
         [
-            message("hypothesis", author="assistant", content="You avoid conflict."),
+            message("hypothesis", author="assistant",
+                    content="You avoid conflict."),
             message("confirmation", content="Yes, especially at work."),
-            message("advice", author="assistant", content="Try a direct conversation."),
+            message("advice", author="assistant",
+                    content="Try a direct conversation."),
         ],
         user_name="Deus",
     )

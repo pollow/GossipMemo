@@ -88,7 +88,8 @@ async def owner_reasoning(
             bounded_hypotheses, projection_type,
         )
         if not _stage2_fits(transport, first_messages, actions_type):
-            raise ValueError("owner evidence digest did not fit context budget")
+            raise ValueError(
+                "owner evidence digest did not fit context budget")
 
     first, projection = await structured(
         transport, first_messages, projection_type,
@@ -171,7 +172,8 @@ def _bounded_comparisons(
     evidence always has room to be represented or digested.
     """
     context_budget = transport.context_budget
-    empty_first = _first_messages(transport, system_prompt, target, [], [], [], projection_type)
+    empty_first = _first_messages(
+        transport, system_prompt, target, [], [], [], projection_type)
     base = _stage2_estimate(transport, empty_first, actions_type)
     ceiling = min(
         context_budget.usable_input_tokens,
@@ -207,7 +209,8 @@ def _bounded_comparisons(
     inferred_by_id = {item.id: item for item in inferred}
     for index, skeleton in enumerate(tuple(chosen_inferred)):
         original = inferred_by_id[skeleton.id]
-        expanded = original.model_copy(update={"content": original.content[:1200]})
+        expanded = original.model_copy(
+            update={"content": original.content[:1200]})
         candidate = [*chosen_inferred]
         candidate[index] = expanded
         if fits(candidate, chosen_hypotheses):
@@ -216,7 +219,8 @@ def _bounded_comparisons(
     hypotheses_by_id = {item.id: item for item in hypotheses}
     for index, skeleton in enumerate(tuple(chosen_hypotheses)):
         original = hypotheses_by_id[skeleton.id]
-        expanded = original.model_copy(update={"content": original.content[:1200]})
+        expanded = original.model_copy(
+            update={"content": original.content[:1200]})
         candidate = [*chosen_hypotheses]
         candidate[index] = expanded
         if fits(chosen_inferred, candidate):
@@ -238,7 +242,8 @@ def _digest_request(transport: LlmTransport, chunk: list[Any]) -> ChatCompletion
                 content="Compress evidence only; do not infer people or actions.\n\n"
                 + schema_instruction(ExtractedOwnerEvidenceDigest),
             ),
-            ChatMessage(role="user", content=owner_evidence_digest_prompt(chunk, transport.user_name)),
+            ChatMessage(role="user", content=owner_evidence_digest_prompt(
+                chunk, transport.user_name)),
         ],
         structured=True,
     )
@@ -260,14 +265,17 @@ async def _digest_evidence(
             # Segment oversized content so every digest request is valid.
             pieces: list[Any] = [memory]
             if isinstance(memory, MemoryView) and not context_budget.report(
-                context_budget.estimate_request(_digest_request(transport, [memory]))
+                context_budget.estimate_request(
+                    _digest_request(transport, [memory]))
             ).fits:
                 lo, hi = 1, len(memory.content)
                 while lo < hi:
                     mid = (lo + hi + 1) // 2
-                    candidate_piece = memory.model_copy(update={"content": memory.content[:mid]})
+                    candidate_piece = memory.model_copy(
+                        update={"content": memory.content[:mid]})
                     if context_budget.report(
-                        context_budget.estimate_request(_digest_request(transport, [candidate_piece]))
+                        context_budget.estimate_request(
+                            _digest_request(transport, [candidate_piece]))
                     ).fits:
                         lo = mid
                     else:
@@ -278,24 +286,29 @@ async def _digest_evidence(
                         f"single owner evidence segment exceeds context budget: {memory.id}"
                     )
                 pieces = [
-                    memory.model_copy(update={"content": memory.content[i:i + width]})
+                    memory.model_copy(
+                        update={"content": memory.content[i:i + width]})
                     for i in range(0, len(memory.content), width)
                 ]
             for piece in pieces:
                 candidate = current + [piece]
-                candidate_ids = set().union(*(_evidence_source_ids(item) for item in candidate))
+                candidate_ids = set().union(*(_evidence_source_ids(item)
+                                              for item in candidate))
                 source_id_limit = (
-                    32 if any(isinstance(item, MemoryView) for item in candidate) else 512
+                    32 if any(isinstance(item, MemoryView)
+                              for item in candidate) else 512
                 )
                 candidate_fits = context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, candidate))
+                    context_budget.estimate_request(
+                        _digest_request(transport, candidate))
                 ).fits and len(candidate_ids) <= source_id_limit
                 if current and not candidate_fits:
                     chunks.append(current)
                     current = []
                 current.append(piece)
                 if not context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, current))
+                    context_budget.estimate_request(
+                        _digest_request(transport, current))
                 ).fits:
                     identifier = getattr(memory, "id", "digest")
                     raise ValueError(
@@ -311,7 +324,8 @@ async def _digest_evidence(
         request = _digest_request(transport, chunk)
         context_budget.check(context_budget.estimate_request(request))
         allowed = set().union(*(_evidence_source_ids(item) for item in chunk))
-        recursive = all(isinstance(item, OwnerEvidenceDigestView) for item in chunk)
+        recursive = all(isinstance(item, OwnerEvidenceDigestView)
+                        for item in chunk)
         policy = transport.retry_policy
         semantic_attempt = 0
         while True:
@@ -324,16 +338,19 @@ async def _digest_evidence(
                 # Ignore any model-copied IDs here and deterministically
                 # inherit the trusted server-side union.
                 return [OwnerEvidenceDigestView(
-                    summary="\n".join(item.summary for item in result.items)[:600],
+                    summary="\n".join(
+                        item.summary for item in result.items)[:600],
                     source_memory_ids=sorted(allowed),
                     basis="compressed", uncertainty="", semantic_subject="",
                 )]
             accepted = [
-                OwnerEvidenceDigestView.model_validate(item.model_dump(mode="json"))
+                OwnerEvidenceDigestView.model_validate(
+                    item.model_dump(mode="json"))
                 for item in result.items
                 if item.source_memory_ids and set(item.source_memory_ids) <= allowed
             ]
-            covered = set().union(*(set(item.source_memory_ids) for item in accepted), set())
+            covered = set().union(*(set(item.source_memory_ids)
+                                    for item in accepted), set())
             if covered == allowed:
                 return accepted
             if semantic_attempt >= policy.attempts:

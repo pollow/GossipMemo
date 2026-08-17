@@ -75,13 +75,15 @@ def _batch(store: SqliteWorldStore, *message_ids: str) -> str:
 
 def test_record_messages_is_idempotent_by_key_and_source_identity(store):
     first = store.record_messages(
-        "personal", [_message(idempotency_key="request-1", source_item_id="item-1")]
+        "personal", [_message(idempotency_key="request-1",
+                              source_item_id="item-1")]
     )[0]
     duplicate_by_key = store.record_messages(
         "personal", [_message(content="changed", idempotency_key="request-1")]
     )[0]
     duplicate_by_source = store.record_messages(
-        "personal", [_message(content="changed again", source_item_id="item-1")]
+        "personal", [_message(content="changed again",
+                              source_item_id="item-1")]
     )[0]
 
     assert duplicate_by_key == first
@@ -139,14 +141,16 @@ def test_known_person_context_supports_later_alias_update(store):
     )
 
     assert len(_rows(store, "SELECT id FROM people")) == 1
-    assert store.match_people_in_text("personal", "AW")[0].id == original_person_id
+    assert store.match_people_in_text("personal", "AW")[
+        0].id == original_person_id
 
 
 def test_load_extraction_context_is_recent_per_conversation(store):
     def msg(content: str, conversation: str | None) -> MessageInput:
         return MessageInput(
             author="user", content=content,
-            source=SourceRef(provider="agent_chat", conversation_key=conversation),
+            source=SourceRef(provider="agent_chat",
+                             conversation_key=conversation),
         )
 
     store.record_messages(
@@ -176,7 +180,8 @@ def test_record_messages_idempotency_is_atomic_across_concurrent_callers(store):
     def record(worker: int):
         return store.record_messages(
             "personal",
-            [_message(content=f"worker {worker}", idempotency_key="same-request")],
+            [_message(content=f"worker {worker}",
+                      idempotency_key="same-request")],
         )[0]
 
     with ThreadPoolExecutor(max_workers=8) as workers:
@@ -212,15 +217,18 @@ def test_first_ingest_initializes_space_atomically_across_callers(store):
     def record(worker: int):
         return store.record_messages(
             "new-space",
-            [_message(content=f"worker {worker}", idempotency_key=f"request-{worker}")],
+            [_message(content=f"worker {worker}",
+                      idempotency_key=f"request-{worker}")],
         )[0]
 
     with ThreadPoolExecutor(max_workers=8) as workers:
         receipts = list(workers.map(record, range(8)))
 
     assert len(receipts) == 8
-    assert len(_rows(store, "SELECT id FROM messages WHERE space_id = 'new-space'")) == 8
-    assert _rows(store, "SELECT id FROM people WHERE space_id = 'new-space'") == []
+    assert len(
+        _rows(store, "SELECT id FROM messages WHERE space_id = 'new-space'")) == 8
+    assert _rows(
+        store, "SELECT id FROM people WHERE space_id = 'new-space'") == []
 
 
 def test_zero_memory_extraction_completes_message_without_creating_memory(store):
@@ -320,13 +328,15 @@ def test_extraction_comparisons_exclude_inferred_and_supersede_only_supplied_mem
     assert rows[-1]["source_batch_id"] == batch
     assert rows[0]["status"] == "superseded"
     assert _rows(
-        store, "SELECT person_id FROM memory_people WHERE memory_id = ?", (rows[-1]["id"],)
+        store, "SELECT person_id FROM memory_people WHERE memory_id = ?", (
+            rows[-1]["id"],)
     )
 
 
 def test_extraction_ignores_unseen_supersede_id_without_losing_new_memory(store):
     old_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Deus likes tea.", about_user=True)
+        "personal", ManualMemoryRequest(
+            content="Deus likes tea.", about_user=True)
     )
     receipt = store.record_messages(
         "personal", [_message(content="I prefer coffee now.")]
@@ -347,16 +357,19 @@ def test_extraction_ignores_unseen_supersede_id_without_losing_new_memory(store)
         ),
         comparison_memory_ids=set(),
     )
-    old = _rows(store, "SELECT status FROM memories WHERE id = ?", (old_id,))[0]
+    old = _rows(
+        store, "SELECT status FROM memories WHERE id = ?", (old_id,))[0]
     new = _rows(
-        store, "SELECT supersedes_memory_id FROM memories WHERE source_batch_id = ?", (batch,)
+        store, "SELECT supersedes_memory_id FROM memories WHERE source_batch_id = ?", (
+            batch,)
     )[0]
     assert old["status"] == "active"
     assert new["supersedes_memory_id"] is None
 
 
 def test_extraction_similar_guard_keeps_polarity_and_drops_in_batch_repeat(store):
-    first = store.record_messages("personal", [_message(content="I strongly prefer quiet mornings.")])[0]
+    first = store.record_messages("personal", [_message(
+        content="I strongly prefer quiet mornings.")])[0]
     first_batch = _batch(store, first)
     store.apply_extraction(
         "personal",
@@ -377,7 +390,8 @@ def test_extraction_similar_guard_keeps_polarity_and_drops_in_batch_repeat(store
         ),
     )
     old_ids = {row["id"] for row in _rows(store, "SELECT id FROM memories")}
-    second = store.record_messages("personal", [_message(content="I strongly prefer quiet mornings.")])[0]
+    second = store.record_messages("personal", [_message(
+        content="I strongly prefer quiet mornings.")])[0]
     second_batch = _batch(store, second)
     store.apply_extraction(
         "personal",
@@ -452,12 +466,14 @@ def test_user_model_reads_active_about_user_memories_and_uses_watermark(store):
     assert [memory.content for memory in memories] == ["I like tea."]
     assert watermark is not None
     assert store.apply_user_model_reasoning(
-        "personal", watermark, UserModelReasoningResult(profile_card={"summary": "tea"})
+        "personal", watermark, UserModelReasoningResult(
+            profile_card={"summary": "tea"})
     ) is True
     refreshed = store.user_model_context("personal")
     assert refreshed is not None and refreshed[0].stale is False
     assert store.apply_user_model_reasoning(
-        "personal", watermark, UserModelReasoningResult(profile_card={"summary": "old"})
+        "personal", watermark, UserModelReasoningResult(
+            profile_card={"summary": "old"})
     ) is False
     store.retract_memory("personal", about_id)
     after_retract = store.user_model_context("personal")
@@ -526,7 +542,8 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
         configured = True
         gate = ProviderGate()
         context_budget = ContextBudget()
-        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        retry_policy = RetryPolicy(
+            attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
         extraction_policy = "balanced"
 
@@ -537,7 +554,8 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             return ChatCompletionRequest(
                 model="fake",
                 messages=list(messages),
-                response_format={"type": "json_object"} if structured else None,
+                response_format={
+                    "type": "json_object"} if structured else None,
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:
@@ -545,12 +563,14 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             # all drive `prepare`/`complete` directly now (see
             # reasoners/extraction.py, query.py, reasoners/owner.py); tell
             # each stage apart by prompt marker.
-            combined = " ".join(str(message.content) for message in request.messages)
+            combined = " ".join(str(message.content)
+                                for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 return json.dumps({
                     "people": [{"ref": "bob", "display_name": "Bob"}],
                     "memories": [
-                        {"content": "Bob prefers tea.", "basis": "stated", "people": ["bob"]}
+                        {"content": "Bob prefers tea.",
+                            "basis": "stated", "people": ["bob"]}
                     ],
                 })
             if "Answer the read-only question" in combined:
@@ -562,7 +582,8 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
             if '"profile_card"' in combined:
                 return json.dumps({"profile_card": {"summary": "likes tea"}})
             return json.dumps(
-                {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
+                {"facets": [], "closeness": None, "tone": None,
+                    "status": "unknown", "summary": ""}
             )
 
     async def scenario():
@@ -713,7 +734,8 @@ def test_memory_people_is_plain_person_association_and_alias_resolves(store):
         "personal",
         _batch(store, receipt),
         ExtractionResult(
-            people=[ExtractedPerson(ref="alice", display_name="Alice", aliases=["Al"])],
+            people=[ExtractedPerson(
+                ref="alice", display_name="Alice", aliases=["Al"])],
             memories=[
                 ExtractedMemory(
                     content="Al is taking Friday off.", basis="stated", people=["alice"]
@@ -754,8 +776,10 @@ def test_same_alias_for_two_people_is_ambiguous_not_merged(store):
         _batch(store, receipt),
         ExtractionResult(
             people=[
-                ExtractedPerson(ref="one", display_name="One", aliases=["Alex"]),
-                ExtractedPerson(ref="two", display_name="Two", aliases=["Alex"]),
+                ExtractedPerson(ref="one", display_name="One",
+                                aliases=["Alex"]),
+                ExtractedPerson(ref="two", display_name="Two",
+                                aliases=["Alex"]),
             ],
             memories=[],
         ),
@@ -769,51 +793,63 @@ def test_same_alias_for_two_people_is_ambiguous_not_merged(store):
     ) == 2
     with pytest.raises(AmbiguousPersonError):
         store.add_manual_memory(
-            "personal", ManualMemoryRequest(content="Alex did it.", people=["Alex"])
+            "personal", ManualMemoryRequest(
+                content="Alex did it.", people=["Alex"])
         )
 
 
 def test_automatic_ambiguous_person_link_is_skipped_but_memory_completes(store):
     store.apply_extraction(
-        "personal", _batch(store, store.record_messages("personal", [_message()])[0]),
+        "personal", _batch(store, store.record_messages(
+            "personal", [_message()])[0]),
         ExtractionResult(people=[
             ExtractedPerson(ref="one", display_name="One", aliases=["Alex"]),
             ExtractedPerson(ref="two", display_name="Two", aliases=["Alex"]),
         ]),
     )
-    message_id = store.record_messages("personal", [_message(content="Alex called.")])[0]
+    message_id = store.record_messages(
+        "personal", [_message(content="Alex called.")])[0]
     batch_id = _batch(store, message_id)
     store.apply_extraction(
         "personal", batch_id,
         ExtractionResult(
             people=[ExtractedPerson(ref="alex", display_name="Alex")],
-            memories=[ExtractedMemory(content="Alex called.", basis="reported", people=["Alex"])],
+            memories=[ExtractedMemory(
+                content="Alex called.", basis="reported", people=["Alex"])],
         ),
     )
-    assert _rows(store, "SELECT extraction_state FROM messages WHERE id = ?", (message_id,))[0][0] == "completed"
+    assert _rows(store, "SELECT extraction_state FROM messages WHERE id = ?",
+                 (message_id,))[0][0] == "completed"
     assert _rows(store, "SELECT COUNT(*) AS n FROM memories")[0]["n"] == 1
     assert _rows(store, "SELECT COUNT(*) AS n FROM memory_people")[0]["n"] == 0
     assert _rows(store, "SELECT COUNT(*) AS n FROM people")[0]["n"] == 2
 
 
 def test_automatic_known_person_ids_resolve_relationships(store):
-    a = store.add_manual_memory("personal", ManualMemoryRequest(content="A exists.", people=["A"]))
+    a = store.add_manual_memory("personal", ManualMemoryRequest(
+        content="A exists.", people=["A"]))
     del a
-    b = store.add_manual_memory("personal", ManualMemoryRequest(content="B exists.", people=["B"]))
+    b = store.add_manual_memory("personal", ManualMemoryRequest(
+        content="B exists.", people=["B"]))
     del b
-    people = _rows(store, "SELECT id, display_name FROM people ORDER BY display_name")
+    people = _rows(
+        store, "SELECT id, display_name FROM people ORDER BY display_name")
     ids = {row["display_name"]: row["id"] for row in people}
-    message_id = store.record_messages("personal", [_message(content="A and B.")])[0]
+    message_id = store.record_messages(
+        "personal", [_message(content="A and B.")])[0]
     store.apply_extraction(
         "personal", _batch(store, message_id),
         ExtractionResult(memories=[ExtractedMemory(
             content="A and B.", basis="observed", people=[ids["A"], ids["B"]],
-            relationships=[ExtractedRelationship(person_a_ref=ids["A"], person_b_ref=ids["B"])],
+            relationships=[ExtractedRelationship(
+                person_a_ref=ids["A"], person_b_ref=ids["B"])],
         )]),
     )
     relationship = _rows(store, "SELECT * FROM relationships")[0]
-    assert {relationship["person_a_id"], relationship["person_b_id"]} == {ids["A"], ids["B"]}
-    assert _rows(store, "SELECT COUNT(*) AS n FROM memory_relationships")[0]["n"] == 1
+    assert {relationship["person_a_id"],
+            relationship["person_b_id"]} == {ids["A"], ids["B"]}
+    assert _rows(
+        store, "SELECT COUNT(*) AS n FROM memory_relationships")[0]["n"] == 1
 
 
 def test_manual_memory_retract_updates_memory_people_once(
@@ -838,7 +874,8 @@ def test_manual_memory_retract_updates_memory_people_once(
         "personal",
         bob.id,
         expected_watermark=watermark,
-        result=PersonReasoningResult(profile_card={"summary": "on sabbatical"}),
+        result=PersonReasoningResult(
+            profile_card={"summary": "on sabbatical"}),
     )
 
     before_retract = _rows(
@@ -1007,9 +1044,11 @@ def test_person_reasoning_timestamp_compare_and_swap_is_atomic(store):
 
 def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
     source_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob repeatedly follows up on plans.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob repeatedly follows up on plans.", people=["Bob"])
     )
-    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    bob = store.read("personal", QueryRequest(
+        question="bob", people=["Bob"])).people[0]
     _, memories, watermark = store.person_context("personal", bob.id)
     assert all(memory.basis != "inferred" for memory in memories)
     result = PersonReasoningResult(
@@ -1019,14 +1058,16 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
         )],
     )
     assert store.apply_person_reasoning("personal", bob.id, watermark, result)
-    first = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    first = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[
+        0]["id"]
     _, _, unchanged_watermark = store.person_context("personal", bob.id)
     assert unchanged_watermark == watermark
     assert store.stale_entities()[0] == []
     # A near-identical regenerated result reuses the durable inference and adds
     # its newly supplied derivation instead of creating another Memory.
     supporting_source = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob follows up after meetings.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob follows up after meetings.", people=["Bob"])
     )
     _, _, supporting_watermark = store.person_context("personal", bob.id)
     assert store.apply_person_reasoning(
@@ -1051,43 +1092,53 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
     # An inferred source cannot be reused, but its omission is deliberately a
     # no-op: existing hypotheses remain active until explicitly retracted.
     new_source = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob also follows up on decisions.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob also follows up on decisions.", people=["Bob"])
     )
     _, _, next_watermark = store.person_context("personal", bob.id)
     assert store.apply_person_reasoning(
         "personal", bob.id, next_watermark,
         PersonReasoningResult(profile_card={}, inferred_memories=[
-            InferredMemory(content="Bob reliably follows up on plans.", source_memory_ids=[first])
+            InferredMemory(
+                content="Bob reliably follows up on plans.", source_memory_ids=[first])
         ]),
     )
-    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[0]["status"] == "active"
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[
+        0]["status"] == "active"
     store.apply_inferred_memory_actions(
         "personal", "person", bob.id, {new_source}, {first},
         InferredMemoryActions(
-            retractions=[InferredMemoryRetraction(memory_id=first, reason="support was reconsidered")],
+            retractions=[InferredMemoryRetraction(
+                memory_id=first, reason="support was reconsidered")],
         ),
     )
-    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[0]["status"] == "retracted"
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (first,))[
+        0]["status"] == "retracted"
     # A changed output is a new active record with derivations to current source.
     latest_source = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob follows up on outcomes too.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob follows up on outcomes too.", people=["Bob"])
     )
     _, _, latest_watermark = store.person_context("personal", bob.id)
     assert store.apply_person_reasoning(
         "personal", bob.id, latest_watermark,
         PersonReasoningResult(profile_card={}, inferred_memories=[
-            InferredMemory(content="Bob reliably follows up on plans and decisions.", source_memory_ids=[latest_source])
+            InferredMemory(content="Bob reliably follows up on plans and decisions.",
+                           source_memory_ids=[latest_source])
         ]),
     )
-    active = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")
+    active = _rows(
+        store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")
     assert len(active) == 1 and active[0]["id"] != first
 
 
 def test_inferred_memory_is_not_a_hypothesis(store):
     source_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob keeps project notes.", people=["Bob"])
     )
-    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    bob = store.read("personal", QueryRequest(
+        question="bob", people=["Bob"])).people[0]
     _, _, watermark = store.person_context("personal", bob.id)
     assert store.apply_person_reasoning(
         "personal", bob.id, watermark,
@@ -1095,7 +1146,8 @@ def test_inferred_memory_is_not_a_hypothesis(store):
             content="Bob is organized.", source_memory_ids=[source_id]
         )]),
     )
-    inferred_id = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    inferred_id = _rows(
+        store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
     assert _rows(store, "SELECT id FROM hypotheses") == []
     # Not present in the supplied context: retraction is ignored.
     store.apply_inferred_memory_actions(
@@ -1104,12 +1156,14 @@ def test_inferred_memory_is_not_a_hypothesis(store):
             memory_id=inferred_id, reason="not enough evidence"
         )]),
     )
-    assert _rows(store, "SELECT status FROM memories WHERE id = ?", (inferred_id,))[0]["status"] == "active"
+    assert _rows(store, "SELECT status FROM memories WHERE id = ?",
+                 (inferred_id,))[0]["status"] == "active"
 
 
 def test_person_reasoning_applies_hypothesis_actions_in_same_transaction(store):
     source_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob keeps project notes.", people=["Bob"])
     )
     bob = store.read(
         "personal", QueryRequest(question="bob", people=["Bob"])
@@ -1126,21 +1180,25 @@ def test_person_reasoning_applies_hypothesis_actions_in_same_transaction(store):
 
     assert store.apply_person_reasoning("personal", bob.id, watermark, result)
     hypothesis = _rows(store, "SELECT owner_kind, owner_id FROM hypotheses")[0]
-    assert (hypothesis["owner_kind"], hypothesis["owner_id"]) == ("person", bob.id)
+    assert (hypothesis["owner_kind"],
+            hypothesis["owner_id"]) == ("person", bob.id)
 
 
 def test_hypothesis_actions_require_active_context_evidence_and_scoped_transition(store):
     source_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob keeps project notes.", people=["Bob"])
     )
-    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    bob = store.read("personal", QueryRequest(
+        question="bob", people=["Bob"])).people[0]
     store.apply_inferred_memory_actions(
         "personal", "person", bob.id, {source_id}, set(),
         InferredMemoryActions(upserts=[InferredMemory(
             content="Bob is organized.", source_memory_ids=[source_id]
         )]),
     )
-    inferred_id = _rows(store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
+    inferred_id = _rows(
+        store, "SELECT id FROM memories WHERE basis = 'inferred'")[0]["id"]
     store.apply_hypothesis_actions(
         "personal", "person", bob.id, {inferred_id}, set(),
         HypothesisActions(upserts=[HypothesisUpsert(
@@ -1154,12 +1212,14 @@ def test_hypothesis_actions_require_active_context_evidence_and_scoped_transitio
         confidence="medium",
         evidence=[HypothesisEvidence(memory_id=source_id, role="support")],
     )])
-    store.apply_hypothesis_actions("personal", "person", bob.id, {source_id}, set(), actions)
+    store.apply_hypothesis_actions("personal", "person", bob.id, {
+                                   source_id}, set(), actions)
     hypothesis = _rows(store, "SELECT * FROM hypotheses")[0]
     assert hypothesis["status"] == "open"
     assert hypothesis["owner_kind"] == "person" and hypothesis["owner_id"] == bob.id
     assert _rows(
-        store, "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (hypothesis["id"],)
+        store, "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (
+            hypothesis["id"],)
     )[0]["role"] == "support"
     # A transition omitted from its supplied hypothesis context is a no-op.
     store.apply_hypothesis_actions(
@@ -1168,7 +1228,8 @@ def test_hypothesis_actions_require_active_context_evidence_and_scoped_transitio
             hypothesis_id=hypothesis["id"], status="rejected", reason="insufficient evidence"
         )]),
     )
-    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["status"] == "open"
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?",
+                 (hypothesis["id"],))[0]["status"] == "open"
     store.apply_hypothesis_actions(
         "personal", "person", bob.id, {source_id}, {hypothesis["id"]},
         HypothesisActions(
@@ -1177,7 +1238,8 @@ def test_hypothesis_actions_require_active_context_evidence_and_scoped_transitio
             )],
         ),
     )
-    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["status"] == "rejected"
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?",
+                 (hypothesis["id"],))[0]["status"] == "rejected"
     # Closed hypotheses cannot be upserted or transitioned again, even when
     # the caller supplies their ID in context.
     store.apply_hypothesis_actions(
@@ -1187,14 +1249,17 @@ def test_hypothesis_actions_require_active_context_evidence_and_scoped_transitio
             evidence=[HypothesisEvidence(memory_id=source_id)],
         )]),
     )
-    assert _rows(store, "SELECT content FROM hypotheses WHERE id = ?", (hypothesis["id"],))[0]["content"] != "Changed claim"
+    assert _rows(store, "SELECT content FROM hypotheses WHERE id = ?",
+                 (hypothesis["id"],))[0]["content"] != "Changed claim"
 
 
 def test_hypothesis_promotion_requires_active_owned_memory(store):
     source_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bob keeps project notes.", people=["Bob"])
+        "personal", ManualMemoryRequest(
+            content="Bob keeps project notes.", people=["Bob"])
     )
-    bob = store.read("personal", QueryRequest(question="bob", people=["Bob"])).people[0]
+    bob = store.read("personal", QueryRequest(
+        question="bob", people=["Bob"])).people[0]
     store.apply_hypothesis_actions(
         "personal", "person", bob.id, {source_id}, set(),
         HypothesisActions(upserts=[HypothesisUpsert(
@@ -1208,38 +1273,47 @@ def test_hypothesis_promotion_requires_active_owned_memory(store):
             hypothesis_id=hypothesis_id, status="promoted", reason="confirmed"
         )]),
     )
-    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]["status"] == "open"
+    assert _rows(store, "SELECT status FROM hypotheses WHERE id = ?",
+                 (hypothesis_id,))[0]["status"] == "open"
     store.apply_hypothesis_actions(
         "personal", "person", bob.id, {source_id}, {hypothesis_id},
         HypothesisActions(transitions=[HypothesisTransition(
             hypothesis_id=hypothesis_id, status="promoted", reason="confirmed", promoted_memory_id=source_id
         )]),
     )
-    promoted = _rows(store, "SELECT status, promoted_memory_id FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]
+    promoted = _rows(
+        store, "SELECT status, promoted_memory_id FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]
     assert promoted["status"] == "promoted" and promoted["promoted_memory_id"] == source_id
 
 
 def test_inferred_outputs_are_scoped_to_each_person_target(store):
     first_source = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Alex plans carefully.", people=["Alex"])
+        "personal", ManualMemoryRequest(
+            content="Alex plans carefully.", people=["Alex"])
     )
     second_source = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="Bea plans carefully.", people=["Bea"])
+        "personal", ManualMemoryRequest(
+            content="Bea plans carefully.", people=["Bea"])
     )
-    alex = store.read("personal", QueryRequest(question="alex", people=["Alex"])).people[0]
-    bea = store.read("personal", QueryRequest(question="bea", people=["Bea"])).people[0]
+    alex = store.read("personal", QueryRequest(
+        question="alex", people=["Alex"])).people[0]
+    bea = store.read("personal", QueryRequest(
+        question="bea", people=["Bea"])).people[0]
     _, _, alex_watermark = store.person_context("personal", alex.id)
     _, _, bea_watermark = store.person_context("personal", bea.id)
     shared = "This person plans carefully."
     assert store.apply_person_reasoning(
         "personal", alex.id, alex_watermark,
-        PersonReasoningResult(inferred_memories=[InferredMemory(content=shared, source_memory_ids=[first_source])]),
+        PersonReasoningResult(inferred_memories=[InferredMemory(
+            content=shared, source_memory_ids=[first_source])]),
     )
     assert store.apply_person_reasoning(
         "personal", bea.id, bea_watermark,
-        PersonReasoningResult(inferred_memories=[InferredMemory(content=shared, source_memory_ids=[second_source])]),
+        PersonReasoningResult(inferred_memories=[InferredMemory(
+            content=shared, source_memory_ids=[second_source])]),
     )
-    assert len(_rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")) == 2
+    assert len(_rows(
+        store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")) == 2
 
 
 def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store):
@@ -1268,7 +1342,8 @@ def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store
         ),
     )
     relationship_id = next(iter(affected_relationships))
-    _, memories, watermark = store.relationship_context("personal", relationship_id)
+    _, memories, watermark = store.relationship_context(
+        "personal", relationship_id)
     source_id = memories[0].id
     assert store.apply_relationship_reasoning(
         "personal",
@@ -1297,13 +1372,16 @@ def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store
 
 def test_coverage_map_is_initialized_and_goals_require_map_refs(store):
     store.ensure_space("personal")
-    coverage, memories, hypotheses, pending = store.coverage_context("personal")
+    coverage, memories, hypotheses, pending = store.coverage_context(
+        "personal")
     assert len(coverage.criteria) == 20
-    assert {item["level"] for item in coverage.criteria.values()} == {"unknown"}
+    assert {item["level"] for item in coverage.criteria.values()} == {
+        "unknown"}
     assert not memories and not hypotheses and not pending
 
     memory_id = store.add_manual_memory(
-        "personal", ManualMemoryRequest(content="I grew up near the coast.", about_user=True)
+        "personal", ManualMemoryRequest(
+            content="I grew up near the coast.", about_user=True)
     )
     coverage, memories, _, _ = store.coverage_context("personal")
     assert [memory.id for memory in memories] == [memory_id]
@@ -1311,8 +1389,10 @@ def test_coverage_map_is_initialized_and_goals_require_map_refs(store):
         "personal", coverage.source_watermark,
         coverage.source_cursor_id,
         CoverageAuditPatch(
-            criteria=[CoverageCriterionPatch(criterion_id="M1", level="grounded", known_state="Early place is known", evidence_memory_ids=[memory_id])],
-            boundary_upserts=[CoverageBoundaryUpsert(kind="blind_spot", summary="Childhood detail remains open", criterion_refs=["M1"])],
+            criteria=[CoverageCriterionPatch(
+                criterion_id="M1", level="grounded", known_state="Early place is known", evidence_memory_ids=[memory_id])],
+            boundary_upserts=[CoverageBoundaryUpsert(
+                kind="blind_spot", summary="Childhood detail remains open", criterion_refs=["M1"])],
         ),
         {memory_id}, set(), set(),
     )
@@ -1320,7 +1400,8 @@ def test_coverage_map_is_initialized_and_goals_require_map_refs(store):
     assert updated.criteria["M1"]["level"] == "grounded"
     store.apply_goal_planning(
         "personal",
-        updated.revision, GoalPlanningResult(upserts=[LearningGoalUpsert(prompt="Would you like to share a coastal memory, or skip it?", rationale="Optional origin context", criteria_refs=["M1"], boundary_ids=[updated.boundaries[0].id])]),
+        updated.revision, GoalPlanningResult(upserts=[LearningGoalUpsert(prompt="Would you like to share a coastal memory, or skip it?",
+                                             rationale="Optional origin context", criteria_refs=["M1"], boundary_ids=[updated.boundaries[0].id])]),
         set(),
     )
     _, _, goals, _ = store.learning_goal_context("personal")
@@ -1328,19 +1409,23 @@ def test_coverage_map_is_initialized_and_goals_require_map_refs(store):
 
 
 def test_coverage_cursor_handles_equal_timestamps_and_prunes_retracted_evidence(store):
-    ids = [store.add_manual_memory("personal", ManualMemoryRequest(content=f"scene {index}", about_user=True)) for index in range(3)]
+    ids = [store.add_manual_memory("personal", ManualMemoryRequest(
+        content=f"scene {index}", about_user=True)) for index in range(3)]
     with store._connect() as connection:
-        connection.execute("UPDATE memories SET updated_at = ? WHERE space_id = ?", ("2026-01-01T00:00:00+00:00", "personal"))
+        connection.execute("UPDATE memories SET updated_at = ? WHERE space_id = ?",
+                           ("2026-01-01T00:00:00+00:00", "personal"))
     seen = []
     for _ in ids:
         coverage, memories, _, _ = store.coverage_context("personal", limit=1)
         seen.extend(memory.id for memory in memories)
-        assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(criteria=[CoverageCriterionPatch(criterion_id="M6", level="grounded", known_state="scene", evidence_memory_ids=[memories[0].id])]), {memories[0].id}, {boundary.id for boundary in coverage.boundaries}, set())
+        assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(criteria=[CoverageCriterionPatch(
+            criterion_id="M6", level="grounded", known_state="scene", evidence_memory_ids=[memories[0].id])]), {memories[0].id}, {boundary.id for boundary in coverage.boundaries}, set())
     assert set(seen) == set(ids)
     assert store.retract_memory("personal", ids[-1])
     coverage, memories, _, _ = store.coverage_context("personal")
     assert ids[-1] in [memory.id for memory in memories]
-    assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(), {memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries}, set())
+    assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(), {
+                                      memory.id for memory in memories}, {boundary.id for boundary in coverage.boundaries}, set())
     updated, _, _, _ = store.coverage_context("personal")
     assert ids[-1] not in updated.criteria["M6"]["evidence_memory_ids"]
 
@@ -1348,7 +1433,8 @@ def test_coverage_cursor_handles_equal_timestamps_and_prunes_retracted_evidence(
 def test_coverage_context_can_delegate_all_batching_to_reasoner(store):
     ids = [
         store.add_manual_memory(
-            "personal", ManualMemoryRequest(content=f"scene {index}", about_user=True)
+            "personal", ManualMemoryRequest(
+                content=f"scene {index}", about_user=True)
         )
         for index in range(30)
     ]
@@ -1364,16 +1450,21 @@ def test_coverage_context_can_delegate_all_batching_to_reasoner(store):
 def test_goal_planning_uses_coverage_revision_cas(store):
     store.ensure_space("personal")
     coverage, _, _, _ = store.coverage_context("personal")
-    assert not store.apply_goal_planning("personal", coverage.revision + 1, GoalPlanningResult(), set())
+    assert not store.apply_goal_planning(
+        "personal", coverage.revision + 1, GoalPlanningResult(), set())
 
 
 def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
-    first = store.add_manual_memory("personal", ManualMemoryRequest(content="first", about_user=False))
-    second = store.add_manual_memory("personal", ManualMemoryRequest(content="second", about_user=False))
+    first = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="first", about_user=False))
+    second = store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="second", about_user=False))
     with store._connect() as connection:
-        connection.execute("UPDATE memories SET updated_at = ? WHERE id IN (?, ?)", ("2026-02-01T00:00:00+00:00", first, second))
+        connection.execute("UPDATE memories SET updated_at = ? WHERE id IN (?, ?)",
+                           ("2026-02-01T00:00:00+00:00", first, second))
     coverage, memories, _, _ = store.coverage_context("personal", limit=1)
-    assert store.apply_coverage_audit("personal", coverage.source_watermark, coverage.source_cursor_id, CoverageAuditPatch(), {memories[0].id}, set(), set())
+    assert store.apply_coverage_audit("personal", coverage.source_watermark,
+                                      coverage.source_cursor_id, CoverageAuditPatch(), {memories[0].id}, set(), set())
     # This models a process restart: stale discovery must notice the second row
     # even though it shares the persisted timestamp.
     assert store.stale_coverage_spaces() == ["personal"]
@@ -1381,7 +1472,8 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
 
 def test_initialize_enables_wal_and_a_short_busy_timeout(store):
     with store._connect() as connection:
-        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert connection.execute("PRAGMA journal_mode").fetchone()[
+            0].lower() == "wal"
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
 
 
@@ -1403,6 +1495,7 @@ def test_initialize_fails_loudly_when_wal_is_refused(tmp_path, monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(store_module.sqlite3, "connect", lambda *a, **k: RefusesWal())
+    monkeypatch.setattr(store_module.sqlite3, "connect",
+                        lambda *a, **k: RefusesWal())
     with pytest.raises(RuntimeError, match="refused WAL mode"):
         SqliteWorldStore(tmp_path / "world.db").initialize()

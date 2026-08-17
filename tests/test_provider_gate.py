@@ -50,9 +50,12 @@ def test_tier_one_acquires_ahead_of_already_waiting_tier_three() -> None:
             order.append(label)
             gate.release()
 
-        background_waiter = asyncio.create_task(waiter(TIER_BACKGROUND, "background"))
-        await asyncio.sleep(0)  # let it enqueue before the foreground caller arrives
-        foreground_waiter = asyncio.create_task(waiter(TIER_FOREGROUND, "foreground"))
+        background_waiter = asyncio.create_task(
+            waiter(TIER_BACKGROUND, "background"))
+        # let it enqueue before the foreground caller arrives
+        await asyncio.sleep(0)
+        foreground_waiter = asyncio.create_task(
+            waiter(TIER_FOREGROUND, "foreground"))
         await asyncio.sleep(0)
 
         gate.release()  # frees the holder; strict priority must pick foreground next
@@ -113,7 +116,8 @@ def test_adapter_publishes_shared_backoff_deadline_on_429_retry_after() -> None:
         status = responses.pop(0)
         if status == 429:
             return httpx.Response(429, headers={"Retry-After": "0.05"}, json={"error": "slow down"})
-        body = {"text": "ok", "related_person_ids": [], "through_message_id": "m"}
+        body = {"text": "ok", "related_person_ids": [],
+                "through_message_id": "m"}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
     async def run() -> list[float]:
@@ -129,7 +133,8 @@ def test_adapter_publishes_shared_backoff_deadline_on_429_retry_after() -> None:
                 recorded.append(deadline)
                 original(deadline)
 
-            adapter.gate.mark_unavailable_until = spy  # type: ignore[method-assign]
+            # type: ignore[method-assign]
+            adapter.gate.mark_unavailable_until = spy
             result = await _structured_call(adapter, "sys", "call", ContinuityReasoningResult)
             assert result.text == "ok"
             return recorded
@@ -156,10 +161,12 @@ def test_semantic_retry_backoff_does_not_block_other_caller() -> None:
                 # `_structured_messages`, which lives outside `_chat_messages`
                 # and therefore must not hold the provider gate.
                 return httpx.Response(200, json={"choices": [{"message": {"content": "not json"}}]})
-            body = {"text": "ok-a", "related_person_ids": [], "through_message_id": "m"}
+            body = {"text": "ok-a", "related_person_ids": [],
+                    "through_message_id": "m"}
             return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
         timeline.append(("b", now))
-        body = {"text": "ok-b", "related_person_ids": [], "through_message_id": "m"}
+        body = {"text": "ok-b", "related_person_ids": [],
+                "through_message_id": "m"}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
     async def run() -> tuple[str, str]:
@@ -169,11 +176,13 @@ def test_semantic_retry_backoff_does_not_block_other_caller() -> None:
                 retry_base_seconds=0.2, retry_max_seconds=0.2, max_retries=3,
             )
             task_a = asyncio.create_task(
-                _structured_call(adapter, "sys-a", "CALL-A", ContinuityReasoningResult)
+                _structured_call(adapter, "sys-a", "CALL-A",
+                                 ContinuityReasoningResult)
             )
             await asyncio.sleep(0.02)  # let A's first (malformed) attempt land
             task_b = asyncio.create_task(
-                _structured_call(adapter, "sys-b", "call-b", ContinuityReasoningResult)
+                _structured_call(adapter, "sys-b", "call-b",
+                                 ContinuityReasoningResult)
             )
             result_b = await task_b
             result_a = await task_a

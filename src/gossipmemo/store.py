@@ -78,6 +78,7 @@ def _similar_memory_content(left: str, right: str) -> bool:
     # Preserve polarity and numeric/date changes even when wording is close.
     if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
         return False
+
     def has_negation(value: str) -> bool:
         english = re.search(r"\b(?:not|never|no)\b", value) is not None
         return english or any(token in value for token in ("不", "没", "未"))
@@ -111,7 +112,8 @@ def _fts_query(question: str, excluded: Iterable[str] = ()) -> str | None:
         if len(token) < 3 or _normalized(token) in excluded_terms:
             continue
         if any("\u4e00" <= char <= "\u9fff" for char in token) and len(token) > 3:
-            terms.extend(token[index : index + 3] for index in range(len(token) - 2))
+            terms.extend(token[index: index + 3]
+                         for index in range(len(token) - 2))
         else:
             terms.append(token)
     unique = list(dict.fromkeys(terms))[:16]
@@ -150,7 +152,8 @@ class WorldStore(Protocol):
 
     def unbatched_messages(self, space_id: str) -> list[tuple[str, str]]: ...
 
-    def load_batch(self, space_id: str, batch_id: str) -> list[ModelMessage]: ...
+    def load_batch(self, space_id: str,
+                   batch_id: str) -> list[ModelMessage]: ...
 
     def load_extraction_context(
         self, space_id: str, batch_id: str, limit: int = 2
@@ -181,13 +184,17 @@ class WorldStore(Protocol):
         result: UserModelReasoningResult,
     ) -> bool: ...
 
-    def coverage_context(self, space_id: str, limit: int | None = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None: ...
+    def coverage_context(self, space_id: str, limit: int |
+                         None = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None: ...
 
-    def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch, evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool: ...
+    def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch,
+                             evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool: ...
 
-    def learning_goal_context(self, space_id: str) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None: ...
+    def learning_goal_context(self, space_id: str) -> tuple[CoverageMapView,
+                                                            list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None: ...
 
-    def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
+    def apply_goal_planning(self, space_id: str, expected_revision: int,
+                            result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
 
     def apply_inferred_memory_actions(
         self, space_id: str, owner_kind: str, owner_id: str | None,
@@ -208,14 +215,19 @@ class WorldStore(Protocol):
 
     def pending_continuities(self, threshold: int = 20) -> list[str]: ...
 
-    def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str | None, result: ContinuityReasoningResult) -> bool: ...
+    def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str |
+                                   None, result: ContinuityReasoningResult) -> bool: ...
 
     def context_bundle(self, space_id: str) -> ContextBundle: ...
-    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle: ...
 
-    def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
+    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (
+    ), query: str = "") -> GuidanceBundle: ...
 
-    def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]: ...
+    def match_people_in_text(
+        self, space_id: str, text: str) -> list[PersonView]: ...
+
+    def recall_user_memories(
+        self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]: ...
 
     def stale_entities(
         self,
@@ -223,7 +235,8 @@ class WorldStore(Protocol):
 
     def stale_coverage_spaces(self) -> list[str]: ...
 
-    def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None: ...
+    def overwrite_user_model(
+        self, space_id: str, profile_card: dict[str, Any]) -> None: ...
 
     def merge_person(
         self, space_id: str, source_person_id: str, target_person_id: str
@@ -269,7 +282,8 @@ class SqliteWorldStore:
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._enable_wal()
-        schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        schema = Path(__file__).with_name(
+            "schema.sql").read_text(encoding="utf-8")
         with self._connect() as connection:
             connection.executescript(schema)
 
@@ -310,7 +324,8 @@ class SqliteWorldStore:
                 (space_id, name or space_id, now, now),
             )
             connection.execute(
-                "INSERT OR IGNORE INTO user_models(space_id) VALUES (?)", (space_id,)
+                "INSERT OR IGNORE INTO user_models(space_id) VALUES (?)", (
+                    space_id,)
             )
             connection.execute(
                 "INSERT OR IGNORE INTO coverage_maps(space_id, criteria, updated_at) VALUES (?, ?, ?)",
@@ -375,7 +390,8 @@ class SqliteWorldStore:
                 id, space_id, person_id, value, normalized_value
             ) VALUES (?, ?, ?, ?, ?)
             """,
-            (_id("alias"), space_id, person_id, display_name, _normalized(display_name)),
+            (_id("alias"), space_id, person_id,
+             display_name, _normalized(display_name)),
         )
         return person_id
 
@@ -627,7 +643,8 @@ class SqliteWorldStore:
         for row in rows:
             item = catalog.setdefault(
                 row["id"],
-                {"id": row["id"], "display_name": row["display_name"], "aliases": []},
+                {"id": row["id"],
+                    "display_name": row["display_name"], "aliases": []},
             )
             if row["alias"] not in item["aliases"]:
                 item["aliases"].append(row["alias"])
@@ -649,7 +666,8 @@ class SqliteWorldStore:
             texts = [row["content"] for row in messages]
             context = self.load_extraction_context(space_id, batch_id)
             person_ids = [person.id for person in self.match_people_in_text(
-                space_id, "\n".join(texts + [message.content for message in context])
+                space_id, "\n".join(
+                    texts + [message.content for message in context])
             )]
             candidates: dict[str, sqlite3.Row] = {}
             for text in texts:
@@ -673,7 +691,8 @@ class SqliteWorldStore:
                     (space_id, *person_ids, limit),
                 ).fetchall():
                     candidates[row["id"]] = row
-            rows = sorted(candidates.values(), key=lambda row: row["updated_at"], reverse=True)[:limit]
+            rows = sorted(
+                candidates.values(), key=lambda row: row["updated_at"], reverse=True)[:limit]
             return [self._memory_view(connection, row, False) for row in rows]
 
     def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None:
@@ -775,7 +794,8 @@ class SqliteWorldStore:
                 try:
                     person_id = self._create_person(
                         connection, space_id, person.display_name,
-                        reuse_unique_name=(extracted_name_counts[_normalized(person.display_name)] == 1),
+                        reuse_unique_name=(
+                            extracted_name_counts[_normalized(person.display_name)] == 1),
                     )
                 except AmbiguousPersonError:
                     # Do not abort the batch or create another guessed same-name
@@ -838,7 +858,8 @@ class SqliteWorldStore:
                             (memory_id,),
                         ).fetchall()
                     }
-            inserted_signatures: list[tuple[ExtractedMemory, set[str], set[str]]] = []
+            inserted_signatures: list[tuple[ExtractedMemory,
+                                            set[str], set[str]]] = []
             for candidate in result.memories:
                 people_ids: set[str] = set()
                 for reference in candidate.people:
@@ -858,7 +879,8 @@ class SqliteWorldStore:
                         ).fetchone()
                         if existing:
                             relationship_ids.add(existing["id"])
-                comparison = comparison_rows.get(candidate.supersedes_memory_id or "")
+                comparison = comparison_rows.get(
+                    candidate.supersedes_memory_id or "")
 
                 def same_shape(row: sqlite3.Row) -> bool:
                     memory_id = row["id"]
@@ -924,8 +946,10 @@ class SqliteWorldStore:
                     affected_people.add(person_id)
 
                 for relationship in candidate.relationships:
-                    person_a_id = resolve_extracted_person(relationship.person_a_ref)
-                    person_b_id = resolve_extracted_person(relationship.person_b_ref)
+                    person_a_id = resolve_extracted_person(
+                        relationship.person_a_ref)
+                    person_b_id = resolve_extracted_person(
+                        relationship.person_b_ref)
                     if not person_a_id or not person_b_id:
                         continue
                     relationship_id = self._ensure_relationship(
@@ -945,7 +969,8 @@ class SqliteWorldStore:
                     )
                     affected_relationships.add(relationship_id)
                     relationship_ids.add(relationship_id)
-                inserted_signatures.append((candidate, people_ids, relationship_ids))
+                inserted_signatures.append(
+                    (candidate, people_ids, relationship_ids))
                 if comparison is not None:
                     for row in connection.execute(
                         "SELECT person_id FROM memory_people WHERE memory_id = ?",
@@ -960,7 +985,8 @@ class SqliteWorldStore:
                     connection.execute(
                         """UPDATE memories SET status = 'superseded',
                            invalidated_at = ?, invalidation_reason = ?, updated_at = ? WHERE id = ?""",
-                        (now, "superseded by extraction update", now, comparison["id"]),
+                        (now, "superseded by extraction update",
+                         now, comparison["id"]),
                     )
 
             connection.execute(
@@ -1018,7 +1044,7 @@ class SqliteWorldStore:
             return []
         states: list[str] = []
         for offset in range(0, len(message_ids), 500):
-            chunk = message_ids[offset : offset + 500]
+            chunk = message_ids[offset: offset + 500]
             placeholders = ",".join("?" for _ in chunk)
             with self._connect() as connection:
                 rows = connection.execute(
@@ -1105,7 +1131,8 @@ class SqliteWorldStore:
         return row["watermark"] if row else None
 
     def _person_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> PersonView:
-        watermark = self._person_watermark(connection, row["space_id"], row["id"])
+        watermark = self._person_watermark(
+            connection, row["space_id"], row["id"])
         return PersonView(
             id=row["id"],
             display_name=row["display_name"],
@@ -1116,7 +1143,8 @@ class SqliteWorldStore:
         )
 
     def _relationship_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> RelationshipView:
-        watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
+        watermark = self._relationship_watermark(
+            connection, row["space_id"], row["id"])
         return RelationshipView(
             id=row["id"],
             person_a_id=row["person_a_id"],
@@ -1161,7 +1189,8 @@ class SqliteWorldStore:
                     """
                     params = [space_id, *person_ids, *person_ids]
                 rows = connection.execute(sql, params).fetchall()
-                relationships = [self._relationship_view(connection, row) for row in rows]
+                relationships = [self._relationship_view(
+                    connection, row) for row in rows]
                 relationship_ids = [row["id"] for row in rows]
                 if request.expand_relationships:
                     expanded_ids = {
@@ -1176,7 +1205,8 @@ class SqliteWorldStore:
                             f"SELECT * FROM people WHERE space_id = ? AND id IN ({placeholders})",
                             [space_id, *new_ids],
                         ).fetchall()
-                        people.extend(self._person_view(connection, row) for row in expanded_rows)
+                        people.extend(self._person_view(connection, row)
+                                      for row in expanded_rows)
                         person_ids.extend(row["id"] for row in expanded_rows)
 
             if request.people and not person_ids:
@@ -1186,7 +1216,8 @@ class SqliteWorldStore:
                 relation_clause = ""
                 params = [space_id, *person_ids]
                 if relationship_ids:
-                    relation_placeholders = ",".join("?" for _ in relationship_ids)
+                    relation_placeholders = ",".join(
+                        "?" for _ in relationship_ids)
                     relation_clause = (
                         " OR m.id IN (SELECT memory_id FROM memory_relationships "
                         f"WHERE relationship_id IN ({relation_placeholders}))"
@@ -1247,7 +1278,8 @@ class SqliteWorldStore:
         self, space_id: str, person_id: str
     ) -> tuple[PersonView, list[MemoryView], str | None] | None:
         with self._connect() as connection:
-            person = connection.execute("SELECT * FROM people WHERE space_id = ? AND id = ?", (space_id, person_id)).fetchone()
+            person = connection.execute(
+                "SELECT * FROM people WHERE space_id = ? AND id = ?", (space_id, person_id)).fetchone()
             if not person:
                 return None
             rows = connection.execute("""SELECT DISTINCT m.* FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
@@ -1261,13 +1293,17 @@ class SqliteWorldStore:
         """Comparison-only state captured with an owner reasoning snapshot."""
         with self._connect() as connection:
             if owner_kind == "person":
-                clause, params = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)", [owner_id]
+                clause, params = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)", [
+                    owner_id]
             elif owner_kind == "relationship":
-                clause, params = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)", [owner_id]
+                clause, params = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)", [
+                    owner_id]
             else:
                 clause, params = "m.about_user = 1", []
-            inferred = connection.execute(f"SELECT m.* FROM memories m WHERE m.space_id = ? AND m.status = 'active' AND m.basis = 'inferred' AND {clause} ORDER BY m.created_at DESC LIMIT 100", [space_id, *params]).fetchall()
-            hypotheses = connection.execute("SELECT * FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ? AND status = 'open' ORDER BY created_at DESC LIMIT 100", (space_id, owner_kind, owner_id)).fetchall()
+            inferred = connection.execute(
+                f"SELECT m.* FROM memories m WHERE m.space_id = ? AND m.status = 'active' AND m.basis = 'inferred' AND {clause} ORDER BY m.created_at DESC LIMIT 100", [space_id, *params]).fetchall()
+            hypotheses = connection.execute(
+                "SELECT * FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ? AND status = 'open' ORDER BY created_at DESC LIMIT 100", (space_id, owner_kind, owner_id)).fetchall()
             return ([self._memory_view(connection, row, True) for row in inferred], [HypothesisView(id=row['id'], space_id=row['space_id'], owner_kind=row['owner_kind'], owner_id=row['owner_id'], content=row['content'], kind=row['kind'], confidence=row['confidence'], status=row['status'], promoted_memory_id=row['promoted_memory_id'], evidence=[HypothesisEvidence(memory_id=e['memory_id'], role=e['role']) for e in connection.execute('SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?', (row['id'],)).fetchall()], created_at=row['created_at'], updated_at=row['updated_at']) for row in hypotheses])
 
     def relationship_context(
@@ -1302,7 +1338,8 @@ class SqliteWorldStore:
                 self._relationship_view(connection, relationship),
                 [self._memory_view(connection, row, True) for row in rows
                  if row["basis"] != "inferred"],
-                self._relationship_watermark(connection, space_id, relationship_id),
+                self._relationship_watermark(
+                    connection, space_id, relationship_id),
             )
 
     def _reconcile_inferred_memories(
@@ -1352,7 +1389,8 @@ class SqliteWorldStore:
                 ).fetchall()
             ]
             if source_ids is not None:
-                valid_sources = [source_id for source_id in valid_sources if source_id in source_ids]
+                valid_sources = [
+                    source_id for source_id in valid_sources if source_id in source_ids]
             if not valid_sources:
                 continue
             if existing:
@@ -1364,7 +1402,8 @@ class SqliteWorldStore:
                     )
                     VALUES (?, ?)
                     """,
-                    [(existing["id"], source_id) for source_id in valid_sources],
+                    [(existing["id"], source_id)
+                     for source_id in valid_sources],
                 )
                 continue
             memory_id = _id("memory")
@@ -1375,7 +1414,8 @@ class SqliteWorldStore:
                     id, space_id, content, kind, basis, about_user, created_by, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, 'inferred', ?, 'reasoner', ?, ?)
                 """,
-                (memory_id, space_id, item.content, item.kind, int(owner_kind == "user"), now, now),
+                (memory_id, space_id, item.content, item.kind,
+                 int(owner_kind == "user"), now, now),
             )
             if person_id:
                 connection.execute(
@@ -1413,9 +1453,11 @@ class SqliteWorldStore:
         to have been supplied by the trusted caller in context.
         """
         if owner_kind not in {"user", "person", "relationship"}:
-            raise ValueError("owner_kind must be user, person, or relationship")
+            raise ValueError(
+                "owner_kind must be user, person, or relationship")
         if (owner_kind == "user") != (owner_id is None):
-            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
+            raise ValueError(
+                "user hypotheses have no owner_id; other hypotheses require one")
         with self._connect() as connection:
             self._apply_inferred_memory_actions(
                 connection, space_id, owner_kind, owner_id, source_memory_ids,
@@ -1428,7 +1470,8 @@ class SqliteWorldStore:
         context_inferred_memory_ids: set[str], actions: InferredMemoryActions,
     ) -> None:
         if actions.upserts:
-            target = {"person": "person_id", "relationship": "relationship_id"}.get(owner_kind)
+            target = {"person": "person_id",
+                      "relationship": "relationship_id"}.get(owner_kind)
             target_kwargs = {target: owner_id} if target else {}
             self._reconcile_inferred_memories(
                 connection, space_id, actions.upserts, **target_kwargs,
@@ -1455,7 +1498,7 @@ class SqliteWorldStore:
                 continue
             now = _now()
             connection.execute(
-                    """UPDATE memories SET status = 'retracted', invalidated_at = ?,
+                """UPDATE memories SET status = 'retracted', invalidated_at = ?,
                        invalidation_reason = ?, updated_at = ? WHERE id = ?""",
                 (now, retraction.reason, now, retraction.memory_id),
             )
@@ -1471,9 +1514,11 @@ class SqliteWorldStore:
     ) -> None:
         """Persist standalone hypotheses and explicit, context-scoped transitions."""
         if owner_kind not in {"user", "person", "relationship"}:
-            raise ValueError("owner_kind must be user, person, or relationship")
+            raise ValueError(
+                "owner_kind must be user, person, or relationship")
         if (owner_kind == "user") != (owner_id is None):
-            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
+            raise ValueError(
+                "user hypotheses have no owner_id; other hypotheses require one")
         with self._connect() as connection:
             self._apply_hypothesis_actions(
                 connection, space_id, owner_kind, owner_id,
@@ -1606,7 +1651,8 @@ class SqliteWorldStore:
                  AND (mr.relationship_id = ? OR
                       (a.person_id = ? AND b.person_id = ?))
                ORDER BY m.created_at DESC, m.id DESC""",
-            (space_id, relationship_id, relationship["person_a_id"], relationship["person_b_id"]),
+            (space_id, relationship_id,
+             relationship["person_a_id"], relationship["person_b_id"]),
         ).fetchall()
         return {row["id"] for row in rows}
 
@@ -1639,14 +1685,18 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
+            actions = result.inferred_memory_actions or InferredMemoryActions(
+                upserts=result.inferred_memories)
             self._apply_inferred_memory_actions(
                 connection, space_id, "person", person_id,
-                self._person_reasoning_source_ids(connection, space_id, person_id), context_inferred_memory_ids or set(), actions,
+                self._person_reasoning_source_ids(
+                    connection, space_id, person_id), context_inferred_memory_ids or set(), actions,
             )
             if result.hypothesis_actions:
-                self._apply_hypothesis_actions(connection, space_id, "person", person_id, self._person_reasoning_source_ids(connection, space_id, person_id), context_hypothesis_ids or set(), result.hypothesis_actions)
-            final_watermark = self._person_watermark(connection, space_id, person_id)
+                self._apply_hypothesis_actions(connection, space_id, "person", person_id, self._person_reasoning_source_ids(
+                    connection, space_id, person_id), context_hypothesis_ids or set(), result.hypothesis_actions)
+            final_watermark = self._person_watermark(
+                connection, space_id, person_id)
             connection.execute(
                 """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
                     profile_updated_at = ?, updated_at = ? WHERE id = ?""",
@@ -1688,14 +1738,18 @@ class SqliteWorldStore:
             )
             if claimed.rowcount != 1:
                 return False
-            actions = result.inferred_memory_actions or InferredMemoryActions(upserts=result.inferred_memories)
+            actions = result.inferred_memory_actions or InferredMemoryActions(
+                upserts=result.inferred_memories)
             self._apply_inferred_memory_actions(
                 connection, space_id, "relationship", relationship_id,
-                self._relationship_reasoning_source_ids(connection, space_id, relationship_id), context_inferred_memory_ids or set(), actions,
+                self._relationship_reasoning_source_ids(
+                    connection, space_id, relationship_id), context_inferred_memory_ids or set(), actions,
             )
             if result.hypothesis_actions:
-                self._apply_hypothesis_actions(connection, space_id, "relationship", relationship_id, self._relationship_reasoning_source_ids(connection, space_id, relationship_id), context_hypothesis_ids or set(), result.hypothesis_actions)
-            final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
+                self._apply_hypothesis_actions(connection, space_id, "relationship", relationship_id, self._relationship_reasoning_source_ids(
+                    connection, space_id, relationship_id), context_hypothesis_ids or set(), result.hypothesis_actions)
+            final_watermark = self._relationship_watermark(
+                connection, space_id, relationship_id)
             now = _now()
             connection.execute(
                 """UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
@@ -1749,7 +1803,8 @@ class SqliteWorldStore:
             space_id=row["space_id"], revision=row["revision"],
             source_watermark=row["source_watermark"], criteria=criteria,
             source_cursor_id=row["source_cursor_id"],
-            boundaries=[CoverageBoundary.model_validate(value) for value in _loads(row["boundaries"], [])],
+            boundaries=[CoverageBoundary.model_validate(
+                value) for value in _loads(row["boundaries"], [])],
             life_periods=_loads(row["life_periods"], []),
             relationship_arcs=_loads(row["relationship_arcs"], []),
             behavioral_contexts=_loads(row["behavioral_contexts"], []),
@@ -1757,14 +1812,16 @@ class SqliteWorldStore:
 
     def _hypothesis_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> HypothesisView:
         evidence = connection.execute(
-            "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (row["id"],)
+            "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (
+                row["id"],)
         ).fetchall()
         return HypothesisView(id=row["id"], space_id=row["space_id"], owner_kind=row["owner_kind"], owner_id=row["owner_id"], content=row["content"], kind=row["kind"], confidence=row["confidence"], status=row["status"], promoted_memory_id=row["promoted_memory_id"], evidence=[HypothesisEvidence(memory_id=item["memory_id"], role=item["role"]) for item in evidence], created_at=row["created_at"], updated_at=row["updated_at"])
 
     def coverage_context(self, space_id: str, limit: int | None = 24) -> tuple[CoverageMapView, list[MemoryView], list[HypothesisView], bool] | None:
         """Return changed evidence, optionally bounded for simple adapters."""
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
             if not row:
                 return None
             coverage = self._coverage_view(row)
@@ -1772,7 +1829,8 @@ class SqliteWorldStore:
             query = """SELECT * FROM memories WHERE space_id = ? AND basis <> 'inferred'
                        AND (updated_at > ? OR (updated_at = ? AND id > ?))
                        ORDER BY updated_at, id"""
-            params: tuple[Any, ...] = (space_id, watermark, watermark, cursor_id)
+            params: tuple[Any, ...] = (
+                space_id, watermark, watermark, cursor_id)
             if limit is not None:
                 query += " LIMIT ?"
                 params += (limit + 1,)
@@ -1782,55 +1840,68 @@ class SqliteWorldStore:
             else:
                 chunk, pending = changed[:limit], len(changed) > limit
             hypotheses = connection.execute(
-                "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)
+                "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (
+                    space_id,)
             ).fetchall()
             return coverage, [self._memory_view(connection, item, True) for item in chunk], [self._hypothesis_view(connection, item) for item in hypotheses], pending
 
     def apply_coverage_audit(self, space_id: str, expected_watermark: str | None, expected_cursor_id: str | None, patch: CoverageAuditPatch, evidence_ids: set[str], context_boundary_ids: set[str], context_hypothesis_ids: set[str]) -> bool:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
             if not row or row["source_watermark"] != expected_watermark or row["source_cursor_id"] != expected_cursor_id:
                 return False
             coverage = self._coverage_view(row)
-            active_ids = {item["id"] for item in connection.execute("SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND basis <> 'inferred'", (space_id,)).fetchall()}
+            active_ids = {item["id"] for item in connection.execute(
+                "SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND basis <> 'inferred'", (space_id,)).fetchall()}
             for item in patch.criteria:
                 if item.criterion_id not in coverage.criteria:
                     continue
-                evidence = [memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids and memory_id in active_ids]
+                evidence = [
+                    memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids and memory_id in active_ids]
                 # A patch with no current evidence cannot raise coverage. This
                 # is the persistence backstop for the prompt's hypothesis rule.
                 old = coverage.criteria[item.criterion_id]
                 levels = ["unknown", "fragmentary", "grounded", "rich"]
-                level = item.level if evidence or levels.index(item.level) <= levels.index(old.get("level", "unknown")) else old.get("level", "unknown")
-                coverage.criteria[item.criterion_id] = {"level": level, "known_state": item.known_state, "evidence_memory_ids": sorted(set(old.get("evidence_memory_ids", []) + evidence))}
+                level = item.level if evidence or levels.index(item.level) <= levels.index(
+                    old.get("level", "unknown")) else old.get("level", "unknown")
+                coverage.criteria[item.criterion_id] = {"level": level, "known_state": item.known_state, "evidence_memory_ids": sorted(
+                    set(old.get("evidence_memory_ids", []) + evidence))}
             # Evidence can be retracted/superseded after a prior audit. Prune
             # it before applying this patch, and do not let an empty criterion
             # retain a misleading grounded/rich level.
             for criterion in coverage.criteria.values():
-                criterion["evidence_memory_ids"] = [memory_id for memory_id in criterion.get("evidence_memory_ids", []) if memory_id in active_ids]
+                criterion["evidence_memory_ids"] = [memory_id for memory_id in criterion.get(
+                    "evidence_memory_ids", []) if memory_id in active_ids]
                 if not criterion["evidence_memory_ids"]:
                     criterion["level"], criterion["known_state"] = "unknown", ""
             boundaries = {item.id: item for item in coverage.boundaries}
             for item in boundaries.values():
-                item.evidence_memory_ids = [memory_id for memory_id in item.evidence_memory_ids if memory_id in active_ids]
+                item.evidence_memory_ids = [
+                    memory_id for memory_id in item.evidence_memory_ids if memory_id in active_ids]
             for item in patch.boundary_upserts:
                 if all(ref in coverage.criteria for ref in item.criterion_refs):
-                    evidence = [memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids]
+                    evidence = [
+                        memory_id for memory_id in item.evidence_memory_ids if memory_id in evidence_ids]
                     if item.hypothesis_id not in context_hypothesis_ids:
                         item.hypothesis_id = None
-                    duplicate = next((boundary for boundary in boundaries.values() if boundary.status == "open" and boundary.kind == item.kind and boundary.summary == item.summary and boundary.criterion_refs == item.criterion_refs), None)
+                    duplicate = next((boundary for boundary in boundaries.values() if boundary.status == "open" and boundary.kind ==
+                                     item.kind and boundary.summary == item.summary and boundary.criterion_refs == item.criterion_refs), None)
                     if duplicate:
                         continue
                     boundary_id = _id("boundary")
-                    boundaries[boundary_id] = CoverageBoundary(id=boundary_id, kind=item.kind, summary=item.summary, criterion_refs=item.criterion_refs, evidence_memory_ids=evidence, hypothesis_id=item.hypothesis_id)
+                    boundaries[boundary_id] = CoverageBoundary(id=boundary_id, kind=item.kind, summary=item.summary,
+                                                               criterion_refs=item.criterion_refs, evidence_memory_ids=evidence, hypothesis_id=item.hypothesis_id)
             for transition in patch.boundary_transitions:
                 if transition.boundary_id in context_boundary_ids and transition.boundary_id in boundaries:
                     boundaries[transition.boundary_id].status = transition.status
                     boundaries[transition.boundary_id].status_reason = transition.reason
-            cursor_row = connection.execute("SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1" % ",".join("?" for _ in evidence_ids), list(evidence_ids)).fetchone()
+            cursor_row = connection.execute("SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1" % ",".join(
+                "?" for _ in evidence_ids), list(evidence_ids)).fetchone()
             next_watermark = cursor_row["updated_at"] if cursor_row else expected_watermark
             next_cursor_id = cursor_row["id"] if cursor_row else expected_cursor_id
-            connection.execute("""UPDATE coverage_maps SET revision = revision + 1, source_watermark = ?, source_cursor_id = ?, criteria = ?, boundaries = ?, life_periods = ?, relationship_arcs = ?, behavioral_contexts = ?, updated_at = ? WHERE space_id = ?""", (next_watermark, next_cursor_id, _json(coverage.criteria), _json([item.model_dump() for item in boundaries.values()]), _json(list(dict.fromkeys(coverage.life_periods + patch.life_periods))[:30]), _json(list(dict.fromkeys(coverage.relationship_arcs + patch.relationship_arcs))[:30]), _json(list(dict.fromkeys(coverage.behavioral_contexts + patch.behavioral_contexts))[:30]), _now(), space_id))
+            connection.execute("""UPDATE coverage_maps SET revision = revision + 1, source_watermark = ?, source_cursor_id = ?, criteria = ?, boundaries = ?, life_periods = ?, relationship_arcs = ?, behavioral_contexts = ?, updated_at = ? WHERE space_id = ?""", (next_watermark, next_cursor_id, _json(coverage.criteria), _json(
+                [item.model_dump() for item in boundaries.values()]), _json(list(dict.fromkeys(coverage.life_periods + patch.life_periods))[:30]), _json(list(dict.fromkeys(coverage.relationship_arcs + patch.relationship_arcs))[:30]), _json(list(dict.fromkeys(coverage.behavioral_contexts + patch.behavioral_contexts))[:30]), _now(), space_id))
             return True
 
     def _learning_goal_view(self, row: sqlite3.Row) -> LearningGoalView:
@@ -1838,20 +1909,26 @@ class SqliteWorldStore:
 
     def learning_goal_context(self, space_id: str) -> tuple[CoverageMapView, list[HypothesisView], list[LearningGoalView], list[LearningGoalView]] | None:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
             if not row:
                 return None
-            hypotheses = connection.execute("SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)).fetchall()
-            goals = connection.execute("SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
+            hypotheses = connection.execute(
+                "SELECT * FROM hypotheses WHERE space_id = ? AND status = 'open' ORDER BY updated_at DESC LIMIT 100", (space_id,)).fetchall()
+            goals = connection.execute(
+                "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
             return self._coverage_view(row), [self._hypothesis_view(connection, item) for item in hypotheses], [self._learning_goal_view(item) for item in goals if item["status"] == "open"], [self._learning_goal_view(item) for item in goals if item["status"] != "open"][:20]
 
     def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool:
         with self._connect() as connection:
-            row = connection.execute("SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM coverage_maps WHERE space_id = ?", (space_id,)).fetchone()
             if not row or row["revision"] != expected_revision:
                 return False
-            coverage, boundary_ids = self._coverage_view(row), {item.id for item in self._coverage_view(row).boundaries}
-            open_boundary_ids = {item.id for item in self._coverage_view(row).boundaries if item.status == "open"}
+            coverage, boundary_ids = self._coverage_view(
+                row), {item.id for item in self._coverage_view(row).boundaries}
+            open_boundary_ids = {item.id for item in self._coverage_view(
+                row).boundaries if item.status == "open"}
             now = _now()
             for item in result.upserts:
                 if not set(item.criteria_refs).issubset(coverage.criteria) or not set(item.boundary_ids).issubset(open_boundary_ids):
@@ -1861,14 +1938,18 @@ class SqliteWorldStore:
                     if not item.focus_id or not connection.execute(f"SELECT 1 FROM {table} WHERE id = ? AND space_id = ?", (item.focus_id, space_id)).fetchone():
                         continue
                 if item.goal_id and item.goal_id in context_goal_ids:
-                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, criteria_refs = ?, boundary_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, item.goal_id, space_id))
+                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, criteria_refs = ?, boundary_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
+                        item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, item.goal_id, space_id))
                 elif not item.goal_id:
-                    duplicate = connection.execute("SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND criteria_refs = ? AND boundary_ids = ? AND status = 'open'", (space_id, item.prompt, _json(item.criteria_refs), _json(item.boundary_ids))).fetchone()
+                    duplicate = connection.execute("SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND criteria_refs = ? AND boundary_ids = ? AND status = 'open'", (
+                        space_id, item.prompt, _json(item.criteria_refs), _json(item.boundary_ids))).fetchone()
                     if not duplicate:
-                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, criteria_refs, boundary_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id("goal"), space_id, item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, now))
+                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, criteria_refs, boundary_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id(
+                            "goal"), space_id, item.prompt, item.rationale, _json(item.criteria_refs), _json(item.boundary_ids), item.focus_kind, item.focus_id, now, now))
             for item in result.transitions:
                 if item.goal_id in context_goal_ids:
-                    connection.execute("UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? WHERE id = ? AND space_id = ?", (item.status, item.reason, now, item.goal_id, space_id))
+                    connection.execute("UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
+                        item.status, item.reason, now, item.goal_id, space_id))
             return True
 
     def continuity_context(
@@ -1931,7 +2012,8 @@ class SqliteWorldStore:
     ) -> bool:
         with self._connect() as connection:
             current = connection.execute(
-                "SELECT through_message_id FROM continuities WHERE space_id = ?", (space_id,)
+                "SELECT through_message_id FROM continuities WHERE space_id = ?", (
+                    space_id,)
             ).fetchone()
             if not current or current["through_message_id"] != expected_through_message_id:
                 return False
@@ -1943,10 +2025,12 @@ class SqliteWorldStore:
                 return False
             valid_people = {
                 row["id"] for row in connection.execute(
-                    "SELECT id FROM people WHERE space_id = ? AND status = 'active'", (space_id,)
+                    "SELECT id FROM people WHERE space_id = ? AND status = 'active'", (
+                        space_id,)
                 ).fetchall()
             }
-            people = [item for item in result.related_person_ids if item in valid_people]
+            people = [
+                item for item in result.related_person_ids if item in valid_people]
             connection.execute(
                 "UPDATE continuities SET text = ?, related_person_ids = ?, "
                 "through_message_id = ?, through_message_rowid = ?, updated_at = ? "
@@ -1968,7 +2052,8 @@ class SqliteWorldStore:
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
         updated: dict[str, str] = {}
-        items = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'], owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
+        items = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
+                              owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
         updated.update({row['id']: row['updated_at'] for row in rows})
         goals = connection.execute(
             f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
@@ -1977,20 +2062,25 @@ class SqliteWorldStore:
             "ORDER BY updated_at DESC, id",
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
-        items.extend(GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'], owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status']) for row in goals)
+        items.extend(GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
+                     owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status']) for row in goals)
         updated.update({row['id']: row['updated_at'] for row in goals})
         # Lexical relevance is only a tie-breaker over recency. Character
         # bigrams keep short/non-space-separated text useful (including CJK).
         folded = query.casefold()
         grams = {folded[i:i + 2] for i in range(max(0, len(folded) - 1))}
+
         def rank(item: GuidanceItem) -> tuple[int, str, str]:
             text = item.content.casefold()
-            relevance = (1000 if folded and folded in text else 0) + sum(text.count(g) for g in grams)
+            relevance = (1000 if folded and folded in text else 0) + \
+                sum(text.count(g) for g in grams)
             return (relevance, updated[item.id], item.id)
-        by_kind: dict[str, list[GuidanceItem]] = {"hypothesis": [], "learning_goal": []}
+        by_kind: dict[str, list[GuidanceItem]] = {
+            "hypothesis": [], "learning_goal": []}
         for item in items:
             by_kind[item.kind].append(item)
-        selected = [sorted(by_kind[k], key=rank, reverse=True)[0] for k in ("hypothesis", "learning_goal") if by_kind[k]]
+        selected = [sorted(by_kind[k], key=rank, reverse=True)[0]
+                    for k in ("hypothesis", "learning_goal") if by_kind[k]]
         selected.sort(key=lambda item: (item.kind, item.id))
         return GuidanceBundle(items=selected)
 
@@ -2000,8 +2090,10 @@ class SqliteWorldStore:
 
     def context_bundle(self, space_id: str) -> ContextBundle:
         with self._connect() as connection:
-            user = connection.execute("SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
-            cont = connection.execute("SELECT * FROM continuities WHERE space_id = ?", (space_id,)).fetchone()
+            user = connection.execute(
+                "SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
+            cont = connection.execute(
+                "SELECT * FROM continuities WHERE space_id = ?", (space_id,)).fetchone()
             user_view = UserModelView(space_id=space_id, profile_card=_loads(user["profile_card"], {}),
                                       profile_source_updated_at=user["profile_source_updated_at"],
                                       profile_updated_at=user["profile_updated_at"]) if user else None
@@ -2010,7 +2102,8 @@ class SqliteWorldStore:
             ids = continuity.related_person_ids if continuity else []
             people = []
             for person_id in ids:
-                row = connection.execute("SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'", (person_id, space_id)).fetchone()
+                row = connection.execute(
+                    "SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'", (person_id, space_id)).fetchone()
                 if row:
                     people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
                                              profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
@@ -2033,7 +2126,8 @@ class SqliteWorldStore:
             ).fetchall()
             by_alias: dict[str, set[str]] = {}
             for row in aliases:
-                by_alias.setdefault(unicodedata.normalize("NFKC", row["normalized_value"]).casefold(), set()).add(row["person_id"])
+                by_alias.setdefault(unicodedata.normalize(
+                    "NFKC", row["normalized_value"]).casefold(), set()).add(row["person_id"])
 
             candidates: list[tuple[int, int, str]] = []
             for alias, person_ids in by_alias.items():
@@ -2044,7 +2138,8 @@ class SqliteWorldStore:
                 boundary_left = r"(?<![a-z])" if latin else ""
                 boundary_right = r"(?![a-z])" if latin else ""
                 for match in re.finditer(boundary_left + escaped + boundary_right, folded):
-                    candidates.append((len(alias), match.start(), next(iter(person_ids))))
+                    candidates.append(
+                        (len(alias), match.start(), next(iter(person_ids))))
             selected: list[tuple[int, str]] = []
             occupied: list[tuple[int, int]] = []
             for length, start, person_id in sorted(candidates, key=lambda item: (-item[0], item[1])):
@@ -2058,7 +2153,8 @@ class SqliteWorldStore:
             rows_by_id = {row["id"]: row for row in aliases}
             for _, person_id in sorted(selected):
                 if person_id not in seen:
-                    people.append(self._person_view(connection, rows_by_id[person_id]))
+                    people.append(self._person_view(
+                        connection, rows_by_id[person_id]))
                     seen.add(person_id)
             return people
 
@@ -2072,7 +2168,8 @@ class SqliteWorldStore:
         it.  Raw messages and memory text remain immutable.
         """
         if source_person_id == target_person_id:
-            raise PersonMergeError("source and target person must differ", conflict=True)
+            raise PersonMergeError(
+                "source and target person must differ", conflict=True)
         with self._connect() as connection:
             source = connection.execute(
                 "SELECT * FROM people WHERE space_id = ? AND id = ?",
@@ -2097,7 +2194,8 @@ class SqliteWorldStore:
                     conflict=True,
                 )
             if source["status"] != "active" or target["status"] != "active":
-                raise PersonMergeError("source and target persons must be active", conflict=True)
+                raise PersonMergeError(
+                    "source and target persons must be active", conflict=True)
 
             now = _now()
             aliases = connection.execute(
@@ -2128,7 +2226,8 @@ class SqliteWorldStore:
                 (target_person_id, source_person_id),
             )
             connection.execute(
-                "DELETE FROM memory_people WHERE person_id = ?", (source_person_id,)
+                "DELETE FROM memory_people WHERE person_id = ?", (
+                    source_person_id,)
             )
 
             affected_relationships: set[str] = set()
@@ -2196,7 +2295,8 @@ class SqliteWorldStore:
                 )
 
             continuity = connection.execute(
-                "SELECT related_person_ids FROM continuities WHERE space_id = ?", (space_id,)
+                "SELECT related_person_ids FROM continuities WHERE space_id = ?", (
+                    space_id,)
             ).fetchone()
             if continuity:
                 ids = _loads(continuity["related_person_ids"], [])
@@ -2268,8 +2368,10 @@ class SqliteWorldStore:
             if updated.rowcount != 1:
                 return False
             if result.hypothesis_actions:
-                source_ids = {row["id"] for row in connection.execute("SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND about_user = 1 AND basis <> 'inferred'", (space_id,)).fetchall()}
-                self._apply_hypothesis_actions(connection, space_id, "user", None, source_ids, context_hypothesis_ids or set(), result.hypothesis_actions)
+                source_ids = {row["id"] for row in connection.execute(
+                    "SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND about_user = 1 AND basis <> 'inferred'", (space_id,)).fetchall()}
+                self._apply_hypothesis_actions(
+                    connection, space_id, "user", None, source_ids, context_hypothesis_ids or set(), result.hypothesis_actions)
             return True
 
     def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None:
@@ -2302,12 +2404,14 @@ class SqliteWorldStore:
             ]
             relationships = []
             for row in connection.execute("SELECT * FROM relationships").fetchall():
-                watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
+                watermark = self._relationship_watermark(
+                    connection, row["space_id"], row["id"])
                 if watermark is not None and row["profile_source_updated_at"] != watermark:
                     relationships.append((row["space_id"], row["id"]))
             user_models = []
             for row in connection.execute("SELECT * FROM user_models").fetchall():
-                watermark = self._user_model_watermark(connection, row["space_id"])
+                watermark = self._user_model_watermark(
+                    connection, row["space_id"])
                 if watermark is not None and row["profile_source_updated_at"] != watermark:
                     user_models.append(row["space_id"])
             return people, relationships, user_models
@@ -2357,7 +2461,8 @@ class SqliteWorldStore:
             for reference in request.people:
                 person = self._find_person(connection, space_id, reference)
                 if not person:
-                    person_id = self._create_person(connection, space_id, reference)
+                    person_id = self._create_person(
+                        connection, space_id, reference)
                 else:
                     person_id = person["id"]
                 connection.execute(
@@ -2394,8 +2499,10 @@ class SqliteWorldStore:
                     space_id,
                     request.content,
                     request.kind or original["kind"],
-                    int(original["about_user"] if request.about_user is None else request.about_user),
-                    request.valid_from if request.valid_from is not None else original["valid_from"],
+                    int(original["about_user"]
+                        if request.about_user is None else request.about_user),
+                    request.valid_from if request.valid_from is not None else original[
+                        "valid_from"],
                     request.valid_to if request.valid_to is not None else original["valid_to"],
                     memory_id,
                     now,
