@@ -10,12 +10,9 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
 from gossipmemo.llm import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
-    CoverageAuditPatch,
-    CoverageCriterionPatch,
     ContinuityReasoningResult,
     ExtractionResult,
     ExtractedMemory,
-    GoalPlanningResult,
     ManualMemoryRequest,
     MessageInput,
     SourceRef,
@@ -141,11 +138,33 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:
-            # Person/relationship/user_model reasoning now drives `prepare` and
-            # `complete` directly (see reasoners/owner.py); the projection
-            # stage is distinguished from the actions stage by prompt marker.
+            # Person/relationship/user_model/coverage/learning_goals reasoning
+            # all drive `prepare` and `complete` directly now (see
+            # reasoners/owner.py, reasoners/coverage.py,
+            # reasoners/learning_goals.py); each stage is distinguished by a
+            # prompt marker rather than a typed method.
             combined = " ".join(str(message.content) for message in request.messages)
             if "Review the projection above" in combined:
+                return json.dumps({})
+            if "Audit long-term autobiographical and persona coverage" in combined:
+                # Make it observable that import waits for induction spawned
+                # by extraction instead of returning as soon as messages
+                # complete.
+                await asyncio.sleep(0.01)
+                self.coverage_audits += 1
+                return json.dumps({
+                    "criteria": [
+                        {
+                            "criterion_id": "P8",
+                            "level": "fragmentary",
+                            "known_state": "A preference is known.",
+                        }
+                    ]
+                })
+            if "Propose optional candidate invitations only" in combined:
+                return json.dumps({"candidates": []})
+            if "Plan a very small number of optional, user-owned" in combined:
+                self.goal_plans += 1
                 return json.dumps({})
             assert "The user likes tea." in combined
             return json.dumps({"profile_card": {"summary": "Likes tea"}})
@@ -156,30 +175,6 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 text="Imported conversation",
                 through_message_id=messages[-1].id,
             )
-
-        async def audit_coverage(self, coverage, memories, hypotheses=()):
-            del coverage, hypotheses
-            # Make it observable that import waits for induction spawned by
-            # extraction instead of returning as soon as messages complete.
-            await asyncio.sleep(0.01)
-            self.coverage_audits += 1
-            return CoverageAuditPatch(
-                criteria=[
-                    CoverageCriterionPatch(
-                        criterion_id="P8",
-                        level="fragmentary",
-                        known_state="A preference is known.",
-                        evidence_memory_ids=[memories[0].id],
-                    )
-                ]
-            )
-
-        async def plan_learning_goals(
-            self, coverage, hypotheses, open_goals, recent_closed_goals
-        ):
-            del coverage, hypotheses, open_goals, recent_closed_goals
-            self.goal_plans += 1
-            return GoalPlanningResult()
 
         async def aclose(self):
             return None

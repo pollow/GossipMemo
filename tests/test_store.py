@@ -572,16 +572,6 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                 {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
             )
 
-        async def audit_coverage(self, coverage, memories, hypotheses=()):
-            del coverage, memories, hypotheses
-            from gossipmemo.models import CoverageAuditPatch
-            return CoverageAuditPatch()
-
-        async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
-            del coverage, hypotheses, open_goals, recent_closed_goals
-            from gossipmemo.models import GoalPlanningResult
-            return GoalPlanningResult()
-
         async def synthesize(self, question, context):
             assert question == "What does Bob prefer?"
             assert any(memory.content == "Bob prefers tea." for memory in context.memories)

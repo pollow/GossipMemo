@@ -86,16 +86,6 @@ class _ContinuityModel:
             text="summary", through_message_id=messages[-1].id
         )
 
-    async def audit_coverage(self, coverage, memories, hypotheses=()):
-        del coverage, memories, hypotheses
-        from gossipmemo.models import CoverageAuditPatch
-        return CoverageAuditPatch()
-
-    async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
-        del coverage, hypotheses, open_goals, recent_closed_goals
-        from gossipmemo.models import GoalPlanningResult
-        return GoalPlanningResult()
-
     async def synthesize(self, question, context):
         return ""
 

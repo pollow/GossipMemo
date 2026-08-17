@@ -42,14 +42,17 @@ from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
 class FakeModel:
     """A double covering both the wide `LlmModel` seam (extract, continuity,
-    coverage, goal planning, synthesize -- still called by name) and the
-    narrow `LlmTransport` seam that person/relationship/user_model reasoning
+    synthesize -- still called by name) and the narrow `LlmTransport` seam
+    that person/relationship/user_model/coverage/learning_goals reasoning
     now drives directly via `prepare`/`complete`.
 
-    `complete` inspects the outgoing request to tell an owner-reasoning
-    projection stage from its actions stage, since that is genuinely all a
-    transport-level double can see; it does not know which of the three
-    owner reasoners is asking.
+    `complete`'s default fallback -- an object whose fields are all
+    unrelated to any reasoner's schema -- parses successfully against every
+    result type used here (`CoverageAuditPatch`, `GoalPlanningResult`,
+    `GoalPlanningCandidates`, `RelationshipProjectionResult`) because every
+    field on each of them has a default and pydantic ignores unknown keys;
+    it only needs a real branch for stages whose schema requires a
+    `profile_card` or that must observe an actions-stage completion.
     """
 
     configured = True
@@ -90,16 +93,6 @@ class FakeModel:
         del continuity
         from gossipmemo.models import ContinuityReasoningResult
         return ContinuityReasoningResult(through_message_id=messages[-1].id if messages else "")
-
-    async def audit_coverage(self, coverage, memories, hypotheses=()):
-        del coverage, memories, hypotheses
-        from gossipmemo.models import CoverageAuditPatch
-        return CoverageAuditPatch()
-
-    async def plan_learning_goals(self, coverage, hypotheses, open_goals, recent_closed_goals):
-        del coverage, hypotheses, open_goals, recent_closed_goals
-        from gossipmemo.models import GoalPlanningResult
-        return GoalPlanningResult()
 
     async def synthesize(self, question, context):
         del question
