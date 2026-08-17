@@ -9,6 +9,7 @@ import pytest
 
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.llm import ChatCompletionRequest, OpenAICompatibleAdapter
+from gossipmemo.reasoners.person import _reason_person
 from gossipmemo.models import (
     HypothesisView,
     ManualMemoryRequest,
@@ -47,7 +48,8 @@ def test_owner_chunking_filters_fake_ids_and_keeps_final_two_calls() -> None:
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=ContextBudget(5000, 80, 20))
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"),
                 [_memory("m1", "x" * 10000)],
             )
@@ -88,7 +90,8 @@ def test_owner_chunking_recursively_digests_large_cjk_with_bounded_requests() ->
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget,
             )
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"),
                 [_memory(f"m{index}", "往事" * 1200) for index in range(12)],
             )
@@ -124,7 +127,7 @@ def test_owner_stage_two_checks_actual_first_completion_before_second_http() -> 
                 context_budget=ContextBudget(5000, 300, 200),
             )
             with pytest.raises(ValueError, match="LLM context exceeds input budget"):
-                await adapter.reason_person(PersonView(id="p", display_name="Bob"), [])
+                await _reason_person(adapter, PersonView(id="p", display_name="Bob"), [])
 
     asyncio.run(run())
     assert calls == 1
@@ -153,7 +156,8 @@ def test_owner_reasoning_retries_malformed_structured_output() -> None:
                 max_retries=1, retry_base_seconds=0.001,
                 retry_max_seconds=0.001,
             )
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"), [],
             )
             assert result.profile_card == {"summary": "ok"}
@@ -196,7 +200,8 @@ def test_owner_digest_retries_semantically_incomplete_source_ids() -> None:
                 max_retries=1, retry_base_seconds=0.001,
                 retry_max_seconds=0.001,
             )
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"),
                 [_memory(f"m{index}", "证据" * 700) for index in range(6)],
             )
@@ -247,7 +252,8 @@ def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
                 "http://x", "k", "m", client=client,
                 context_budget=ContextBudget(6000, 400, 200),
             )
-            result = await adapter.reason_person(
+            result = await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"),
                 [_memory(f"m{index}", "证据" * 300) for index in range(40)],
             )
@@ -291,7 +297,8 @@ def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget,
             )
-            await adapter.reason_person(
+            await _reason_person(
+                adapter,
                 PersonView(id="p", display_name="Bob"), [], inferred, hypotheses,
             )
 

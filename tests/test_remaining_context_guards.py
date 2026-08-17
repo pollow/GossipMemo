@@ -1,3 +1,12 @@
+"""Budget guards on the reasoners that split oversized context.
+
+These drive each reasoner's own entry point rather than the world, so an
+adapter can be given a deliberately tiny `ContextBudget` and every issued
+request inspected. Coverage, goal planning and the owner family now live
+in `reasoners/`; continuity and query synthesis are still on the adapter
+until ④.2c moves them, which is why the two styles sit side by side.
+"""
+
 from __future__ import annotations
 
 import asyncio
@@ -11,6 +20,8 @@ from gossipmemo.models import (
     ContinuityView, CoverageMapView, HypothesisView, LearningGoalView,
     MemoryView, ModelMessage,
 )
+from gossipmemo.reasoners.coverage import _audit_coverage
+from gossipmemo.reasoners.learning_goals import _plan_learning_goals
 
 
 def _memory(identifier: str, content: str) -> MemoryView:
@@ -51,7 +62,8 @@ def test_coverage_cjk_chunks_filter_fake_evidence_ids() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"criteria": [{"criterion_id": "M1", "level": "grounded", "evidence_memory_ids": ["forged", "m0"]}], "boundary_upserts": [{"kind": "blind_spot", "summary": "x", "evidence_memory_ids": ["forged", "m0"]}]})}}]})
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            result = await OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget).audit_coverage(CoverageMapView(space_id="s"), [_memory(f"m{i}", "证据" * 2500) for i in range(3)])
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget)
+            result = await _audit_coverage(adapter, CoverageMapView(space_id="s"), [_memory(f"m{i}", "证据" * 2500) for i in range(3)])
             assert all("forged" not in item.evidence_memory_ids for item in result.criteria + result.boundary_upserts)
     asyncio.run(run())
     assert len(calls) > 1
@@ -66,7 +78,8 @@ def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            await OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget).plan_learning_goals(CoverageMapView(space_id="s"), [_hypothesis(f"h{i}", "假设" * 2500) for i in range(4)], [], [])
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget)
+            await _plan_learning_goals(adapter, CoverageMapView(space_id="s"), [_hypothesis(f"h{i}", "假设" * 2500) for i in range(4)], [], [])
     asyncio.run(run())
     candidates = [item for item in calls if "Propose optional candidate invitations only" in str(item)]
     finals = [item for item in calls if "<candidates>" in str(item)]
