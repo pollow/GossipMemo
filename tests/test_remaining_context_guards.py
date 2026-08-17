@@ -52,15 +52,13 @@ def test_small_paths_send_original_single_requests() -> None:
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenAICompatibleAdapter(
-                "http://x", "k", "m", client=client)
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
             coverage = CoverageMapView(space_id="s")
             await _audit_coverage(adapter, coverage, [_memory("e", "raw evidence")], [_hypothesis("h", "raw hypothesis")])
             await _reason_continuity(adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
-    assert "raw hypothesis" in str(
-        calls[0]) and "raw evidence" in str(calls[0])
+    assert "raw hypothesis" in str(calls[0]) and "raw evidence" in str(calls[0])
     assert "raw message" in str(calls[1]) and "prior" in str(calls[1])
 
 
@@ -82,8 +80,8 @@ def test_coverage_cjk_chunks_filter_fake_evidence_ids() -> None:
                 "forged" not in item.evidence_memory_ids for item in result.criteria + result.boundary_upserts)
     asyncio.run(run())
     assert len(calls) > 1
-    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(
-        item)) <= budget.usable_input_tokens for item in calls)
+    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(item))
+               <= budget.usable_input_tokens for item in calls)
 
 
 def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
@@ -108,8 +106,8 @@ def test_goal_overflow_uses_multiple_candidate_calls_and_one_final() -> None:
         item for item in calls if "Propose optional candidate invitations only" in str(item)]
     finals = [item for item in calls if "<candidates>" in str(item)]
     assert len(candidates) > 1 and len(finals) == 1
-    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(
-        item)) <= budget.usable_input_tokens for item in calls)
+    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(item))
+               <= budget.usable_input_tokens for item in calls)
 
 
 def test_continuity_oversized_cjk_streams_and_preserves_last_id() -> None:
@@ -129,5 +127,5 @@ def test_continuity_oversized_cjk_streams_and_preserves_last_id() -> None:
             assert result.through_message_id == "m1"
     asyncio.run(run())
     assert len(calls) > 1
-    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(
-        item)) <= budget.usable_input_tokens for item in calls)
+    assert all(budget.estimate_request(ChatCompletionRequest.model_validate(item))
+               <= budget.usable_input_tokens for item in calls)

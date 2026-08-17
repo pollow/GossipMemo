@@ -92,8 +92,7 @@ def extraction_prompt(
     }
     if policy not in policy_text:
         raise ValueError(f"unknown extraction policy: {policy}")
-    evidence_messages = [
-        message for message in messages if message.author == "user"]
+    evidence_messages = [message for message in messages if message.author == "user"]
     assistant_messages = [
         message for message in messages if message.author == "assistant"
     ]
@@ -168,15 +167,13 @@ async def _extract(
         [
             ChatMessage(
                 role="system",
-                content=EXTRACTION_SYSTEM_PROMPT + "\n\n" +
-                schema_instruction(ExtractionResult),
+                content=EXTRACTION_SYSTEM_PROMPT + "\n\n" + schema_instruction(ExtractionResult),
             ),
             ChatMessage(
                 role="user",
                 content=extraction_prompt(
                     list(messages), transport.extraction_policy, list(context),
-                    list(known_people), transport.user_name, list(
-                        comparison_memories),
+                    list(known_people), transport.user_name, list(comparison_memories),
                 ),
             ),
         ],
@@ -219,10 +216,8 @@ class _ExtractionReasoner(AttemptLoop):
         if not messages:
             return more_batches
         context = self.store.load_extraction_context(space_id, batch_id)
-        known_people = self.store.load_known_people(
-            space_id, messages + context)
-        comparisons = self.store.load_extraction_comparisons(
-            space_id, batch_id)
+        known_people = self.store.load_known_people(space_id, messages + context)
+        comparisons = self.store.load_extraction_comparisons(space_id, batch_id)
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
@@ -256,5 +251,4 @@ def build_extraction_reasoner(store: WorldStore, model: LlmTransport) -> Reasone
     return _ExtractionReasoner(store, model)
 
 
-__all__ = ["EXTRACTION_SYSTEM_PROMPT",
-           "build_extraction_reasoner", "extraction_prompt"]
+__all__ = ["EXTRACTION_SYSTEM_PROMPT", "build_extraction_reasoner", "extraction_prompt"]

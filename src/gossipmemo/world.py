@@ -74,10 +74,8 @@ class SocialMemoryWorld:
             "coverage": build_coverage_reasoner(self.store, self.model),
             "learning_goals": build_learning_goals_reasoner(self.store, self.model),
         }
-        self._continuity_reasoner: Reasoner = build_continuity_reasoner(
-            self.store, self.model)
-        self._extraction_reasoner: Reasoner = build_extraction_reasoner(
-            self.store, self.model)
+        self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
+        self._extraction_reasoner: Reasoner = build_extraction_reasoner(self.store, self.model)
         self.reasoning_pipeline = ReasoningPipeline(
             [reasoners[name] for name in reasoning_pipeline_order],
             should_continue=lambda: not self._stopping,
@@ -175,8 +173,7 @@ class SocialMemoryWorld:
         self, space_id: str, source_person_id: str, target_person_id: str
     ) -> MergePersonResponse:
         return MergePersonResponse.model_validate(
-            self.store.merge_person(
-                space_id, source_person_id, target_person_id)
+            self.store.merge_person(space_id, source_person_id, target_person_id)
         )
 
     async def import_messages(
@@ -215,8 +212,7 @@ class SocialMemoryWorld:
                 break
         states = self.store.extraction_states(space_id, message_ids)
         if "failed" in states:
-            raise RuntimeError(
-                "one or more imported messages failed extraction")
+            raise RuntimeError("one or more imported messages failed extraction")
         if any(state != "completed" for state in states):
             raise RuntimeError("imported message extraction did not complete")
         self._schedule_all_stale()
@@ -264,20 +260,17 @@ class SocialMemoryWorld:
         guidance = GuidanceBundle()
         context_status = "available"
         try:
-            known_people = self.store.match_people_in_text(
-                space_id, request.message.content)
+            known_people = self.store.match_people_in_text(space_id, request.message.content)
         except Exception:
             context_status = "unavailable"
             logger.exception("turn person matching failed for %s", space_id)
         try:
             guidance = self.store.guidance_bundle(
-                space_id, [
-                    person.id for person in known_people], request.message.content
+                space_id, [person.id for person in known_people], request.message.content
             )
         except Exception:
             context_status = "unavailable"
-            logger.exception(
-                "turn guidance preparation failed for %s", space_id)
+            logger.exception("turn guidance preparation failed for %s", space_id)
         try:
             memory_recall = self.store.recall_user_memories(
                 space_id, request.message.content, request.memory_limit
@@ -290,8 +283,7 @@ class SocialMemoryWorld:
                 context_update = latest
         except Exception:
             context_status = "unavailable"
-            logger.exception(
-                "turn context preparation failed for %s", space_id)
+            logger.exception("turn context preparation failed for %s", space_id)
         logger.info("turn_completed", extra={"space_id": space_id, "message_count": 1, "known_people": len(known_people), "recalled_memories": len(
             memory_recall), "context_status": context_status, "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return TurnResponse(
@@ -360,8 +352,7 @@ class SocialMemoryWorld:
             finally:
                 self._flush_tasks.pop(space_id, None)
 
-        task = asyncio.create_task(
-            flush(), name=f"gossipmemo-flush-{space_id}")
+        task = asyncio.create_task(flush(), name=f"gossipmemo-flush-{space_id}")
         self._flush_tasks[space_id] = task
 
     def _schedule_extraction(self, space_id: str) -> None:
@@ -411,8 +402,7 @@ class SocialMemoryWorld:
     def supersede_memory(
         self, space_id: str, memory_id: str, request: SupersedeRequest
     ) -> str | None:
-        replacement_id = self.store.supersede_memory(
-            space_id, memory_id, request)
+        replacement_id = self.store.supersede_memory(space_id, memory_id, request)
         return replacement_id
 
     def _schedule_all_stale(self) -> None:

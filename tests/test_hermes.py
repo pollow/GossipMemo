@@ -31,8 +31,7 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
         def close(self):
             return None
 
-    provider = GossipMemoMemoryProvider(
-        client_factory=lambda **_: FakeClient())
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: FakeClient())
     provider.initialize("hermes-session-7", user_id="user-1")
     try:
         provider.sync_turn("Alice told me about Bob.", "I will remember that.")

@@ -297,8 +297,7 @@ def _parse_model_output(content: str, result_type: type[_ResultT]) -> _ResultT:
     try:
         value = json.loads(text)
     except json.JSONDecodeError as error:
-        raise LLMOutputError(
-            "LLM structured output was not valid JSON") from error
+        raise LLMOutputError("LLM structured output was not valid JSON") from error
     try:
         return result_type.model_validate(value)
     except ValidationError as error:

@@ -11,18 +11,15 @@ def utc_now() -> datetime:
 
 
 MemoryBasis = Literal["stated", "observed", "reported", "inferred", "manual"]
-MemoryKind = Literal["fact", "event", "preference",
-                     "plan", "situation", "impression"]
+MemoryKind = Literal["fact", "event", "preference", "plan", "situation", "impression"]
 HypothesisOwnerKind = Literal["user", "person", "relationship"]
-HypothesisStatus = Literal["open", "promoted",
-                           "rejected", "superseded", "retired"]
+HypothesisStatus = Literal["open", "promoted", "rejected", "superseded", "retired"]
 HypothesisConfidence = Literal["low", "medium", "high"]
 HypothesisEvidenceRole = Literal["support", "counter"]
 CoverageLevel = Literal["unknown", "fragmentary", "grounded", "rich"]
 CoverageBoundaryKind = Literal["edge", "blind_spot", "conflict"]
 CoverageBoundaryStatus = Literal["open", "resolved"]
-LearningGoalStatus = Literal["open", "partial",
-                             "answered", "deferred", "retired"]
+LearningGoalStatus = Literal["open", "partial", "answered", "deferred", "retired"]
 
 # These are intentionally prompt-native IDs rather than a normalized rubric
 # table: they are a stable contract for the CoverageAudit and GoalPlanning LLM
@@ -342,10 +339,8 @@ class CoverageBoundaryTransition(BaseModel):
 
 class CoverageAuditPatch(BaseModel):
     criteria: list[CoverageCriterionPatch] = Field(default_factory=list)
-    boundary_upserts: list[CoverageBoundaryUpsert] = Field(
-        default_factory=list)
-    boundary_transitions: list[CoverageBoundaryTransition] = Field(
-        default_factory=list)
+    boundary_upserts: list[CoverageBoundaryUpsert] = Field(default_factory=list)
+    boundary_transitions: list[CoverageBoundaryTransition] = Field(default_factory=list)
     life_periods: list[str] = Field(default_factory=list)
     relationship_arcs: list[str] = Field(default_factory=list)
     behavioral_contexts: list[str] = Field(default_factory=list)
@@ -356,8 +351,7 @@ class CoverageMapView(BaseModel):
     revision: int = 0
     source_watermark: str | None = None
     source_cursor_id: str | None = None
-    criteria: dict[str, dict[str, Any]] = Field(
-        default_factory=coverage_skeleton)
+    criteria: dict[str, dict[str, Any]] = Field(default_factory=coverage_skeleton)
     boundaries: list[CoverageBoundary] = Field(default_factory=list)
     life_periods: list[str] = Field(default_factory=list)
     relationship_arcs: list[str] = Field(default_factory=list)

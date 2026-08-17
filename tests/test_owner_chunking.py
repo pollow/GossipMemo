@@ -37,11 +37,10 @@ def test_owner_chunking_filters_fake_ids_and_keeps_final_two_calls() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        text = "\n".join(str(m.get("content", ""))
-                         for m in payload["messages"])
+        text = "\n".join(str(m.get("content", "")) for m in payload["messages"])
         if "Compress evidence only" in text:
-            body = {"items": [{"summary": "tea", "source_memory_ids": ["m1"]}, {
-                "summary": "fake", "source_memory_ids": ["forged"]}]}
+            body = {"items": [{"summary": "tea", "source_memory_ids": ["m1"]},
+                              {"summary": "fake", "source_memory_ids": ["forged"]}]}
         elif len([c for c in calls if "Compress evidence only" not in " ".join(str(m) for m in c["messages"])]) == 1:
             body = {"profile_card": {"summary": "tea"}}
         else:
@@ -60,10 +59,8 @@ def test_owner_chunking_filters_fake_ids_and_keeps_final_two_calls() -> None:
             assert result.profile_card == {"summary": "tea"}
 
     asyncio.run(run())
-    assert sum("Compress evidence only" in str(
-        c["messages"]) for c in calls) >= 1
-    assert sum("inferred_memory_actions" in str(
-        c["messages"][-1]) for c in calls) == 1
+    assert sum("Compress evidence only" in str(c["messages"]) for c in calls) >= 1
+    assert sum("inferred_memory_actions" in str(c["messages"][-1]) for c in calls) == 1
     assert "forged" not in str(calls[-2:])
 
 
@@ -74,8 +71,7 @@ def test_owner_chunking_recursively_digests_large_cjk_with_bounded_requests() ->
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        combined = "\n".join(str(message.get("content", ""))
-                             for message in payload["messages"])
+        combined = "\n".join(str(message.get("content", "")) for message in payload["messages"])
         if "Compress evidence only" in combined:
             ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
             assert ids
@@ -105,11 +101,9 @@ def test_owner_chunking_recursively_digests_large_cjk_with_bounded_requests() ->
             assert result.profile_card == {"summary": "ok"}
 
     asyncio.run(run())
-    digest_calls = [
-        call for call in calls if "Compress evidence only" in str(call)]
+    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
     assert len(digest_calls) > 2
-    assert sum("Return only the requested projection" in str(call)
-               for call in calls) == 2
+    assert sum("Return only the requested projection" in str(call) for call in calls) == 2
     assert sum("inferred_memory_actions" in str(call) for call in calls) == 1
     for payload in calls:
         request = ChatCompletionRequest.model_validate(payload)
@@ -217,8 +211,7 @@ def test_owner_digest_retries_semantically_incomplete_source_ids() -> None:
             assert result.profile_card == {"summary": "ok"}
 
     asyncio.run(run())
-    digest_calls = [
-        call for call in calls if "Compress evidence only" in str(call)]
+    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
     assert len(digest_calls) >= 2
     assert digest_calls[0]["messages"] == digest_calls[1]["messages"]
 
@@ -241,8 +234,7 @@ def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
                     "source_memory_ids": ["forged"],
                 }]}
             else:
-                groups = [ids[index:index + 2]
-                          for index in range(0, len(ids), 2)]
+                groups = [ids[index:index + 2] for index in range(0, len(ids), 2)]
                 body = {"items": [{
                     "summary": "中" * 600,
                     "source_memory_ids": group,
@@ -271,8 +263,7 @@ def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
             assert result.profile_card == {"summary": "ok"}
 
     asyncio.run(run())
-    digest_calls = [
-        call for call in calls if "Compress evidence only" in str(call)]
+    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
     assert any('"summary"' in str(call) for call in digest_calls)
 
 
@@ -294,8 +285,7 @@ def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None
             json={"choices": [{"message": {"content": json.dumps(body)}}]},
         )
 
-    inferred = [_memory(f"i{index}", "隐私" * 5000, basis="inferred")
-                for index in range(100)]
+    inferred = [_memory(f"i{index}", "隐私" * 5000, basis="inferred") for index in range(100)]
     hypotheses = [
         HypothesisView(
             id=f"h{index}", space_id="s", owner_kind="person", owner_id="p",
@@ -312,8 +302,7 @@ def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None
             )
             await _reason_person(
                 adapter,
-                PersonView(id="p", display_name="Bob"), [
-                ], inferred, hypotheses,
+                PersonView(id="p", display_name="Bob"), [], inferred, hypotheses,
             )
 
     asyncio.run(run())
@@ -339,8 +328,7 @@ def test_owner_store_snapshot_and_authority_include_more_than_one_hundred_memori
         person_id = connection.execute(
             "SELECT id FROM people WHERE space_id = 's'"
         ).fetchone()["id"]
-        authority = store._person_reasoning_source_ids(
-            connection, "s", person_id)
+        authority = store._person_reasoning_source_ids(connection, "s", person_id)
     context = store.person_context("s", person_id)
     assert context is not None
     _, memories, _ = context

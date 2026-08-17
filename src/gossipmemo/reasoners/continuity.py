@@ -90,8 +90,7 @@ def _fit_continuity_prior(
         else:
             hi = middle - 1
     candidate = prior.model_copy(update={"text": text[:lo]})
-    context_budget.check(context_budget.estimate_request(
-        request_for(candidate, chunk)))
+    context_budget.check(context_budget.estimate_request(request_for(candidate, chunk)))
     return candidate
 
 
@@ -129,13 +128,11 @@ async def _reason_continuity(
 
     def fits(chunk: Sequence[ModelMessage]) -> bool:
         return context_budget.report(
-            context_budget.estimate_request(
-                request_for(chunk_prior, list(chunk)))
+            context_budget.estimate_request(request_for(chunk_prior, list(chunk)))
         ).fits
 
     def check(chunk: Sequence[ModelMessage]) -> None:
-        context_budget.check(context_budget.estimate_request(
-            request_for(chunk_prior, list(chunk))))
+        context_budget.check(context_budget.estimate_request(request_for(chunk_prior, list(chunk))))
 
     chunks = greedy_chunks(source, fits, check)
     # A small normal update deliberately remains one call. Large updates
@@ -187,5 +184,4 @@ def build_continuity_reasoner(store: WorldStore, model: LlmTransport) -> Descrip
     )
 
 
-__all__ = ["CONTINUITY_SYSTEM_PROMPT",
-           "build_continuity_reasoner", "continuity_prompt"]
+__all__ = ["CONTINUITY_SYSTEM_PROMPT", "build_continuity_reasoner", "continuity_prompt"]

@@ -107,8 +107,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         configured = True
         gate = ProviderGate()
         context_budget = ContextBudget()
-        retry_policy = RetryPolicy(
-            attempts=1, base_seconds=0.001, max_seconds=0.001)
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
         extraction_policy = "balanced"
 
@@ -121,8 +120,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             return ChatCompletionRequest(
                 model="fake",
                 messages=list(messages),
-                response_format={
-                    "type": "json_object"} if structured else None,
+                response_format={"type": "json_object"} if structured else None,
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:
@@ -132,14 +130,12 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             # reasoners/owner.py, reasoners/coverage.py,
             # reasoners/learning_goals.py); each stage is distinguished by a
             # prompt marker rather than a typed method.
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 self.extractions += 1
                 return json.dumps({
                     "memories": [
-                        {"content": "The user likes tea.",
-                            "basis": "stated", "about_user": True}
+                        {"content": "The user likes tea.", "basis": "stated", "about_user": True}
                     ]
                 })
             if "Rebuild compact cross-session continuity." in combined:
@@ -189,8 +185,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             MessageInput(
                 author="user",
                 content="I like tea.",
-                occurred_at=datetime(2026, 8, 1, 16, index,
-                                     tzinfo=timezone.utc),
+                occurred_at=datetime(2026, 8, 1, 16, index, tzinfo=timezone.utc),
                 source=SourceRef(
                     provider="import",
                     conversation_key="history",
@@ -220,8 +215,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
             "Imported conversation"
         )
         with store._connect() as connection:
-            assert connection.execute(
-                "SELECT COUNT(*) FROM messages").fetchone()[0] == 2
+            assert connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 2
             states = connection.execute(
                 "SELECT DISTINCT extraction_state FROM messages"
             ).fetchall()
@@ -235,16 +229,14 @@ def test_import_reports_background_reasoning_failure(tmp_path):
         configured = True
         gate = ProviderGate()
         context_budget = ContextBudget()
-        retry_policy = RetryPolicy(
-            attempts=1, base_seconds=0.001, max_seconds=0.001)
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
 
         def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
             return ChatCompletionRequest(
                 model="fake",
                 messages=list(messages),
-                response_format={
-                    "type": "json_object"} if structured else None,
+                response_format={"type": "json_object"} if structured else None,
             )
 
         async def complete(self, request: ChatCompletionRequest) -> str:

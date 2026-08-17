@@ -86,8 +86,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         if max_retries < 0:
             raise ValueError("LLM max_retries must not be negative")
         if retry_base_seconds <= 0:
-            raise ValueError(
-                "LLM retry_base_seconds must be greater than zero")
+            raise ValueError("LLM retry_base_seconds must be greater than zero")
         if retry_max_seconds < retry_base_seconds:
             raise ValueError(
                 "LLM retry_max_seconds must be at least retry_base_seconds"
@@ -184,16 +183,14 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         structured = request.response_format is not None
         # Check the exact serialized request before acquiring/sending HTTP.
         # This includes system/messages and response schema JSON.
-        self.context_budget.check(
-            self.context_budget.estimate_request(request))
+        self.context_budget.check(self.context_budget.estimate_request(request))
         client = await self._get_client()
         headers = {"Accept": "application/json", **self._headers}
         if self.api_key:
             headers.setdefault("Authorization", f"Bearer {self.api_key}")
 
         tier = _call_tier.get()
-        label = _call_label.get(
-        ) or f"tier{tier}-{'structured' if structured else 'chat'}"
+        label = _call_label.get() or f"tier{tier}-{'structured' if structured else 'chat'}"
         # Serialize at the single provider request, not the whole reasoner
         # call. Holding the gate across this entire retry loop -- including
         # its `asyncio.sleep` backoff -- is deliberate global backpressure:
@@ -223,8 +220,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                                 ),
                             },
                         )
-                        raise LLMRequestError(
-                            f"LLM request failed: {error}") from error
+                        raise LLMRequestError(f"LLM request failed: {error}") from error
                     delay = self._retry_delay(attempt)
                     self._gate.mark_unavailable_until(
                         asyncio.get_running_loop().time() + delay
@@ -259,8 +255,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                     break
                 if _retryable_status(response.status_code) and attempt < self.max_retries:
                     delay = self._retry_delay(
-                        attempt, _retry_after_seconds(
-                            response.headers.get("Retry-After"))
+                        attempt, _retry_after_seconds(response.headers.get("Retry-After"))
                     )
                     self._gate.mark_unavailable_until(
                         asyncio.get_running_loop().time() + delay
@@ -288,8 +283,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             payload = response.json()
             completion = ChatCompletionResponse.model_validate(payload)
         except (ValueError, ValidationError) as error:
-            raise LLMProtocolError(
-                "LLM returned an invalid chat-completion response") from error
+            raise LLMProtocolError("LLM returned an invalid chat-completion response") from error
         message = completion.choices[0].message
         return _message_content(message.content)
 
@@ -333,11 +327,9 @@ def _response_detail(response: httpx.Response) -> str:
         if isinstance(payload, dict):
             error = payload.get("error")
             if isinstance(error, dict):
-                detail = error.get("message") or json.dumps(
-                    error, ensure_ascii=False)
+                detail = error.get("message") or json.dumps(error, ensure_ascii=False)
             else:
-                detail = payload.get("message") or json.dumps(
-                    payload, ensure_ascii=False)
+                detail = payload.get("message") or json.dumps(payload, ensure_ascii=False)
         else:
             detail = json.dumps(payload, ensure_ascii=False)
     return str(detail).strip()[:1000] or "no response body"

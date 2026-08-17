@@ -36,8 +36,7 @@ async def _reason_user_model(
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, USER_MODEL_REASONING_SYSTEM_PROMPT, UserModelView(
-            space_id="current"),
+        transport, USER_MODEL_REASONING_SYSTEM_PROMPT, UserModelView(space_id="current"),
         memories, inferred_memories, hypotheses, PersonProjectionResult,
         UserReasoningActionsResult,
     )
@@ -60,8 +59,7 @@ def build_user_model_reasoner(store: WorldStore, model: "LlmTransport") -> Descr
         if not user_model.stale:
             return None
         evidence = [memory for memory in memories if memory.basis != "inferred"]
-        inferred, hypotheses = store.owner_review_context(
-            space_id, "user", None)
+        inferred, hypotheses = store.owner_review_context(space_id, "user", None)
         return watermark, evidence, inferred, hypotheses
 
     def call(space_id: str, context):
@@ -71,8 +69,7 @@ def build_user_model_reasoner(store: WorldStore, model: "LlmTransport") -> Descr
     def apply(space_id: str, context, result) -> bool:
         watermark, _, _, hypotheses = context
         return store.apply_user_model_reasoning(
-            space_id, watermark, result, {
-                hypothesis.id for hypothesis in hypotheses}
+            space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}
         )
 
     return DescriptorReasoner("user_model", load_context, call, apply)

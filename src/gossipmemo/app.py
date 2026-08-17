@@ -53,15 +53,13 @@ def create_app(
         started = time.perf_counter()
         logger.info("startup_begin")
         await world.start()
-        logger.info("startup_complete", extra={
-                    "duration_ms": elapsed_ms(started)})
+        logger.info("startup_complete", extra={"duration_ms": elapsed_ms(started)})
         try:
             yield
         finally:
             started = time.perf_counter()
             await world.stop()
-            logger.info("shutdown_complete", extra={
-                        "duration_ms": elapsed_ms(started)})
+            logger.info("shutdown_complete", extra={"duration_ms": elapsed_ms(started)})
 
     app = FastAPI(
         title="GossipMemo",
@@ -186,8 +184,7 @@ def create_app(
             ),
         )
         if not context.people:
-            raise HTTPException(
-                status_code=404, detail="person not found or ambiguous")
+            raise HTTPException(status_code=404, detail="person not found or ambiguous")
         return context.model_dump()
 
     @app.post(
@@ -207,8 +204,7 @@ def create_app(
     async def relationship_dossier(space_id: str, relationship_id: str) -> dict:
         context = world.store.relationship_context(space_id, relationship_id)
         if not context:
-            raise HTTPException(
-                status_code=404, detail="relationship not found")
+            raise HTTPException(status_code=404, detail="relationship not found")
         relationship, memories, _watermark = context
         return {
             "relationship": relationship.model_dump(),
@@ -244,8 +240,7 @@ def create_app(
     ) -> dict:
         replacement_id = world.supersede_memory(space_id, memory_id, request)
         if not replacement_id:
-            raise HTTPException(
-                status_code=404, detail="active memory not found")
+            raise HTTPException(status_code=404, detail="active memory not found")
         return {
             "id": replacement_id,
             "status": "active",

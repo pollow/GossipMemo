@@ -14,23 +14,19 @@ from typing import Iterator
 
 # Lower numbers run first; there is no aging or anti-starvation, by design
 # (see llm.ProviderGate).
-# synthesize: the only synchronous, HTTP-response-blocking call.
-TIER_FOREGROUND = 1
+TIER_FOREGROUND = 1  # synthesize: the only synchronous, HTTP-response-blocking call.
 TIER_FRESHNESS = 2  # extraction, continuity.
-# person, relationship, user_model, coverage, learning_goals.
-TIER_BACKGROUND = 3
+TIER_BACKGROUND = 3  # person, relationship, user_model, coverage, learning_goals.
 
 # Set at each reasoner boundary via `llm_call_tier`; internal call sites
 # (~15 of them across owner-reasoning, chunking, and digesting) inherit the
 # active tier through the contextvar instead of threading a parameter.
-_call_tier: ContextVar[int] = ContextVar(
-    "gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
+_call_tier: ContextVar[int] = ContextVar("gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
 
 # Carried alongside the tier, set at the same reasoner boundary, so
 # `ProviderGate.current_label` can report a human-readable job name
 # ("reason-person", "extract", ...) instead of a tier-derived placeholder.
-_call_label: ContextVar[str | None] = ContextVar(
-    "gossipmemo_llm_call_label", default=None)
+_call_label: ContextVar[str | None] = ContextVar("gossipmemo_llm_call_label", default=None)
 
 
 def current_call_tier() -> int:

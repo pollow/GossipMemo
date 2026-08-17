@@ -89,8 +89,7 @@ class DescriptorReasoner(AttemptLoop):
         self._load_context = load_context
         self._call = call
         self._apply = apply
-        self._continue_when = continue_when or (
-            lambda context, result, applied: not applied)
+        self._continue_when = continue_when or (lambda context, result, applied: not applied)
         self._tier = tier
 
     async def _attempt(self, space_id: str) -> bool:

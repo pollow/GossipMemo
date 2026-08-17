@@ -20,8 +20,7 @@ def parser() -> argparse.ArgumentParser:
     serve = commands.add_parser("serve", help="run the GossipMemo HTTP server")
     serve.add_argument("--host")
     serve.add_argument("--port", type=int)
-    importing = commands.add_parser(
-        "import", help="import chat exports and USER.md")
+    importing = commands.add_parser("import", help="import chat exports and USER.md")
     importing.add_argument("--space", required=True)
     importing.add_argument("--chat", action="append", type=Path, default=[])
     importing.add_argument("--user-md", type=Path)
@@ -41,8 +40,7 @@ async def _run_import(args: argparse.Namespace) -> None:
             try:
                 markdown = args.user_md.read_text(encoding="utf-8")
             except OSError as error:
-                raise ValueError(
-                    f"cannot read USER.md {args.user_md}: {error}") from error
+                raise ValueError(f"cannot read USER.md {args.user_md}: {error}") from error
         settings = get_settings()
         configure_logging(settings.logging_level, settings.logging_format)
         world = SocialMemoryWorld(
@@ -54,8 +52,7 @@ async def _run_import(args: argparse.Namespace) -> None:
         await world.start()
         try:
             if markdown is not None:
-                world.store.overwrite_user_model(
-                    args.space, {"summary": markdown})
+                world.store.overwrite_user_model(args.space, {"summary": markdown})
             summary = (
                 await world.import_messages(args.space, messages)
                 if messages
@@ -77,8 +74,7 @@ def main() -> None:
         try:
             settings = get_settings()
         except (ConfigurationError, ValueError) as error:
-            raise SystemExit(
-                f"GossipMemo configuration error: {error}") from error
+            raise SystemExit(f"GossipMemo configuration error: {error}") from error
         # A single process is a product invariant for SQLite + the local FIFO
         # queue. Deliberately do not expose a workers option here.
         uvicorn.run(

@@ -64,8 +64,7 @@ class FakeModel:
     configured = True
     gate = ProviderGate()
     context_budget = ContextBudget()
-    retry_policy = RetryPolicy(
-        attempts=1, base_seconds=0.001, max_seconds=0.001)
+    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
     extraction_policy = "balanced"
 
@@ -84,8 +83,7 @@ class FakeModel:
 
     @staticmethod
     def _owner_response(request: ChatCompletionRequest) -> str:
-        combined = " ".join(str(message.content)
-                            for message in request.messages)
+        combined = " ".join(str(message.content) for message in request.messages)
         if "Rebuild compact cross-session continuity." in combined:
             ids = re.findall(r'"id": "([^"]*)"', combined)
             return json.dumps({"through_message_id": ids[-1] if ids else ""})
@@ -94,8 +92,7 @@ class FakeModel:
         if '"profile_card"' in combined:
             return json.dumps({"profile_card": {}})
         return json.dumps(
-            {"facets": [], "closeness": None, "tone": None,
-                "status": "unknown", "summary": ""}
+            {"facets": [], "closeness": None, "tone": None, "status": "unknown", "summary": ""}
         )
 
 
@@ -142,8 +139,7 @@ def test_query_uses_fts_but_keeps_structural_fallback(tmp_path):
 
     fallback = store.read(
         "personal",
-        QueryRequest(question="What else should I remember?",
-                     people=["Alice"]),
+        QueryRequest(question="What else should I remember?", people=["Alice"]),
     )
     assert len(fallback.memories) == 2
 
@@ -232,8 +228,7 @@ def test_supersede_preserves_history_and_retract_reason(tmp_path):
         "invalidation_reason": "Bob corrected me.",
     }
     assert replacement["supersedes_memory_id"] == original_id
-    assert store.retract_memory(
-        "personal", replacement_id, "No longer reliable")
+    assert store.retract_memory("personal", replacement_id, "No longer reliable")
     with store._connect() as connection:
         reason = connection.execute(
             "SELECT invalidation_reason FROM memories WHERE id = ?",
@@ -252,8 +247,7 @@ def test_supersede_inherits_or_overrides_about_user(tmp_path):
     )
     assert inherited
     overridden = store.supersede_memory(
-        "personal", inherited, SupersedeRequest(
-            content="This is about Bob.", about_user=False)
+        "personal", inherited, SupersedeRequest(content="This is about Bob.", about_user=False)
     )
     assert overridden
     with store._connect() as connection:
@@ -302,8 +296,7 @@ def test_extraction_batches_default_to_six_messages(tmp_path):
 
     class BatchModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 calls.append(_extraction_batch_size(combined))
                 return json.dumps({})
@@ -341,8 +334,7 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
 
     class BatchModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 calls.append(_extraction_batch_size(combined))
                 return json.dumps({})
@@ -370,8 +362,7 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
             await world.ingest(
                 "personal",
                 IngestRequest(
-                    messages=[MessageInput(
-                        author="assistant", content="message 5")]
+                    messages=[MessageInput(author="assistant", content="message 5")]
                 ),
             )
             for _ in range(100):
@@ -404,8 +395,7 @@ def test_failing_batch_does_not_block_later_batch(tmp_path):
 
     class FlakyModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 if "bad batch" in _extraction_first_content(combined):
                     raise RuntimeError("boom")
@@ -443,8 +433,7 @@ def test_two_permanently_failing_batches_terminate_drain(tmp_path):
 
     class AlwaysFailsModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 calls.append(_extraction_first_content(combined))
                 raise RuntimeError("boom")
@@ -484,8 +473,7 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
 
     class RecordingModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 calls.append(_extraction_first_content(combined))
                 return json.dumps({})
@@ -534,8 +522,7 @@ def test_batch_killed_mid_call_is_not_capped(tmp_path):
 
     class RecordingModel(FakeModel):
         async def complete(self, request: ChatCompletionRequest) -> str:
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if "Extract useful, provenance-aware memories" in combined:
                 calls.append(_extraction_first_content(combined))
                 return json.dumps({})
@@ -552,8 +539,7 @@ def test_induction_waits_for_daily_scheduler(tmp_path):
 
     class InductionModel(FakeModel):
         async def complete(self, request):
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if '"profile_card"' in combined and "Review the projection" not in combined:
                 match = re.search(r'"display_name":\s*"([^"]*)"', combined)
                 calls.append(match.group(1) if match else "")
@@ -591,25 +577,21 @@ def test_induction_schedules_user_model_only_for_about_user_memory(tmp_path):
 
     class UserModel(FakeModel):
         async def complete(self, request):
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if '"profile_card"' in combined and "Review the projection" not in combined:
                 calls.append(combined.count("- id="))
             return self._owner_response(request)
 
     async def scenario() -> None:
         store = _store(tmp_path)
-        world = SocialMemoryWorld(
-            store, UserModel(), induction_interval_seconds=0.01)
+        world = SocialMemoryWorld(store, UserModel(), induction_interval_seconds=0.01)
         await world.start()
         try:
-            world.add_memory("personal", ManualMemoryRequest(
-                content="ordinary fact"))
+            world.add_memory("personal", ManualMemoryRequest(content="ordinary fact"))
             await asyncio.sleep(0.03)
             assert calls == []
             world.add_memory(
-                "personal", ManualMemoryRequest(
-                    content="I like tea", about_user=True)
+                "personal", ManualMemoryRequest(content="I like tea", about_user=True)
             )
             for _ in range(100):
                 if calls:
@@ -627,8 +609,7 @@ def test_startup_catches_up_stale_profiles(tmp_path):
 
     class InductionModel(FakeModel):
         async def complete(self, request):
-            combined = " ".join(str(message.content)
-                                for message in request.messages)
+            combined = " ".join(str(message.content) for message in request.messages)
             if '"profile_card"' in combined and "Review the projection" not in combined:
                 match = re.search(r'"display_name":\s*"([^"]*)"', combined)
                 calls.append(match.group(1) if match else "")
@@ -637,8 +618,7 @@ def test_startup_catches_up_stale_profiles(tmp_path):
     async def scenario() -> None:
         store = _store(tmp_path)
         store.add_manual_memory(
-            "personal", ManualMemoryRequest(
-                content="Bob likes tea.", people=["Bob"])
+            "personal", ManualMemoryRequest(content="Bob likes tea.", people=["Bob"])
         )
         world = SocialMemoryWorld(
             store,
@@ -671,8 +651,7 @@ def test_sync_and_async_sdk_follow_server_contract():
         if request.url.path.endswith("/query"):
             return httpx.Response(
                 200,
-                json={"answer": "Tea", "people": [],
-                      "relationships": [], "memories": []},
+                json={"answer": "Tea", "people": [], "relationships": [], "memories": []},
             )
         raise AssertionError(request.url.path)
 
@@ -695,8 +674,7 @@ def test_sync_and_async_sdk_follow_server_contract():
 
     asyncio.run(async_scenario())
     assert requests
-    assert all(request.headers["authorization"] ==
-               "Bearer secret" for request in requests)
+    assert all(request.headers["authorization"] == "Bearer secret" for request in requests)
 
 
 def test_openai_compatible_adapter_validates_structured_output():
@@ -704,8 +682,7 @@ def test_openai_compatible_adapter_validates_structured_output():
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert payload["response_format"] == {"type": "json_object"}
-        assert "server's balanced extraction policy for the whole batch" in payload[
-            "messages"][1]["content"]
+        assert "server's balanced extraction policy for the whole batch" in payload["messages"][1]["content"]
         return httpx.Response(
             200,
             json={
@@ -944,8 +921,7 @@ def test_http_auth_and_correction_endpoints(tmp_path):
                 corrected = await client.post(
                     f"/v1/spaces/personal/memories/{memory_id}/supersede",
                     headers=headers,
-                    json={"content": "Bob now prefers tea.",
-                          "reason": "Correction"},
+                    json={"content": "Bob now prefers tea.", "reason": "Correction"},
                 )
                 assert corrected.status_code == 201
                 replacement_id = corrected.json()["id"]

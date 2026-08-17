@@ -42,10 +42,8 @@ async def synthesize(transport: LlmTransport, question: str, context: QueryConte
     with llm_call_tier(TIER_FOREGROUND, "query"):
         request = transport.prepare(
             [
-                ChatMessage(role="system",
-                            content=QUERY_SYNTHESIS_SYSTEM_PROMPT),
-                ChatMessage(role="user", content=query_synthesis_prompt(
-                    question, context)),
+                ChatMessage(role="system", content=QUERY_SYNTHESIS_SYSTEM_PROMPT),
+                ChatMessage(role="user", content=query_synthesis_prompt(question, context)),
             ],
             structured=False,
         )
@@ -53,5 +51,4 @@ async def synthesize(transport: LlmTransport, question: str, context: QueryConte
     return content.strip()
 
 
-__all__ = ["QUERY_SYNTHESIS_SYSTEM_PROMPT",
-           "query_synthesis_prompt", "synthesize"]
+__all__ = ["QUERY_SYNTHESIS_SYSTEM_PROMPT", "query_synthesis_prompt", "synthesize"]

@@ -83,8 +83,7 @@ def build_person_reasoner(store: WorldStore, model: "LlmTransport") -> Descripto
         person, memories, watermark = context
         if not person.stale:
             return _PersonTarget(person_id, more_targets)
-        inferred, hypotheses = store.owner_review_context(
-            space_id, "person", person_id)
+        inferred, hypotheses = store.owner_review_context(space_id, "person", person_id)
         return _PersonTarget(
             person_id, more_targets, person, tuple(memories), watermark,
             tuple(inferred), tuple(hypotheses),
@@ -96,8 +95,7 @@ def build_person_reasoner(store: WorldStore, model: "LlmTransport") -> Descripto
         return (
             "reason-person",
             reason_person,
-            (context.person, context.memories,
-             context.inferred, context.hypotheses),
+            (context.person, context.memories, context.inferred, context.hypotheses),
         )
 
     def apply(space_id: str, context: _PersonTarget, result) -> bool:

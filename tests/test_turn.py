@@ -28,8 +28,7 @@ class _NoopModel:
     configured = False
     gate = ProviderGate()
     context_budget = ContextBudget()
-    retry_policy = RetryPolicy(
-        attempts=1, base_seconds=0.001, max_seconds=0.001)
+    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
     extraction_policy = "balanced"
 
@@ -44,8 +43,7 @@ class _NoopModel:
         )
 
     async def complete(self, request: ChatCompletionRequest) -> str:
-        combined = " ".join(str(message.content)
-                            for message in request.messages)
+        combined = " ".join(str(message.content) for message in request.messages)
         if "Rebuild compact cross-session continuity." in combined:
             # Messages are rendered as JSON objects, so the last "id" in
             # the prompt is the last message the request covers.
@@ -69,22 +67,19 @@ def test_turn_matches_longest_alias_and_recalls_user_memory(tmp_path: Path):
         )
 
     async def scenario():
-        world = SocialMemoryWorld(
-            store, _NoopModel(), extraction_batch_size=100)
+        world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
         await world.start()
         try:
             response = await world.turn(
-                "s", TurnRequest(message=MessageInput(
-                    author="user", content="ALICE likes tea"))
+                "s", TurnRequest(message=MessageInput(author="user", content="ALICE likes tea"))
             )
             assert response.status == "accepted"
-            assert [person.display_name for person in response.known_people] == [
-                "Alice"]
+            assert [person.display_name for person in response.known_people] == ["Alice"]
             assert response.memory_recall[0].content == "Alice likes tea"
             assert store.unbatched_messages("s")
             same = await world.turn(
-                "s", TurnRequest(message=MessageInput(
-                    author="user", content="another"), context_version=response.context_update.version)
+                "s", TurnRequest(message=MessageInput(author="user", content="another"),
+                                 context_version=response.context_update.version)
             )
             assert same.context_update is None
         finally:
@@ -98,8 +93,7 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
     store.initialize()
     world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
     original = store.context_bundle
-    store.context_bundle = lambda space_id: (
-        _ for _ in ()).throw(RuntimeError("offline"))
+    store.context_bundle = lambda space_id: (_ for _ in ()).throw(RuntimeError("offline"))
 
     async def scenario():
         response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="hello")))
@@ -150,8 +144,7 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
     store = SqliteWorldStore(tmp_path / "guidance.db")
     store.initialize()
     store.ensure_space("s")
-    store.add_manual_memory("s", ManualMemoryRequest(
-        content="Alice is a friend", people=["Alice"]))
+    store.add_manual_memory("s", ManualMemoryRequest(content="Alice is a friend", people=["Alice"]))
     with store._connect() as connection:
         pid = connection.execute(
             "SELECT id FROM people WHERE display_name = 'Alice'").fetchone()["id"]
@@ -175,8 +168,7 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
     assert store.guidance_bundle("s", [pid], "旅行").items[0].id == "cjk"
 
     async def scenario():
-        world = SocialMemoryWorld(
-            store, _NoopModel(), extraction_batch_size=100)
+        world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
         response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="Alice?")))
         assert any(item.id == "h" for item in response.guidance.items)
     before = store.context_bundle("s").version

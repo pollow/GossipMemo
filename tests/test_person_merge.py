@@ -28,8 +28,7 @@ def test_merge_reconnects_evidence_aliases_and_continuity(tmp_path):
     store.add_manual_memory(
         "s", ManualMemoryRequest(content="Alex fact", people=["Alex Wang"])
     )
-    store.add_manual_memory("s", ManualMemoryRequest(
-        content="AW fact", people=["AW"]))
+    store.add_manual_memory("s", ManualMemoryRequest(content="AW fact", people=["AW"]))
     people = rows(
         store,
         "SELECT id, display_name FROM people "
@@ -51,8 +50,7 @@ def test_merge_reconnects_evidence_aliases_and_continuity(tmp_path):
         store,
         "SELECT person_id FROM person_aliases WHERE normalized_value = 'aw'",
     )[0]["person_id"] == target
-    assert not rows(
-        store, "SELECT 1 FROM memory_people WHERE person_id = ?", (source,))
+    assert not rows(store, "SELECT 1 FROM memory_people WHERE person_id = ?", (source,))
     assert rows(
         store,
         "SELECT status, merged_into_person_id FROM people WHERE id = ?",
@@ -72,10 +70,8 @@ def test_merge_reconnects_evidence_aliases_and_continuity(tmp_path):
 def test_merge_conflicts_are_explicit(tmp_path):
     store = SqliteWorldStore(tmp_path / "merge-conflict.db")
     store.initialize()
-    store.add_manual_memory(
-        "s", ManualMemoryRequest(content="a", people=["A"]))
-    store.add_manual_memory(
-        "s", ManualMemoryRequest(content="b", people=["B"]))
+    store.add_manual_memory("s", ManualMemoryRequest(content="a", people=["A"]))
+    store.add_manual_memory("s", ManualMemoryRequest(content="b", people=["B"]))
     ids = [
         row["id"]
         for row in rows(
@@ -94,8 +90,7 @@ def test_merge_rewires_relationships_and_removes_self_relation(tmp_path):
     store = SqliteWorldStore(tmp_path / "relationship-merge.db")
     store.initialize()
     for name in ("Alex", "AW", "Bob"):
-        store.add_manual_memory(
-            "s", ManualMemoryRequest(content=name, people=[name]))
+        store.add_manual_memory("s", ManualMemoryRequest(content=name, people=[name]))
     people = {
         row["display_name"]: row["id"]
         for row in rows(store, "SELECT id, display_name FROM people WHERE space_id = 's'")
@@ -160,10 +155,8 @@ def test_merge_http_endpoint_and_status_mapping(tmp_path: Path):
     async def scenario() -> None:
         store = SqliteWorldStore(tmp_path / "merge-http.db")
         store.initialize()
-        store.add_manual_memory(
-            "s", ManualMemoryRequest(content="A", people=["A"]))
-        store.add_manual_memory(
-            "s", ManualMemoryRequest(content="B", people=["B"]))
+        store.add_manual_memory("s", ManualMemoryRequest(content="A", people=["A"]))
+        store.add_manual_memory("s", ManualMemoryRequest(content="B", people=["B"]))
         ids = [
             row["id"]
             for row in rows(
@@ -236,10 +229,8 @@ def test_sdk_merge_methods_send_source_target_payloads():
             assert (await client.merge_person("s", "t"))["status"] == "merged"
 
     asyncio.run(scenario())
-    assert [request.url.path for request in seen] == [
-        "/v1/spaces/personal/people/s/merge"] * 2
-    assert all(request.content ==
-               b'{"target_person_id":"t"}' for request in seen)
+    assert [request.url.path for request in seen] == ["/v1/spaces/personal/people/s/merge"] * 2
+    assert all(request.content == b'{"target_person_id":"t"}' for request in seen)
 
 
 def test_hermes_merge_tool_requires_ids_and_calls_client():
@@ -250,8 +241,7 @@ def test_hermes_merge_tool_requires_ids_and_calls_client():
         def close(self):
             return None
 
-    provider = GossipMemoMemoryProvider(
-        client_factory=lambda **_: FakeClient())
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: FakeClient())
     provider.initialize("session")
     try:
         schema = next(
@@ -259,8 +249,7 @@ def test_hermes_merge_tool_requires_ids_and_calls_client():
             for item in provider.get_tool_schemas()
             if item["name"] == "gossipmemo_merge_people"
         )
-        assert schema["parameters"]["required"] == [
-            "source_person_id", "target_person_id"]
+        assert schema["parameters"]["required"] == ["source_person_id", "target_person_id"]
         assert "confirmed" in schema["description"]
         result = provider.handle_tool_call(
             "gossipmemo_merge_people",
