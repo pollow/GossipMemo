@@ -93,11 +93,11 @@ class SocialMemoryWorld:
         self._background_errors.clear()
         self.store.initialize()
         unbatched_spaces: set[str] = set()
-        for space_id, batch_id, _ in self.store.pending_extractions():
-            if batch_id:
-                self._schedule_extraction(space_id)
+        for pending in self.store.pending_extractions():
+            if pending.batch_id:
+                self._schedule_extraction(pending.space_id)
             else:
-                unbatched_spaces.add(space_id)
+                unbatched_spaces.add(pending.space_id)
         for space_id in unbatched_spaces:
             self._drain_extraction_batches(space_id)
         self._schedule_all_stale()

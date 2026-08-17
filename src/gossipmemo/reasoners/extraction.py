@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Any
 from ..models import MemoryView, ModelMessage
 from ..priority import TIER_FRESHNESS, llm_call_tier
 from ..prompts import _json
-from ..store import WorldStore
+from ..store import PendingExtraction, WorldStore
 from .base import AttemptLoop, Reasoner
 
 if TYPE_CHECKING:
@@ -35,6 +35,22 @@ logger = logging.getLogger(__name__)
 # permanently-broken batches (each failure re-sorts the others ahead of it in
 # `pending_extractions`, which alone does not bound the loop).
 MAX_EXTRACTION_ATTEMPTS = 5
+
+
+def _is_exhausted(pending: PendingExtraction) -> bool:
+    """Has this batch spent its attempts on failures we actually saw?
+
+    `mark_extraction_attempt` bumps the count *before* the model call, so a
+    process killed mid-call (SIGKILL past Docker's stop grace period)
+    leaves the count raised with the batch still 'pending' -- it neither
+    succeeded nor failed, and nobody recorded why. Counting those would let
+    repeated restarts retire a perfectly healthy batch after five kills.
+    Only a batch that reached 'failed', with a recorded error, is allowed
+    to run out of attempts.
+    """
+    return (
+        pending.state == "failed" and pending.attempts >= MAX_EXTRACTION_ATTEMPTS
+    )
 
 EXTRACTION_SYSTEM_PROMPT = """Extract useful, provenance-aware memories from the messages.
 Return only the supplied JSON schema. Keep the original meaning, speaker, and
@@ -154,30 +170,13 @@ class _ExtractionReasoner(AttemptLoop):
         self.store = store
         self.model = model
 
-    def _is_exhausted(self, space_id: str, batch_id: str) -> bool:
-        """Has this batch spent its attempts on failures we actually saw?
-
-        `mark_extraction_attempt` bumps the count *before* the model call,
-        so a process killed mid-call (SIGKILL past Docker's stop grace
-        period) leaves the count raised with the batch still 'pending' --
-        it neither succeeded nor failed, and nobody recorded why. Counting
-        those would let repeated restarts retire a perfectly healthy batch
-        after five kills. Only a batch that reached 'failed', with a
-        recorded error, is allowed to run out of attempts.
-        """
-        attempts, state = self.store.batch_extraction_progress(space_id, batch_id)
-        return state == "failed" and attempts >= MAX_EXTRACTION_ATTEMPTS
-
     async def _attempt(self, space_id: str) -> bool:
-        pending = [
-            batch_id
-            for sid, batch_id, _ in self.store.pending_extractions()
-            if sid == space_id and batch_id is not None
-        ]
         eligible = [
-            batch_id
-            for batch_id in pending
-            if not self._is_exhausted(space_id, batch_id)
+            pending.batch_id
+            for pending in self.store.pending_extractions()
+            if pending.space_id == space_id
+            and pending.batch_id is not None
+            and not _is_exhausted(pending)
         ]
         if not eligible:
             return False

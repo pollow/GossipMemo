@@ -10,6 +10,7 @@ from difflib import SequenceMatcher
 from collections import Counter
 from collections.abc import Iterable
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
@@ -115,6 +116,21 @@ def _fts_query(question: str, excluded: Iterable[str] = ()) -> str | None:
             terms.append(token)
     unique = list(dict.fromkeys(terms))[:16]
     return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in unique) or None
+
+
+@dataclass
+class PendingExtraction:
+    """One batch of messages still awaiting extraction.
+
+    `batch_id` is None for messages that have not been batched yet, in
+    which case `attempts` and `state` describe nothing useful.
+    """
+
+    space_id: str
+    batch_id: str | None
+    message_ids: list[str]
+    attempts: int
+    state: str
 
 
 class WorldStore(Protocol):
@@ -673,26 +689,6 @@ class SqliteWorldStore:
                 (space_id, batch_id),
             )
 
-    def batch_extraction_progress(self, space_id: str, batch_id: str) -> tuple[int, str]:
-        """Return `(attempts, state)` for a pending/failed batch.
-
-        All messages in a batch share both values (`mark_extraction_attempt`
-        and `fail_extraction` update the whole batch), so reading any one
-        row suffices.
-        """
-        with self._connect() as connection:
-            row = connection.execute(
-                """
-                SELECT extraction_attempts, extraction_state FROM messages
-                WHERE space_id = ? AND extraction_batch_id = ?
-                LIMIT 1
-                """,
-                (space_id, batch_id),
-            ).fetchone()
-        if row is None:
-            return 0, "pending"
-        return row["extraction_attempts"], row["extraction_state"]
-
     def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None:
         with self._connect() as connection:
             connection.execute(
@@ -982,24 +978,40 @@ class SqliteWorldStore:
             )
         return affected_people, affected_relationships
 
-    def pending_extractions(self) -> list[tuple[str, str | None, list[str]]]:
+    def pending_extractions(self) -> list[PendingExtraction]:
+        """Every batch still awaiting extraction, neediest first.
+
+        Carries each batch's attempt count and state, because the drain has
+        to decide per batch whether to keep trying it: fetching that
+        separately meant one query per pending batch on every pass.
+        """
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT space_id, id, extraction_batch_id FROM messages
+                SELECT space_id, id, extraction_batch_id,
+                       extraction_attempts, extraction_state
+                FROM messages
                 WHERE extraction_state IN ('pending', 'failed')
                 ORDER BY extraction_attempts, ingested_at
                 """
             ).fetchall()
-        grouped: dict[tuple[str, str | None], list[str]] = {}
+        grouped: dict[tuple[str, str | None], PendingExtraction] = {}
         for row in rows:
-            grouped.setdefault(
-                (row["space_id"], row["extraction_batch_id"]), []
-            ).append(row["id"])
-        return [
-            (space_id, batch_id, message_ids)
-            for (space_id, batch_id), message_ids in grouped.items()
-        ]
+            key = (row["space_id"], row["extraction_batch_id"])
+            pending = grouped.get(key)
+            if pending is None:
+                # Every message in a batch shares the batch's attempts and
+                # state; the first row settles both.
+                grouped[key] = PendingExtraction(
+                    space_id=row["space_id"],
+                    batch_id=row["extraction_batch_id"],
+                    message_ids=[row["id"]],
+                    attempts=row["extraction_attempts"],
+                    state=row["extraction_state"],
+                )
+            else:
+                pending.message_ids.append(row["id"])
+        return list(grouped.values())
 
     def extraction_states(self, space_id: str, message_ids: list[str]) -> list[str]:
         if not message_ids:

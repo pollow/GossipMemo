@@ -433,8 +433,8 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
 
     assert calls == ["fresh batch content"]
     reported = {
-        bid for sid, bid, _ in store.pending_extractions()
-        if sid == "personal"
+        pending.batch_id for pending in store.pending_extractions()
+        if pending.space_id == "personal"
     }
     assert capped_batch in reported
     assert fresh_batch not in reported  # completed, so no longer pending
@@ -460,8 +460,11 @@ def test_batch_killed_mid_call_is_not_capped(tmp_path):
         # No fail_extraction: the process died before recording an outcome.
         store.mark_extraction_attempt("personal", killed_batch)
 
-    attempts, state = store.batch_extraction_progress("personal", killed_batch)
-    assert attempts > MAX_EXTRACTION_ATTEMPTS and state == "pending"
+    killed = next(
+        pending for pending in store.pending_extractions()
+        if pending.batch_id == killed_batch
+    )
+    assert killed.attempts > MAX_EXTRACTION_ATTEMPTS and killed.state == "pending"
 
     calls: list[str] = []
 
