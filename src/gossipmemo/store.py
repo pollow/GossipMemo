@@ -239,7 +239,11 @@ class SqliteWorldStore:
         connection = sqlite3.connect(self.path, timeout=10.0)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 10000")
+        # Short on purpose: under WAL a reader never waits on a writer, so a
+        # lock wait here means two writers overlapped, and every write in
+        # this store is a sub-second atomic statement. Waiting ten seconds
+        # for one only hides a stuck writer behind a stalled request.
+        connection.execute("PRAGMA busy_timeout = 1000")
         try:
             with connection:
                 yield connection
@@ -248,9 +252,38 @@ class SqliteWorldStore:
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._enable_wal()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._connect() as connection:
             connection.executescript(schema)
+
+    def _enable_wal(self) -> None:
+        """Switch the database to WAL once, and confirm it took.
+
+        The mode is a property of the database file, not the connection, so
+        this runs at startup only. `PRAGMA journal_mode` reports the mode it
+        ended up in instead of raising, so a filesystem that cannot support
+        WAL -- a network mount, almost always -- leaves the database in
+        rollback-journal mode with nothing in the logs. Readers would then
+        block behind every writer while `busy_timeout` is deliberately
+        short, turning a silent downgrade into intermittent "database is
+        locked" errors much later. Fail at startup instead.
+
+        Runs outside `_connect` because the journal mode cannot be changed
+        from inside a transaction.
+        """
+        connection = sqlite3.connect(self.path, timeout=10.0)
+        try:
+            row = connection.execute("PRAGMA journal_mode = WAL").fetchone()
+        finally:
+            connection.close()
+        mode = (row[0] if row else "").lower()
+        if mode != "wal":
+            raise RuntimeError(
+                f"SQLite refused WAL mode for {self.path} (still {mode!r}). "
+                "This usually means the database is on a filesystem that "
+                "cannot support it, such as a network mount."
+            )
 
     def ensure_space(self, space_id: str, name: str | None = None) -> str:
         with self._connect() as connection:

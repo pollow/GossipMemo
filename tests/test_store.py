@@ -1381,3 +1381,32 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
     # This models a process restart: stale discovery must notice the second row
     # even though it shares the persisted timestamp.
     assert store.stale_coverage_spaces() == ["personal"]
+
+
+def test_initialize_enables_wal_and_a_short_busy_timeout(store):
+    with store._connect() as connection:
+        assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
+
+
+def test_initialize_fails_loudly_when_wal_is_refused(tmp_path, monkeypatch):
+    """A filesystem that cannot do WAL reports a mode instead of raising."""
+
+    import gossipmemo.store as store_module
+
+    class RefusesWal:
+        """Stands in for a connection on a filesystem without WAL support."""
+
+        def execute(self, sql, *params):
+            assert "journal_mode = WAL" in sql
+            return self
+
+        def fetchone(self):
+            return ("delete",)
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", lambda *a, **k: RefusesWal())
+    with pytest.raises(RuntimeError, match="refused WAL mode"):
+        SqliteWorldStore(tmp_path / "world.db").initialize()
