@@ -16,19 +16,6 @@ DEFAULT_REASONING_PIPELINE = (
 )
 
 
-async def catch_up(
-    reasoner: Reasoner, space_id: str, should_continue: Callable[[], bool]
-) -> None:
-    """Drive one reasoner until it reports no work left, or we are stopping.
-
-    The loop lives here rather than in the reasoner: a reasoner owns one
-    bounded attempt (load, call, commit, "call me again?"), and the caller
-    owns whether to keep going at all.
-    """
-    while should_continue() and await reasoner.attempt(space_id):
-        pass
-
-
 class ReasoningPipeline:
     """Run reasoners in order, each to catch-up, in a single space."""
 
@@ -42,7 +29,7 @@ class ReasoningPipeline:
 
     async def run_until_caught_up(self, space_id: str) -> None:
         for reasoner in self._reasoners:
-            await catch_up(reasoner, space_id, self._should_continue)
+            await reasoner.run_until_caught_up(space_id, self._should_continue)
 
 
-__all__ = ["DEFAULT_REASONING_PIPELINE", "ReasoningPipeline", "catch_up"]
+__all__ = ["DEFAULT_REASONING_PIPELINE", "ReasoningPipeline"]

@@ -34,7 +34,7 @@ from .reasoners import (
     build_relationship_reasoner,
     build_user_model_reasoner,
 )
-from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline, catch_up
+from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
 from .store import SqliteWorldStore
 
 
@@ -292,9 +292,9 @@ class SocialMemoryWorld:
         )
 
     def _catch_up(self, reasoner: Reasoner, space_id: str) -> Coroutine[Any, Any, None]:
-        # The driver owns the `_stopping` check; the reasoner owns
-        # everything inside one `attempt` (load, call, commit).
-        return catch_up(reasoner, space_id, lambda: not self._stopping)
+        # The driver contributes only the stop predicate; the reasoner owns
+        # its own loop and everything inside one unit (load, call, commit).
+        return reasoner.run_until_caught_up(space_id, lambda: not self._stopping)
 
     def _schedule_continuity_reason(self, space_id: str) -> None:
         logger.info("continuity_scheduled", extra={"space_id": space_id})

@@ -23,7 +23,7 @@ from ..models import MemoryView, ModelMessage
 from ..priority import TIER_FRESHNESS, llm_call_tier
 from ..prompts import _json
 from ..store import WorldStore
-from .base import Reasoner
+from .base import AttemptLoop, Reasoner
 
 if TYPE_CHECKING:
     from ..llm import LlmModel
@@ -140,7 +140,7 @@ def extraction_prompt(
     )
 
 
-class _ExtractionReasoner:
+class _ExtractionReasoner(AttemptLoop):
     """Run one pending extraction batch per attempt.
 
     Unlike the descriptor-shaped reasoners, a failed model call or apply
@@ -154,7 +154,7 @@ class _ExtractionReasoner:
         self.store = store
         self.model = model
 
-    async def attempt(self, space_id: str) -> bool:
+    async def _attempt(self, space_id: str) -> bool:
         pending = [
             batch_id
             for sid, batch_id, _ in self.store.pending_extractions()

@@ -10,7 +10,7 @@ package.
 
 from __future__ import annotations
 
-from .base import DescriptorReasoner, Reasoner
+from .base import AttemptLoop, DescriptorReasoner, Reasoner
 from .continuity import CONTINUITY_SYSTEM_PROMPT, build_continuity_reasoner, continuity_prompt
 from .coverage import COVERAGE_AUDIT_SYSTEM_PROMPT, build_coverage_reasoner, coverage_audit_prompt
 from .extraction import EXTRACTION_SYSTEM_PROMPT, build_extraction_reasoner, extraction_prompt
@@ -35,6 +35,7 @@ from .user_model import (
 )
 
 __all__ = [
+    "AttemptLoop",
     "CONTINUITY_SYSTEM_PROMPT",
     "COVERAGE_AUDIT_SYSTEM_PROMPT",
     "DescriptorReasoner",

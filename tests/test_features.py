@@ -356,11 +356,7 @@ def test_failing_batch_does_not_block_later_batch(tmp_path):
 
     reasoner = build_extraction_reasoner(store, FlakyModel())
 
-    async def drain() -> None:
-        while await reasoner.attempt("personal"):
-            pass
-
-    asyncio.run(drain())
+    asyncio.run(reasoner.run_until_caught_up("personal"))
 
     with store._connect() as connection:
         bad_state = connection.execute(
@@ -395,13 +391,16 @@ def test_two_permanently_failing_batches_terminate_drain(tmp_path):
 
     reasoner = build_extraction_reasoner(store, AlwaysFailsModel())
 
-    async def drain() -> None:
-        guard = 0
-        while await reasoner.attempt("personal"):
-            guard += 1
-            assert guard <= 100, "drain loop did not terminate"
+    guard = 0
 
-    asyncio.run(drain())
+    def under_guard() -> bool:
+        # Fail loudly instead of hanging if the drain stops terminating.
+        nonlocal guard
+        guard += 1
+        assert guard <= 100, "drain loop did not terminate"
+        return True
+
+    asyncio.run(reasoner.run_until_caught_up("personal", under_guard))
 
     assert len(calls) == 2 * MAX_EXTRACTION_ATTEMPTS
 
@@ -430,11 +429,7 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
 
     reasoner = build_extraction_reasoner(store, RecordingModel())
 
-    async def drain() -> None:
-        while await reasoner.attempt("personal"):
-            pass
-
-    asyncio.run(drain())
+    asyncio.run(reasoner.run_until_caught_up("personal"))
 
     assert calls == ["fresh batch content"]
     reported = {
