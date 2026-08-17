@@ -310,6 +310,15 @@ indexes are regenerable projections, not part of the Memory entity. A single
 process is a product invariant — SQLite plus the in-process, single-permit
 provider gate — so there is deliberately no worker-count option.
 
+The database runs in WAL mode, so readers never block behind the writer. The
+cost is that the database is no longer a single file: `world.db` is
+accompanied by `world.db-wal` and `world.db-shm`, and the newest writes live
+in the `-wal` file until a checkpoint folds them back. **Copying `world.db`
+alone from a running server silently loses recent data.** To move or back up
+a database, either stop the server first and copy the file, or copy all three
+files together. The server refuses to start if the filesystem will not accept
+WAL — a network mount, usually — rather than falling back silently.
+
 See [data_schema.md](data_schema.md) for the table-level model and
 [glossary.md](glossary.md) for the canonical vocabulary.
 
