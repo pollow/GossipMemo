@@ -440,6 +440,43 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
     assert fresh_batch not in reported  # completed, so no longer pending
 
 
+def test_batch_killed_mid_call_is_not_capped(tmp_path):
+    """Attempts are counted before the call; only recorded failures retire a batch.
+
+    A hard kill (SIGKILL past the stop grace period) leaves the count
+    raised and the batch still 'pending'. Restarts must keep retrying it,
+    or five unlucky kills would permanently drop healthy messages.
+    """
+
+    from gossipmemo.reasoners.extraction import (
+        MAX_EXTRACTION_ATTEMPTS,
+        build_extraction_reasoner,
+    )
+
+    store = _store(tmp_path)
+    killed_batch = _make_batch(store, "personal", "killed batch content")
+
+    for _ in range(MAX_EXTRACTION_ATTEMPTS + 2):
+        # No fail_extraction: the process died before recording an outcome.
+        store.mark_extraction_attempt("personal", killed_batch)
+
+    attempts, state = store.batch_extraction_progress("personal", killed_batch)
+    assert attempts > MAX_EXTRACTION_ATTEMPTS and state == "pending"
+
+    calls: list[str] = []
+
+    class RecordingModel(FakeModel):
+        async def extract(self, messages, context=(), known_people=(), comparison_memories=()):
+            del context, known_people, comparison_memories
+            calls.append(messages[0].content if messages else "")
+            return ExtractionResult()
+
+    reasoner = build_extraction_reasoner(store, RecordingModel())
+    asyncio.run(reasoner.run_until_caught_up("personal"))
+
+    assert calls == ["killed batch content"]
+
+
 def test_induction_waits_for_daily_scheduler(tmp_path):
     calls: list[str] = []
 

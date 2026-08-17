@@ -154,6 +154,20 @@ class _ExtractionReasoner(AttemptLoop):
         self.store = store
         self.model = model
 
+    def _is_exhausted(self, space_id: str, batch_id: str) -> bool:
+        """Has this batch spent its attempts on failures we actually saw?
+
+        `mark_extraction_attempt` bumps the count *before* the model call,
+        so a process killed mid-call (SIGKILL past Docker's stop grace
+        period) leaves the count raised with the batch still 'pending' --
+        it neither succeeded nor failed, and nobody recorded why. Counting
+        those would let repeated restarts retire a perfectly healthy batch
+        after five kills. Only a batch that reached 'failed', with a
+        recorded error, is allowed to run out of attempts.
+        """
+        attempts, state = self.store.batch_extraction_progress(space_id, batch_id)
+        return state == "failed" and attempts >= MAX_EXTRACTION_ATTEMPTS
+
     async def _attempt(self, space_id: str) -> bool:
         pending = [
             batch_id
@@ -163,8 +177,7 @@ class _ExtractionReasoner(AttemptLoop):
         eligible = [
             batch_id
             for batch_id in pending
-            if self.store.batch_extraction_attempts(space_id, batch_id)
-            < MAX_EXTRACTION_ATTEMPTS
+            if not self._is_exhausted(space_id, batch_id)
         ]
         if not eligible:
             return False
