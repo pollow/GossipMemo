@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -41,31 +41,19 @@ from ..prompts import (
     projection_stage_prompt,
     schema_instruction,
 )
-
-if TYPE_CHECKING:
-    from ..llm import ChatCompletionRequest, ChatMessage, LlmTransport
+from ..transport import (
+    ChatCompletionRequest,
+    ChatMessage,
+    LLMOutputError,
+    LlmTransport,
+    structured,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _llm() -> Any:
-    """Deferred import of `..llm`, breaking the reasoners<->llm import cycle.
-
-    This module pulls `ChatMessage`/`structured`/`LLMOutputError` from
-    `llm`, while `llm` pulls prompt constants back from `.reasoners`
-    (which imports this module). Resolving the dependency at call time
-    instead of at module load time means it never matters which of the
-    two a caller imports first -- both are always fully initialized by
-    the time a reasoner actually runs.
-    """
-
-    from .. import llm as llm_module
-
-    return llm_module
-
-
 async def owner_reasoning(
-    transport: "LlmTransport",
+    transport: LlmTransport,
     system_prompt: str,
     target: BaseModel,
     memories: Sequence[MemoryView],
@@ -82,7 +70,6 @@ async def owner_reasoning(
     and the whole prefix rebuilt before either call goes out.
     """
 
-    llm = _llm()
     bounded_inferred, bounded_hypotheses = _bounded_comparisons(
         transport, system_prompt, target, inferred_memories, hypotheses,
         projection_type, actions_type,
@@ -103,15 +90,15 @@ async def owner_reasoning(
         if not _stage2_fits(transport, first_messages, actions_type):
             raise ValueError("owner evidence digest did not fit context budget")
 
-    first, projection = await llm.structured(
+    first, projection = await structured(
         transport, first_messages, projection_type,
         tier=current_call_tier(), label=current_call_label(),
     )
-    _, actions = await llm.structured(
+    _, actions = await structured(
         transport,
         first_messages + [
-            llm.ChatMessage(role="assistant", content=first),
-            llm.ChatMessage(
+            ChatMessage(role="assistant", content=first),
+            ChatMessage(
                 role="user",
                 content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
             ),
@@ -123,19 +110,18 @@ async def owner_reasoning(
 
 
 def _first_messages(
-    transport: "LlmTransport", system_prompt: str, target: BaseModel,
+    transport: LlmTransport, system_prompt: str, target: BaseModel,
     evidence: Sequence[Any], inferred: Sequence[MemoryView],
     hypotheses: Sequence[HypothesisView], projection_type: type[BaseModel],
-) -> list["ChatMessage"]:
-    llm = _llm()
+) -> list[ChatMessage]:
     prefix = owner_reasoning_prefix(
         target, list(evidence), list(inferred), list(hypotheses),
         user_name=transport.user_name,
     )
     return [
-        llm.ChatMessage(role="system", content=system_prompt),
-        llm.ChatMessage(role="user", content=prefix),
-        llm.ChatMessage(
+        ChatMessage(role="system", content=system_prompt),
+        ChatMessage(role="user", content=prefix),
+        ChatMessage(
             role="user",
             content=projection_stage_prompt() + "\n" + schema_instruction(projection_type),
         ),
@@ -143,13 +129,12 @@ def _first_messages(
 
 
 def _stage2_estimate(
-    transport: "LlmTransport", first_messages: list["ChatMessage"], actions_type: type[BaseModel],
+    transport: LlmTransport, first_messages: list[ChatMessage], actions_type: type[BaseModel],
 ) -> int:
-    llm = _llm()
     request = transport.prepare(
         first_messages + [
-            llm.ChatMessage(role="assistant", content=""),
-            llm.ChatMessage(
+            ChatMessage(role="assistant", content=""),
+            ChatMessage(
                 role="user",
                 content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
             ),
@@ -166,7 +151,7 @@ def _stage2_estimate(
 
 
 def _stage2_fits(
-    transport: "LlmTransport", first_messages: list["ChatMessage"], actions_type: type[BaseModel],
+    transport: LlmTransport, first_messages: list[ChatMessage], actions_type: type[BaseModel],
 ) -> bool:
     return transport.context_budget.report(
         _stage2_estimate(transport, first_messages, actions_type)
@@ -174,7 +159,7 @@ def _stage2_fits(
 
 
 def _bounded_comparisons(
-    transport: "LlmTransport", system_prompt: str, target: BaseModel,
+    transport: LlmTransport, system_prompt: str, target: BaseModel,
     inferred: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
     projection_type: type[BaseModel], actions_type: type[BaseModel],
 ) -> tuple[list[MemoryView], list[HypothesisView]]:
@@ -245,27 +230,25 @@ def _evidence_source_ids(item: MemoryView | OwnerEvidenceDigestView) -> set[str]
     return set(item.source_memory_ids)
 
 
-def _digest_request(transport: "LlmTransport", chunk: list[Any]) -> "ChatCompletionRequest":
-    llm = _llm()
+def _digest_request(transport: LlmTransport, chunk: list[Any]) -> ChatCompletionRequest:
     return transport.prepare(
         [
-            llm.ChatMessage(
+            ChatMessage(
                 role="system",
                 content="Compress evidence only; do not infer people or actions.\n\n"
                 + schema_instruction(ExtractedOwnerEvidenceDigest),
             ),
-            llm.ChatMessage(role="user", content=owner_evidence_digest_prompt(chunk, transport.user_name)),
+            ChatMessage(role="user", content=owner_evidence_digest_prompt(chunk, transport.user_name)),
         ],
         structured=True,
     )
 
 
 async def _digest_evidence(
-    transport: "LlmTransport", target: BaseModel, memories: Sequence[MemoryView],
+    transport: LlmTransport, target: BaseModel, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
     system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel],
 ) -> list[OwnerEvidenceDigestView]:
-    llm = _llm()
     context_budget = transport.context_budget
 
     def chunks_for(
@@ -332,7 +315,7 @@ async def _digest_evidence(
         policy = transport.retry_policy
         semantic_attempt = 0
         while True:
-            _, result = await llm.structured(
+            _, result = await structured(
                 transport, request.messages, ExtractedOwnerEvidenceDigest,
                 tier=current_call_tier(), label=current_call_label(),
             )
@@ -354,7 +337,7 @@ async def _digest_evidence(
             if covered == allowed:
                 return accepted
             if semantic_attempt >= policy.attempts:
-                raise llm.LLMOutputError(
+                raise LLMOutputError(
                     "owner evidence digest omitted or invented source Memory IDs"
                 )
             delay = policy.delay(semantic_attempt)
@@ -380,7 +363,7 @@ async def _digest_evidence(
             raise ValueError("owner evidence digest made no progress")
         return output
 
-    def final_first_messages(output: list[OwnerEvidenceDigestView]) -> list["ChatMessage"]:
+    def final_first_messages(output: list[OwnerEvidenceDigestView]) -> list[ChatMessage]:
         return _first_messages(
             transport, system_prompt, target, output, list(inferred_memories),
             list(hypotheses), projection_type,

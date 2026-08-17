@@ -766,7 +766,7 @@ def test_openai_compatible_adapter_retries_transient_statuses(monkeypatch):
 
     monkeypatch.setattr("gossipmemo.llm.asyncio.sleep", fake_sleep)
     monkeypatch.setattr(
-        "gossipmemo.llm.random.uniform", lambda _lower, upper: upper
+        "gossipmemo.transport.random.uniform", lambda _lower, upper: upper
     )
 
     async def scenario() -> None:
@@ -835,7 +835,7 @@ def test_openai_compatible_adapter_retries_transport_errors(monkeypatch):
 
     monkeypatch.setattr("gossipmemo.llm.asyncio.sleep", fake_sleep)
     monkeypatch.setattr(
-        "gossipmemo.llm.random.uniform", lambda _lower, upper: upper
+        "gossipmemo.transport.random.uniform", lambda _lower, upper: upper
     )
 
     async def scenario() -> None:
