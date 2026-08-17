@@ -18,7 +18,10 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.llm import (
     ChatCompletionRequest,
     ChatMessage,
+    LlmTransport,
     OpenAICompatibleAdapter,
+    ProviderGate,
+    RetryPolicy,
     structured,
 )
 from gossipmemo.models import ExtractionResult
@@ -80,6 +83,79 @@ def test_complete_enforces_hard_context_budget_before_sending() -> None:
 
     asyncio.run(run())
     assert calls == []
+
+
+class FakeTransport:
+    """A transport that implements `LlmTransport` and nothing more.
+
+    The point of this double is what it *lacks*: no `model`, no
+    `max_retries`, no `_retry_delay`. If `structured()` ever reaches past
+    the protocol into adapter internals again, this test fails with
+    `AttributeError` instead of quietly working because the only
+    implementation happened to be the real adapter.
+    """
+
+    def __init__(self, replies: list[str]) -> None:
+        self._replies = replies
+        self.sent: list[ChatCompletionRequest] = []
+        self._gate = ProviderGate()
+        self._budget = ContextBudget()
+
+    @property
+    def configured(self) -> bool:
+        return True
+
+    @property
+    def gate(self) -> ProviderGate:
+        return self._gate
+
+    @property
+    def context_budget(self) -> ContextBudget:
+        return self._budget
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(attempts=2, base_seconds=0.001, max_seconds=0.002)
+
+    def prepare(
+        self, messages, *, structured: bool
+    ) -> ChatCompletionRequest:
+        return ChatCompletionRequest(
+            model="fake",
+            messages=list(messages),
+            response_format={"type": "json_object"} if structured else None,
+        )
+
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        self.sent.append(request)
+        return self._replies.pop(0)
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_structured_needs_nothing_beyond_the_protocol() -> None:
+    """`structured()` drives a transport that has only the protocol members."""
+
+    transport = FakeTransport(["not json", json.dumps({"memories": [], "people": []})])
+    assert isinstance(transport, LlmTransport)
+
+    content, result = asyncio.run(
+        structured(
+            transport,
+            [ChatMessage(role="user", content="usr")],
+            ExtractionResult,
+            tier=3,
+            label="test",
+        )
+    )
+
+    assert len(transport.sent) == 2
+    # `prepare` decided the JSON-mode request, and both attempts reused it.
+    assert transport.sent[0].response_format == {"type": "json_object"}
+    assert transport.sent[0] == transport.sent[1]
+    assert isinstance(result, ExtractionResult)
+    assert content == json.dumps({"memories": [], "people": []})
 
 
 def test_structured_retries_malformed_output_then_returns_parsed_model() -> None:

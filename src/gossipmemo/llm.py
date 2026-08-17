@@ -15,6 +15,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from contextlib import AbstractAsyncContextManager
 from types import TracebackType
 from typing import Any, Literal, Protocol, TypeVar, cast, runtime_checkable
@@ -146,6 +147,28 @@ class LlmModel(Protocol):
     async def synthesize(self, question: str, context: QueryContext) -> str: ...
 
 
+@dataclass(frozen=True)
+class RetryPolicy:
+    """How long to wait before retrying, and how many times to bother.
+
+    One policy object serves both retry loops: the transport's own (inside
+    `complete`, which may also have a provider `Retry-After` to respect)
+    and the semantic one in `structured` (malformed output, no hint to
+    respect). Sharing it keeps a single backoff formula.
+    """
+
+    attempts: int
+    base_seconds: float
+    max_seconds: float
+
+    def delay(self, attempt: int, retry_after: float | None = None) -> float:
+        exponential = min(self.max_seconds, self.base_seconds * (2**attempt))
+        jittered = random.uniform(exponential / 2, exponential)
+        if retry_after is None:
+            return jittered
+        return max(jittered, min(retry_after, self.max_seconds))
+
+
 @runtime_checkable
 class LlmTransport(Protocol):
     """The narrow transport seam: one provider HTTP request, nothing else.
@@ -154,6 +177,13 @@ class LlmTransport(Protocol):
     replacing it. `OpenAICompatibleAdapter` satisfies both today. A later
     commit moves individual reasoners onto `LlmTransport` + `structured()`
     one family at a time, once prompt assembly has left `llm.py`.
+
+    `prepare` is what keeps this protocol honest: request-shaping config
+    (model name, temperature, max_tokens) belongs to the transport, so
+    callers hand over messages and get back the exact request that
+    `complete` would send. Chunking can then estimate that request against
+    `context_budget` with no drift between what was measured and what goes
+    out, and `structured` needs no access to adapter internals.
     """
 
     @property
@@ -164,6 +194,13 @@ class LlmTransport(Protocol):
 
     @property
     def context_budget(self) -> ContextBudget: ...
+
+    @property
+    def retry_policy(self) -> RetryPolicy: ...
+
+    def prepare(
+        self, messages: Sequence["ChatMessage"], *, structured: bool
+    ) -> "ChatCompletionRequest": ...
 
     async def complete(self, request: "ChatCompletionRequest") -> str: ...
 
@@ -1159,14 +1196,31 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         ], structured=structured)
 
     async def _chat_messages(self, messages: list[ChatMessage], *, structured: bool) -> str:
-        request = ChatCompletionRequest(
+        return await self.complete(self.prepare(messages, structured=structured))
+
+    def prepare(
+        self, messages: Sequence[ChatMessage], *, structured: bool
+    ) -> ChatCompletionRequest:
+        """Build the request this adapter would send for `messages`.
+
+        The one place request-shaping configuration is applied, so a caller
+        can estimate the exact request before deciding to send it.
+        """
+        return ChatCompletionRequest(
             model=self.model,
-            messages=messages,
+            messages=list(messages),
             temperature=self.temperature,
             response_format={"type": "json_object"} if structured else None,
             max_tokens=self.max_tokens,
         )
-        return await self.complete(request)
+
+    @property
+    def retry_policy(self) -> RetryPolicy:
+        return RetryPolicy(
+            attempts=self.max_retries,
+            base_seconds=self.retry_base_seconds,
+            max_seconds=self.retry_max_seconds,
+        )
 
     async def complete(self, request: ChatCompletionRequest) -> str:
         """Send a prebuilt chat-completions request over HTTP.
@@ -1285,14 +1339,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         return _message_content(message.content)
 
     def _retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
-        exponential = min(
-            self.retry_max_seconds,
-            self.retry_base_seconds * (2**attempt),
-        )
-        jittered = random.uniform(exponential / 2, exponential)
-        if retry_after is None:
-            return jittered
-        return max(jittered, min(retry_after, self.retry_max_seconds))
+        return self.retry_policy.delay(attempt, retry_after)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -1387,20 +1434,13 @@ async def structured(
     already retries internally) with the same jittered backoff
     `OpenAICompatibleAdapter` has always used for malformed output.
 
-    `transport` is typed narrowly as `LlmTransport`, but request/retry
-    configuration (`model`, `temperature`, `max_tokens`, `max_retries`, the
-    retry-delay formula) is read directly off the concrete instance, since
-    `OpenAICompatibleAdapter` is still the only implementation and building
-    a valid `ChatCompletionRequest` requires that configuration.
+    Everything it needs comes through the protocol: `prepare` shapes the
+    request from the transport's own configuration, `retry_policy` supplies
+    the attempt count and backoff. Nothing here reaches into a concrete
+    adapter, so any `LlmTransport` -- including a test double -- works.
     """
-    request = ChatCompletionRequest(
-        model=transport.model,  # type: ignore[attr-defined]
-        messages=messages,
-        temperature=transport.temperature,  # type: ignore[attr-defined]
-        response_format={"type": "json_object"},
-        max_tokens=transport.max_tokens,  # type: ignore[attr-defined]
-    )
-    max_retries = transport.max_retries  # type: ignore[attr-defined]
+    request = transport.prepare(messages, structured=True)
+    policy = transport.retry_policy
     attempt = 0
     while True:
         with llm_call_tier(tier, label):
@@ -1408,13 +1448,13 @@ async def structured(
         try:
             return content, _parse_model_output(content, result_type)
         except LLMOutputError:
-            if attempt >= max_retries:
+            if attempt >= policy.attempts:
                 raise
-            delay = transport._retry_delay(attempt)  # type: ignore[attr-defined]
+            delay = policy.delay(attempt)
             logger.warning(
                 "llm_output_retry_scheduled",
                 extra={
-                    "model": transport.model,  # type: ignore[attr-defined]
+                    "model": request.model,
                     "attempt": attempt + 1,
                     "result_type": result_type.__name__,
                     "delay_seconds": round(delay, 3),
@@ -1471,6 +1511,7 @@ __all__ = [
     "LlmTransport",
     "OpenAICompatibleAdapter",
     "ProviderGate",
+    "RetryPolicy",
     "TIER_BACKGROUND",
     "TIER_FOREGROUND",
     "TIER_FRESHNESS",
