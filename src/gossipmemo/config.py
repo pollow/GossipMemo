@@ -47,6 +47,7 @@ class Settings:
     llm_context_window_tokens: int = 65536
     llm_output_reserve_tokens: int = 8192
     llm_context_safety_tokens: int = 4096
+    llm_trace_path: Path | None = None
 
     def __post_init__(self) -> None:
         missing = [
@@ -150,6 +151,7 @@ class Settings:
             llm_context_window_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_WINDOW_TOKENS", "65536")),
             llm_output_reserve_tokens=int(_env("GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS", "8192")),
             llm_context_safety_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS", "4096")),
+            llm_trace_path=(Path(value) if (value := _env("GOSSIPMEMO_LLM_TRACE_PATH")) else None),
         )
 
 

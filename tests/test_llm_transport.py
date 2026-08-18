@@ -25,6 +25,7 @@ from gossipmemo.transport import (
     structured,
 )
 from gossipmemo.models import ExtractionResult
+from gossipmemo.priority import TIER_BACKGROUND, llm_call_tier
 
 
 def test_complete_acquires_gate_around_the_request() -> None:
@@ -226,3 +227,53 @@ def test_structured_raises_after_exhausting_retries() -> None:
 
     asyncio.run(run())
     assert len(calls) == 2  # initial attempt + 1 retry
+
+
+def test_trace_records_the_verbatim_request_and_completion(tmp_path) -> None:
+    """The audit seam: what went over the wire, plus the reasoner label."""
+
+    trace_path = tmp_path / "trace" / "llm.jsonl"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client, trace_path=trace_path)
+            request = ChatCompletionRequest(
+                model="m",
+                messages=[ChatMessage(role="system", content="be brief"),
+                          ChatMessage(role="user", content="audit M1")],
+                response_format={"type": "json_object"},
+            )
+            with llm_call_tier(TIER_BACKGROUND, "audit-coverage"):
+                await adapter.complete(request)
+                await adapter.complete(request)
+
+    asyncio.run(run())
+    records = [json.loads(line) for line in trace_path.read_text().splitlines()]
+    assert [item["sequence"] for item in records] == [1, 2]
+    assert records[0]["label"] == "audit-coverage"
+    assert records[0]["completion"] == "{}"
+    assert records[0]["request"]["messages"] == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": "audit M1"},
+    ]
+
+
+def test_trace_is_off_by_default() -> None:
+    """No trace path configured means no file handling at all."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
+            assert adapter.trace_path is None
+            return await adapter.complete(
+                ChatCompletionRequest(
+                    model="m", messages=[ChatMessage(role="user", content="hi")]))
+
+    assert asyncio.run(run()) == "ok"

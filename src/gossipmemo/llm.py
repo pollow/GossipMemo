@@ -13,8 +13,11 @@ import asyncio
 import json
 import logging
 import time
+from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
+from itertools import count
+from pathlib import Path
 from types import TracebackType
 
 import httpx
@@ -65,6 +68,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 30.0,
         context_budget: ContextBudget | None = None,
+        trace_path: Path | None = None,
     ) -> None:
         normalized_base = base_url.strip().rstrip("/")
         if not normalized_base:
@@ -104,6 +108,8 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
         self.context_budget = context_budget or ContextBudget()
+        self.trace_path = trace_path
+        self._trace_sequence = count(1)
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -129,6 +135,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
                 settings.llm_output_reserve_tokens,
                 settings.llm_context_safety_tokens,
             ),
+            trace_path=settings.llm_trace_path,
         )
 
     @property
@@ -283,9 +290,47 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             payload = response.json()
             completion = ChatCompletionResponse.model_validate(payload)
         except (ValueError, ValidationError) as error:
+            self._trace(request, label, tier, response.status_code,
+                        error="invalid chat-completion response")
             raise LLMProtocolError("LLM returned an invalid chat-completion response") from error
         message = completion.choices[0].message
-        return _message_content(message.content)
+        content = _message_content(message.content)
+        self._trace(request, label, tier, response.status_code, completion=content)
+        return content
+
+    def _trace(
+        self, request: ChatCompletionRequest, label: str, tier: int, status: int,
+        *, completion: str | None = None, error: str | None = None,
+    ) -> None:
+        """Append one request/response pair to the trace file, verbatim.
+
+        Off unless `GOSSIPMEMO_LLM_TRACE_PATH` is set. This is the audit
+        seam for prompt construction, so nothing here is truncated or
+        summarized: what the record holds is exactly what went over the
+        wire, plus the reasoner `label` that structured logging alone
+        cannot recover. Failures never propagate -- a broken trace must
+        not take a reasoning pass down with it.
+        """
+        if self.trace_path is None:
+            return
+        record = {
+            "sequence": next(self._trace_sequence),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "label": label,
+            "tier": tier,
+            "model": self.model,
+            "status": status,
+            "estimated_tokens": self.context_budget.estimate_request(request),
+            "request": request.model_dump(exclude_none=True),
+            "completion": completion,
+            "error": error,
+        }
+        try:
+            self.trace_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.trace_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+        except OSError:
+            logger.warning("llm_trace_write_failed", extra={"path": str(self.trace_path)})
 
     def _retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
         return self.retry_policy.delay(attempt, retry_after)

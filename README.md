@@ -79,6 +79,13 @@ preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
 counts, status, and durations—not message bodies, bearer tokens, or LLM API
 keys.
 
+To audit prompt construction, set `GOSSIPMEMO_LLM_TRACE_PATH` to a JSONL file.
+Every provider request is then appended verbatim together with its completion,
+the reasoner label that issued it (`audit-coverage`, `plan-learning-goals`, and
+so on), and the estimated token count. The trace holds full message bodies by
+design, so it is a local debugging tool rather than something to leave on: it is
+off unless the variable is set, and a write failure never interrupts reasoning.
+
 ## Import existing chats
 
 The CLI imports a JSON array, a `{ "messages": [...] }` export, or JSONL. Run
