@@ -461,6 +461,19 @@ class PersonView(BaseModel):
     stale: bool = False
 
 
+class PersonSummaryView(BaseModel):
+    """A lightweight row for listing/searching people -- no profile synthesis.
+
+    Carries aliases (unlike `PersonView`) so a caller can judge whether two
+    rows are plausibly the same person, which is the whole point of
+    `list_people`: surfacing merge candidates for `merge_person`.
+    """
+
+    id: str
+    display_name: str
+    aliases: list[str] = Field(default_factory=list)
+
+
 class UserModelView(BaseModel):
     space_id: str
     profile_card: dict[str, Any] = Field(default_factory=dict)

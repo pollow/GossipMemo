@@ -460,6 +460,16 @@ class GossipMemo(_ClientCommon):
             self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
         )
 
+    def list_people(self, q: str = "", *, limit: int = 50) -> Any:
+        """List/search known people (id, display name, aliases) -- no LLM.
+
+        This is the discovery step before `merge_person`: it is the only
+        way to see that two similar person records exist.
+        """
+
+        params = {"q": q, "limit": str(limit)}
+        return self._request("GET", f"{self._space_path('people')}?{urlencode(params)}")
+
     def person_dossier(self, person_id: str) -> Any:
         """Read a person projection without synthesis."""
 
@@ -727,6 +737,16 @@ class AsyncGossipMemo(_ClientCommon):
             "GET",
             self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
         )
+
+    async def list_people(self, q: str = "", *, limit: int = 50) -> Any:
+        """List/search known people (id, display name, aliases) -- no LLM.
+
+        This is the discovery step before `merge_person`: it is the only
+        way to see that two similar person records exist.
+        """
+
+        params = {"q": q, "limit": str(limit)}
+        return await self._request("GET", f"{self._space_path('people')}?{urlencode(params)}")
 
     async def person_dossier(self, person_id: str) -> Any:
         if not person_id:

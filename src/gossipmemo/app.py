@@ -168,6 +168,15 @@ def create_app(
         return world.store.context_bundle(space_id).model_dump()
 
     @app.get(
+        "/v1/spaces/{space_id}/people",
+        dependencies=protected,
+    )
+    async def list_people(space_id: str, q: str = "", limit: int = 50) -> dict:
+        capped_limit = max(0, min(limit, 200))
+        people = world.store.list_people(space_id, q, capped_limit)
+        return {"people": [person.model_dump() for person in people]}
+
+    @app.get(
         "/v1/spaces/{space_id}/people/{person_id}",
         dependencies=protected,
     )

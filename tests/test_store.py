@@ -934,6 +934,72 @@ def test_same_alias_for_two_people_is_ambiguous_not_merged(store):
         )
 
 
+def test_list_people_with_no_query_returns_all_active(store):
+    store.add_manual_memory("personal", ManualMemoryRequest(content="x", people=["Alice"]))
+    store.add_manual_memory("personal", ManualMemoryRequest(content="y", people=["Bob"]))
+    people = store.list_people("personal")
+    assert {person.display_name for person in people} == {"Alice", "Bob"}
+
+
+def test_list_people_query_matches_display_name_case_and_nfkc_insensitively(store):
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="x", people=["Alice Wang"])
+    )
+    store.add_manual_memory("personal", ManualMemoryRequest(content="y", people=["Bob"]))
+    people = store.list_people("personal", "ALICE")
+    assert [person.display_name for person in people] == ["Alice Wang"]
+
+
+def test_list_people_query_matches_an_alias(store):
+    store.apply_extraction(
+        "personal", _batch(store, store.record_messages("personal", [_message()])[0]),
+        ExtractionResult(
+            people=[ExtractedPerson(ref="alice", display_name="Alice Wang", aliases=["AW"])],
+            memories=[],
+        ),
+    )
+    people = store.list_people("personal", "aw")
+    assert [person.display_name for person in people] == ["Alice Wang"]
+    assert "AW" in people[0].aliases
+
+
+def test_list_people_ambiguous_alias_surfaces_both_people_not_dropped(store):
+    store.apply_extraction(
+        "personal", _batch(store, store.record_messages("personal", [_message()])[0]),
+        ExtractionResult(
+            people=[
+                ExtractedPerson(ref="one", display_name="One", aliases=["Alex"]),
+                ExtractedPerson(ref="two", display_name="Two", aliases=["Alex"]),
+            ],
+            memories=[],
+        ),
+    )
+    people = store.list_people("personal", "alex")
+    assert {person.display_name for person in people} == {"One", "Two"}
+
+
+def test_list_people_excludes_inactive_or_merged_away_people(store):
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="x", people=["Alice Wang"])
+    )
+    store.add_manual_memory("personal", ManualMemoryRequest(content="y", people=["AW"]))
+    people_rows = _rows(
+        store,
+        "SELECT id, display_name FROM people WHERE space_id = 'personal' ORDER BY display_name",
+    )
+    target, source = people_rows[1]["id"], people_rows[0]["id"]
+    store.merge_person("personal", source, target)
+    people = store.list_people("personal")
+    assert [person.id for person in people] == [target]
+
+
+def test_list_people_limit_is_honored(store):
+    for name in ("Alice", "Bob", "Carol"):
+        store.add_manual_memory("personal", ManualMemoryRequest(content=name, people=[name]))
+    people = store.list_people("personal", limit=2)
+    assert len(people) == 2
+
+
 def test_automatic_ambiguous_person_link_is_skipped_but_memory_completes(store):
     store.apply_extraction(
         "personal", _batch(store, store.record_messages("personal", [_message()])[0]),

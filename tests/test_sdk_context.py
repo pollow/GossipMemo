@@ -56,6 +56,35 @@ def test_async_recall_builds_query_params():
     asyncio.run(run())
 
 
+def _list_people_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path.endswith("/people")
+    params = dict(request.url.params)
+    assert params["q"] == "al"
+    assert params["limit"] == "10"
+    return httpx.Response(
+        200,
+        json={"people": [{"id": "person_1", "display_name": "Alice", "aliases": ["Al"]}]},
+    )
+
+
+def test_sync_list_people_builds_query_params():
+    client = GossipMemo(
+        "http://test", client=httpx.Client(transport=httpx.MockTransport(_list_people_handler)))
+    result = client.list_people("al", limit=10)
+    assert result["people"][0]["display_name"] == "Alice"
+
+
+def test_async_list_people_builds_query_params():
+    async def run():
+        client = AsyncGossipMemo(
+            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_list_people_handler)))
+        result = await client.list_people("al", limit=10)
+        assert result["people"][0]["display_name"] == "Alice"
+        await client.close()
+
+    asyncio.run(run())
+
+
 def test_async_context_and_turn_payload_validation():
     async def run():
         client = AsyncGossipMemo(

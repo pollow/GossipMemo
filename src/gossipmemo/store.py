@@ -27,6 +27,7 @@ from .models import (
     MessageInput,
     ModelMessage,
     PersonReasoningResult,
+    PersonSummaryView,
     PersonView,
     QueryContext,
     QueryRequest,
@@ -223,6 +224,10 @@ class WorldStore(Protocol):
     ), query: str = "") -> GuidanceBundle: ...
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
+
+    def list_people(
+        self, space_id: str, query: str = "", limit: int = 50
+    ) -> list[PersonSummaryView]: ...
 
     def recall_user_memories(self, space_id: str, text: str,
                              limit: int = 5) -> list[MemoryView]: ...
@@ -2198,6 +2203,67 @@ class SqliteWorldStore:
         """Resolve explicit aliases without creating people or invoking an LLM."""
         with self._connect() as connection:
             return self._match_people(connection, space_id, text)
+
+    def list_people(
+        self, space_id: str, query: str = "", limit: int = 50
+    ) -> list[PersonSummaryView]:
+        """List/search active people, aliases included, for merge discovery.
+
+        Unlike `_match_people`, an alias shared by several people is
+        deliberately *not* dropped here -- surfacing that ambiguity is the
+        entire point of this listing (it is the precondition for
+        `merge_person`). With no query every active person is returned,
+        ordered by display name, bounded by `limit`.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT p.id AS person_id, p.display_name AS display_name, a.value AS alias_value
+                FROM people p
+                LEFT JOIN person_aliases a ON a.person_id = p.id
+                WHERE p.space_id = ? AND p.status = 'active'
+                ORDER BY p.display_name, p.id
+                """,
+                (space_id,),
+            ).fetchall()
+            order: list[str] = []
+            display_names: dict[str, str] = {}
+            aliases: dict[str, list[str]] = {}
+            for row in rows:
+                person_id = row["person_id"]
+                if person_id not in display_names:
+                    order.append(person_id)
+                    display_names[person_id] = row["display_name"]
+                    aliases[person_id] = []
+                alias_value = row["alias_value"]
+                if alias_value and alias_value not in aliases[person_id]:
+                    aliases[person_id].append(alias_value)
+
+            folded_query = unicodedata.normalize("NFKC", query).casefold().strip()
+            matched_ids: list[str] = []
+            for person_id in order:
+                if not folded_query:
+                    matched_ids.append(person_id)
+                    continue
+                folded_name = unicodedata.normalize(
+                    "NFKC", display_names[person_id]).casefold()
+                if folded_query in folded_name:
+                    matched_ids.append(person_id)
+                    continue
+                for alias in aliases[person_id]:
+                    if folded_query in unicodedata.normalize("NFKC", alias).casefold():
+                        matched_ids.append(person_id)
+                        break
+
+            capped = max(0, limit)
+            return [
+                PersonSummaryView(
+                    id=person_id,
+                    display_name=display_names[person_id],
+                    aliases=aliases[person_id],
+                )
+                for person_id in matched_ids[:capped]
+            ]
 
     def _match_people(
         self, connection: sqlite3.Connection, space_id: str, text: str

@@ -32,7 +32,12 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
             self.recall_calls.append((q, kwargs))
             return {"memories": [{"content": f"recalled for {q}"}]}
 
+        def list_people(self, q="", **kwargs):
+            self.list_people_calls.append((q, kwargs))
+            return {"people": [{"id": "person_1", "display_name": f"match for {q}", "aliases": []}]}
+
         recall_calls: list = []
+        list_people_calls: list = []
 
         def close(self):
             return None
@@ -66,6 +71,17 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
 
         empty_q_result = provider.handle_tool_call("gossipmemo_recall", {"q": "  "})
         assert "error" in empty_q_result
+
+        people_result = provider.handle_tool_call(
+            "gossipmemo_people", {"q": "alice", "limit": 500}
+        )
+        assert "match for alice" in people_result
+        people_q, people_kwargs = provider._client.list_people_calls[-1]
+        assert people_q == "alice"
+        assert people_kwargs["limit"] == 200
+
+        listing_result = provider.handle_tool_call("gossipmemo_people", {})
+        assert "match for" in listing_result
     finally:
         provider.shutdown()
 
@@ -75,6 +91,15 @@ def test_hermes_tool_schemas_offer_recall_as_the_cheap_default():
     assert "gossipmemo_recall" in schemas
     assert "gossipmemo_query" in schemas["gossipmemo_recall"]["description"]
     assert "gossipmemo_recall" in schemas["gossipmemo_query"]["description"]
+
+
+def test_hermes_people_tool_precedes_merge_and_guardrail_survives():
+    schemas = {schema["name"]: schema for schema in GossipMemoMemoryProvider().get_tool_schemas()}
+    assert "gossipmemo_people" in schemas
+    assert "duplicate" in schemas["gossipmemo_people"]["description"]
+    merge_description = schemas["gossipmemo_merge_people"]["description"]
+    assert "gossipmemo_people" in merge_description
+    assert "only call this after the user" in merge_description.lower()
 
 
 def test_hermes_labels_guidance_as_tentative_or_optional():

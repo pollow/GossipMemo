@@ -933,3 +933,52 @@ def test_http_auth_and_correction_endpoints(tmp_path):
                 assert retracted.json()["status"] == "retracted"
 
     asyncio.run(scenario())
+
+
+def test_http_list_people_route_coexists_with_person_dossier_route(tmp_path):
+    async def scenario() -> None:
+        store = _store(tmp_path)
+        store.add_manual_memory(
+            "personal", ManualMemoryRequest(content="x", people=["Alice Wang"])
+        )
+        person_id = store.list_people("personal")[0].id
+        world = SocialMemoryWorld(store, FakeModel())
+        app = create_app(
+            settings=_settings(tmp_path / "features.db", api_key="secret"),
+            world=world,
+        )
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://server.test"
+            ) as client:
+                denied = await client.get("/v1/spaces/personal/people")
+                assert denied.status_code == 401
+
+                headers = {"Authorization": "Bearer secret"}
+                listed = await client.get(
+                    "/v1/spaces/personal/people", headers=headers
+                )
+                assert listed.status_code == 200
+                assert [p["display_name"] for p in listed.json()["people"]] == ["Alice Wang"]
+
+                searched = await client.get(
+                    "/v1/spaces/personal/people",
+                    headers=headers,
+                    params={"q": "alice", "limit": 5},
+                )
+                assert [p["display_name"] for p in searched.json()["people"]] == ["Alice Wang"]
+
+                no_match = await client.get(
+                    "/v1/spaces/personal/people",
+                    headers=headers,
+                    params={"q": "nobody"},
+                )
+                assert no_match.json()["people"] == []
+
+                dossier = await client.get(
+                    f"/v1/spaces/personal/people/{person_id}", headers=headers
+                )
+                assert dossier.status_code == 200
+                assert dossier.json()["people"][0]["id"] == person_id
+
+    asyncio.run(scenario())

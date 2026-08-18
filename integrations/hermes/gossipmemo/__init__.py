@@ -607,8 +607,23 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 ("memory_id",),
             ),
             _schema(
+                "gossipmemo_people",
+                "List or search the known Person records in this GossipMemo space "
+                "(id, display name, and aliases for each). This is the way to find "
+                "candidate duplicate records -- use it before gossipmemo_merge_people "
+                "to see whether two similar people already exist.",
+                {
+                    "q": {
+                        "type": "string",
+                        "description": "Optional text to match against display names and aliases. Omit to list all people.",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+            ),
+            _schema(
                 "gossipmemo_merge_people",
-                "Merge two confirmed Person records. Only call after the user "
+                "Merge two confirmed Person records. Use gossipmemo_people first to "
+                "discover candidate duplicates. Only call this after the user "
                 "has confirmed that both records are the same person and which "
                 "record should remain canonical.",
                 {
@@ -714,6 +729,11 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 if not memory_id:
                     return _json_result({"error": "memory_id is required"})
                 return _json_result(client.retract(memory_id, reason=args.get("reason")))
+            if tool_name == "gossipmemo_people":
+                q = str(args.get("q", "")).strip()
+                limit = min(max(int(args.get("limit", 50)), 1), 200)
+                result = client.list_people(q, limit=limit)
+                return _json_result(result)
             if tool_name == "gossipmemo_merge_people":
                 source_person_id = str(args.get("source_person_id", "")).strip()
                 target_person_id = str(args.get("target_person_id", "")).strip()
