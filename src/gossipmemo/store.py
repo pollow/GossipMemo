@@ -1930,7 +1930,12 @@ class SqliteWorldStore:
                 return None
             goals = connection.execute(
                 "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
-            return revision, self._coverage_entries(connection, space_id), [self._learning_goal_view(item) for item in goals if item["status"] == "open"], [self._learning_goal_view(item) for item in goals if item["status"] != "open"][:20]
+            # `partial` is still served to the agent by guidance_bundle
+            # (status IN ('open', 'partial')), so it belongs with the open
+            # bucket here too -- otherwise the planner treats a goal the
+            # agent is still actively pursuing as settled history.
+            open_statuses = {"open", "partial"}
+            return revision, self._coverage_entries(connection, space_id), [self._learning_goal_view(item) for item in goals if item["status"] in open_statuses], [self._learning_goal_view(item) for item in goals if item["status"] not in open_statuses][:20]
 
     def _goal_focus(
         self, connection: sqlite3.Connection, space_id: str, text: str

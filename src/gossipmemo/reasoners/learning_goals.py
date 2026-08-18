@@ -11,10 +11,16 @@ saw every root at once and answered with two or three directions for the
 whole life; a request that can only see one root answers for that root, and
 breadth comes from there being twenty of them. The passes are therefore
 always two-stage: per-root candidates, then one reconciliation that is the
-only lifecycle-mutating request. Reconciliation reads candidates and goals
-only, so when even that does not fit, candidates are compressed round by
-round through `chunking.reduce_until_fits` -- the same shape as the owner
-family's evidence digest.
+only lifecycle-mutating request. Each per-root pass also sees that root's
+open goals and can cast a non-mutating closure recommendation against them
+-- a vote grounded in the entries it actually read, not the weaker proxy of
+"a candidate happened to overlap this goal". Reconciliation reads
+candidates, goals, and those recommendations, so when even that does not
+fit, candidates are compressed round by round through
+`chunking.reduce_until_fits` -- the same shape as the owner family's
+evidence digest. Recommendations are left out of that reduction and carried
+through whole: they are short, and compressing votes would blur exactly the
+per-root grounding that makes them worth having.
 """
 
 from __future__ import annotations
@@ -27,6 +33,7 @@ from ..models import (
     COVERAGE_CRITERIA,
     COVERAGE_ROOTS,
     CoverageEntryView,
+    GoalClosureRecommendation,
     GoalPlanningCandidates,
     GoalPlanningResult,
     LearningGoalCandidate,
@@ -96,28 +103,44 @@ def goal_candidate_prompt(
         "can, leave it empty rather than guessing, and never withhold a direction for "
         "having nothing to cite. Do not repeat a direction an open goal already covers. "
         "Candidates are non-mutating: do not transition, retire, defer, update, or "
-        "otherwise change any goal lifecycle."
+        "otherwise change any goal lifecycle. Separately, look over the open goals above "
+        "against what these entries now show: when one now reads as answered, overtaken, "
+        "or no longer worth holding open, add a closure recommendation citing its "
+        "`goal_id` and a short reason. This is a vote for a later pass to weigh, not a "
+        "transition -- do not remove or alter the goal here, and skip any goal this "
+        "root's entries say nothing new about."
     )
+
+
+def _recommendation_lines(recommendations: Sequence[GoalClosureRecommendation]) -> str:
+    return "\n".join(
+        f"- goal_id={item.goal_id!r} reason={item.reason!r}" for item in recommendations
+    ) or "- (none)"
 
 
 def goal_reconciliation_prompt(
     candidates: Sequence[LearningGoalCandidate], open_goals: Sequence[LearningGoalView],
     recent_closed_goals: Sequence[LearningGoalView],
+    closure_recommendations: Sequence[GoalClosureRecommendation] = (),
 ) -> str:
     """The one mutating pass: candidates from every root, plus goal lifecycles."""
     return (
         "<candidates>\n" + _json([item.model_dump(mode="json") for item in candidates])
         + "\n</candidates>\n<open-goals>\n" + _goal_lines(open_goals)
         + "\n</open-goals>\n<recent-closed-goals>\n" + _goal_lines(recent_closed_goals)
-        + "\n</recent-closed-goals>\n"
+        + "\n</recent-closed-goals>\n<closure-recommendations>\n"
+        + _recommendation_lines(closure_recommendations) + "\n</closure-recommendations>\n"
         "These candidates come from separate per-root passes, so near-duplicates across "
         "roots are expected: merge them, and keep the ones that read as an invitation "
         "into this user's own life rather than a survey question. Keep breadth -- several "
         "directions on one subject are worth less than the same number spread across "
         "different parts of the life. Reuse an existing `goal_id` to rewrite that goal, "
         "and omit it to create a new one. This is the only pass that may transition a "
-        "goal's lifecycle: transition one when a candidate shows it is answered, "
-        "overtaken, or no longer worth holding open."
+        "goal's lifecycle: transition one when the evidence shows it is answered, "
+        "overtaken, or no longer worth holding open. The closure recommendations are each "
+        "one root's vote grounded in what its entries actually show, not an instruction: "
+        "weigh a recommendation as evidence, and a goal recommended closed by one root can "
+        "still be worth holding open if the rest of its scope is unanswered."
     )
 
 
@@ -134,12 +157,14 @@ def goal_candidate_reduction_prompt(candidates: Sequence[LearningGoalCandidate])
 async def _root_candidates(
     transport: LlmTransport, root: str, entries: Sequence[CoverageEntryView],
     open_goals: Sequence[LearningGoalView],
-) -> list[LearningGoalCandidate]:
+) -> tuple[list[LearningGoalCandidate], list[GoalClosureRecommendation]]:
     """Plan one root, splitting its child entries when they outgrow a request.
 
     The overview entry rides in every chunk: it is what tells the model which
     areas exist under this root, which is exactly what a sideways expansion
-    needs.
+    needs. Closure recommendations ride alongside the candidates: this pass
+    is the only one that sees this root's entries, so it is the only place
+    that can judge an open goal against what is actually now understood.
     """
     context_budget = transport.context_budget
     overview = [item for item in entries if not item.path]
@@ -159,6 +184,7 @@ async def _root_candidates(
         context_budget.check(context_budget.estimate_request(request_for(chunk)))
 
     candidates: list[LearningGoalCandidate] = []
+    recommendations: list[GoalClosureRecommendation] = []
     # A root whose entries are only the overview still gets its one request.
     for chunk in greedy_chunks(children, fits, check) or [[]]:
         request = request_for(chunk)
@@ -167,7 +193,8 @@ async def _root_candidates(
             tier=current_call_tier(), label=current_call_label(),
         )
         candidates.extend(result.candidates)
-    return candidates
+        recommendations.extend(result.closure_recommendations)
+    return candidates, recommendations
 
 
 async def _plan_learning_goals(
@@ -177,6 +204,7 @@ async def _plan_learning_goals(
     context_budget = transport.context_budget
     tier, label = current_call_tier(), current_call_label()
     candidates: list[LearningGoalCandidate] = []
+    recommendations: list[GoalClosureRecommendation] = []
     for root in COVERAGE_ROOTS:
         # A root with no entries is skipped rather than planned from its
         # rubric line alone: with nothing understood there yet, anything
@@ -185,14 +213,17 @@ async def _plan_learning_goals(
         # own as soon as there is evidence to summarize.
         root_entries = [item for item in entries if item.root == root]
         if root_entries:
-            candidates.extend(await _root_candidates(transport, root, root_entries, open_goals))
+            root_candidates, root_recommendations = await _root_candidates(
+                transport, root, root_entries, open_goals)
+            candidates.extend(root_candidates)
+            recommendations.extend(root_recommendations)
     if not candidates and not open_goals:
         return GoalPlanningResult()
 
     def reconciliation_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
         return _structured_request(
             transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_reconciliation_prompt(items, open_goals, recent_closed_goals),
+            goal_reconciliation_prompt(items, open_goals, recent_closed_goals, recommendations),
             GoalPlanningResult,
         )
 

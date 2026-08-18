@@ -33,6 +33,7 @@ from gossipmemo.models import (
     ExtractedCoverageEntry,
     ExtractedCoverageEntryEdit,
     GoalPlanningResult,
+    LearningGoalTransition,
     LearningGoalUpsert,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
@@ -1512,6 +1513,42 @@ def test_goal_focus_is_resolved_from_the_goal_text_by_alias_matching(store):
         "How did you and Alice first meet?": ("person", alice),
         "What was that shared flat like?": ("user", None),
     }
+
+
+def test_partial_goals_are_bucketed_with_open_not_recent_closed(store):
+    """`partial` is still served to the agent by guidance_bundle's
+
+    `status IN ('open', 'partial')`, so the planner's context must treat it
+    as a live goal too -- bucketing it with closed history instead let the
+    planner keep proposing directions the agent was still actively pursuing.
+    """
+    store.ensure_space("personal")
+    revision, _, _, _ = store.learning_goal_context("personal")
+    store.apply_goal_planning(
+        "personal", revision,
+        GoalPlanningResult(upserts=[
+            LearningGoalUpsert(prompt="Open goal", rationale="stays open"),
+            LearningGoalUpsert(prompt="Partial goal", rationale="half answered"),
+            LearningGoalUpsert(prompt="Answered goal", rationale="fully answered"),
+        ]),
+        set(),
+    )
+    _, _, goals, _ = store.learning_goal_context("personal")
+    by_prompt = {goal.prompt: goal.id for goal in goals}
+    revision, _, _, _ = store.learning_goal_context("personal")
+    store.apply_goal_planning(
+        "personal", revision, GoalPlanningResult(transitions=[
+            LearningGoalTransition(
+                goal_id=by_prompt["Partial goal"], status="partial", reason="half answered"),
+            LearningGoalTransition(
+                goal_id=by_prompt["Answered goal"], status="answered", reason="fully answered"),
+        ]),
+        set(by_prompt.values()),
+    )
+    _, _, open_goals, closed_goals = store.learning_goal_context("personal")
+    assert {goal.prompt for goal in open_goals} == {"Open goal", "Partial goal"}
+    assert {goal.prompt for goal in closed_goals} == {"Answered goal"}
+    assert {goal.status for goal in open_goals} == {"open", "partial"}
 
 
 def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):

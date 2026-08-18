@@ -1,4 +1,4 @@
-from gossipmemo.models import MemoryView, ModelMessage
+from gossipmemo.models import GoalClosureRecommendation, MemoryView, ModelMessage
 from gossipmemo.query import QUERY_SYNTHESIS_SYSTEM_PROMPT
 from gossipmemo.reasoners import (
     EXTRACTION_SYSTEM_PROMPT,
@@ -186,6 +186,19 @@ def test_goal_candidate_prompt_carries_one_root_and_four_expansions():
     assert "never withhold a direction for having nothing to cite" in " ".join(prompt.split())
 
 
+def test_goal_candidate_prompt_votes_closure_without_mutating():
+    """Candidates see this root's entries, so they can judge staleness --
+
+    but the prompt must still say a recommendation is a vote, not a
+    transition, since reconciliation remains the only mutating pass.
+    """
+    prompt = " ".join(goal_candidate_prompt("M4", [], []).split())
+    assert "closure recommendation" in prompt
+    assert "vote for a later pass to weigh, not a transition" in prompt
+    assert "do not remove or alter the goal here" in prompt
+    assert "Candidates are non-mutating: do not transition, retire, defer, update" in prompt
+
+
 def test_goal_planning_leaves_asking_now_to_the_consuming_agent():
     """The planner records directions; the agent decides what to raise.
 
@@ -211,6 +224,23 @@ def test_goal_reconciliation_is_the_only_lifecycle_pass_and_keeps_breadth():
     assert "do not transition, retire, defer, update" in candidates
     assert "only pass that may transition a goal's lifecycle" in final
     assert "Keep breadth" in final
+
+
+def test_goal_reconciliation_weighs_closure_recommendations_as_evidence():
+    """Entry-grounded votes from the per-root pass are evidence, not orders --
+
+    reconciliation still decides, and a goal one root recommends closing can
+    stay open if the rest of its scope is unanswered.
+    """
+    recommendation = GoalClosureRecommendation(goal_id="goal-1", reason="fully covered now")
+    final = " ".join(goal_reconciliation_prompt([], [], [], [recommendation]).split())
+    assert "goal_id='goal-1'" in final and "fully covered now" in final
+    assert "<closure-recommendations>" in final
+    assert "not an instruction" in final
+    assert "can still be worth holding open" in final
+
+    empty = " ".join(goal_reconciliation_prompt([], [], []).split())
+    assert "(none)" in empty and "<closure-recommendations>" in empty
 
 
 def test_query_synthesis_does_not_treat_unmerged_people_as_distinct_evidence():

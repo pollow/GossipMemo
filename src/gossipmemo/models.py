@@ -393,8 +393,20 @@ class LearningGoalCandidate(BaseModel):
     entry_ids: list[str] = Field(default_factory=list)
 
 
+class GoalClosureRecommendation(BaseModel):
+    """A per-root vote that an existing goal now looks settled.
+
+    Non-mutating: it is evidence for reconciliation, the only pass that may
+    actually transition a goal, not an instruction it must follow.
+    """
+
+    goal_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
 class GoalPlanningCandidates(BaseModel):
     candidates: list[LearningGoalCandidate] = Field(default_factory=list)
+    closure_recommendations: list[GoalClosureRecommendation] = Field(default_factory=list)
 
 
 class LearningGoalView(BaseModel):
