@@ -10,4 +10,5 @@ build/
 .env
 gossipmemo_test_data.txt
 data/
-local_docs/
+local_docs/*
+!local_docs/experiment-log.md
