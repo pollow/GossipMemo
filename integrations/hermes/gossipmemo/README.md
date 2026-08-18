@@ -29,8 +29,10 @@ errors and do not crash the agent.
 
 The provider exposes five OpenAI-style tools:
 
-- `gossipmemo_search` searches people, relationships, memories, and optional
-  evidence.
+- `gossipmemo_query` asks a question and returns a synthesized answer over
+  people, relationships, memories, and optional evidence. This calls an LLM
+  to synthesize the answer, so it is reserved for genuine questions rather
+  than routine lookups.
 - `gossipmemo_store` creates an explicit manual memory, including person role
   links such as `subject`, `asserter`, or `reporter`.
 - `gossipmemo_dossier` reads a person or relationship projection without an

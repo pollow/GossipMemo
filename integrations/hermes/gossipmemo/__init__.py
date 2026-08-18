@@ -238,7 +238,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         return (
             "# GossipMemo memory\n"
             "GossipMemo keeps provenance-aware memories about people and relationships. "
-            "Use gossipmemo_search before relying on social context, gossipmemo_store "
+            "Use gossipmemo_query before relying on social context, gossipmemo_store "
             "for explicit durable facts, gossipmemo_dossier for a person's current "
             "profile, and gossipmemo_retract to correct a memory."
         )
@@ -540,8 +540,10 @@ class GossipMemoMemoryProvider(MemoryProvider):
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         return [
             _schema(
-                "gossipmemo_search",
-                "Search provenance-aware memories, people, and relationships in GossipMemo.",
+                "gossipmemo_query",
+                "Ask a question and get a synthesized, provenance-aware answer over memories, "
+                "people, and relationships in GossipMemo. This runs an LLM synthesis call, so "
+                "it is slower than a lookup; reserve it for genuine questions, not routine checks.",
                 {
                     "query": {"type": "string", "description": "Question or memory to search for."},
                     "people": {"type": "array", "items": {"type": "string"}},
@@ -612,7 +614,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         if not isinstance(args, Mapping):
             args = {}
         try:
-            if tool_name == "gossipmemo_search":
+            if tool_name == "gossipmemo_query":
                 query = str(args.get("query", "")).strip()
                 if not query:
                     return _json_result({"error": "query is required"})

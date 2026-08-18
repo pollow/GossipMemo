@@ -43,7 +43,7 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
         assert "space" not in user_message["source"]
 
         result = provider.handle_tool_call(
-            "gossipmemo_search", {"query": "Bob"}
+            "gossipmemo_query", {"query": "Bob"}
         )
         assert "answer for Bob" in result
     finally:
