@@ -1,5 +1,15 @@
 PRAGMA foreign_keys = ON;
 
+-- Ordered, immutable migration history. See migrations.py for how rows are
+-- validated and applied; this table's shape must stay in sync with the
+-- `_SCHEMA_MIGRATIONS_DDL` constant there.
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
+    applied_at TEXT NOT NULL,
+    description TEXT NOT NULL,
+    checksum TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS spaces (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

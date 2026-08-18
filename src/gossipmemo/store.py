@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Protocol
 
+from .migrations import migrate_database
 from .models import (
     ExtractionResult,
     HypothesisActions,
@@ -293,6 +294,7 @@ class SqliteWorldStore:
         impossible for a space whose roots are new to it.
         """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        migrate_database(self.path)
         self._enable_wal()
         schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
         with self._connect() as connection:

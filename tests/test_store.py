@@ -1651,19 +1651,44 @@ def test_initialize_fails_loudly_when_wal_is_refused(tmp_path, monkeypatch):
 
     import gossipmemo.store as store_module
 
-    class RefusesWal:
-        """Stands in for a connection on a filesystem without WAL support."""
+    real_connect = store_module.sqlite3.connect
 
-        def execute(self, sql, *params):
-            assert "journal_mode = WAL" in sql
-            return self
-
+    class _FakeWalResult:
         def fetchone(self):
             return ("delete",)
 
-        def close(self):
-            return None
+    class RefusesWal:
+        """A real connection that lies about `PRAGMA journal_mode = WAL`,
+        standing in for a filesystem without WAL support. Migration also
+        opens a connection through `sqlite3.connect` before WAL is ever
+        enabled, so this proxies everything else straight through to a real
+        connection rather than faking the whole SQLite surface."""
 
-    monkeypatch.setattr(store_module.sqlite3, "connect", lambda *a, **k: RefusesWal())
+        def __init__(self, *args, **kwargs):
+            self._real = real_connect(*args, **kwargs)
+
+        def execute(self, sql, *params):
+            if "journal_mode = WAL" in sql:
+                return _FakeWalResult()
+            return self._real.execute(sql, *params)
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+        @property
+        def isolation_level(self):
+            return self._real.isolation_level
+
+        @isolation_level.setter
+        def isolation_level(self, value):
+            self._real.isolation_level = value
+
+        def __enter__(self):
+            return self._real.__enter__()
+
+        def __exit__(self, *args):
+            return self._real.__exit__(*args)
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", lambda *a, **k: RefusesWal(*a, **k))
     with pytest.raises(RuntimeError, match="refused WAL mode"):
         SqliteWorldStore(tmp_path / "world.db").initialize()
