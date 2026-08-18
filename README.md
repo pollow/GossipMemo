@@ -371,6 +371,74 @@ a database, either stop the server first and copy the file, or copy all three
 files together. The server refuses to start if the filesystem will not accept
 WAL — a network mount, usually — rather than falling back silently.
 
+### Schema migrations
+
+`schema.sql` is versioned. The deployed database is upgraded in place on
+restart; it is never deleted or rebuilt. `SqliteWorldStore.initialize()`
+runs `migrate_database()` (`src/gossipmemo/migrations.py`) before applying
+`schema.sql`, and startup fails loudly rather than serving a program against
+a database it does not trust. Concretely, on every startup:
+
+1. A `schema_migrations` table (`version`, `applied_at`, `description`,
+   `checksum`) is read to find the database's current version. Its rows are
+   an ordered, immutable history: nothing is ever updated or deleted from
+   it, and each row's checksum is checked against the migration registered
+   in code for that version. A missing, non-contiguous, or checksum-mismatched
+   history is refused rather than trusted.
+2. A brand-new, empty database file is stamped directly at the program's
+   current schema version — there is no history to preserve, so nothing is
+   replayed.
+3. A database already at the current version is a no-op: restarting the
+   container after a release with no schema change does no work.
+4. A database behind the current version is upgraded: **a full SQLite
+   backup is taken first**, written next to the live database as
+   `.<dbfile>.pre-migration-v<N>.<timestamp>.bak` (a dotfile, in the same
+   mounted data directory, so `docker cp`/volume access reaches it). If the
+   backup cannot be created, migration aborts before touching the live
+   database. Each pending version is then applied in one write transaction,
+   which rolls back and re-raises on any failure, leaving the database at
+   its last successfully-applied version.
+5. A database stamped at a version newer than the running program refuses
+   to start — this program build cannot safely serve it. Never downgrade a
+   database by rolling the image back onto a newer schema.
+
+**Restore path**: stop the container, replace the live `world.db` /
+`world.db-wal` / `world.db-shm` (or your configured `GOSSIPMEMO_DATABASE_PATH`)
+with the `.bak` snapshot (a plain SQLite file — restore it as the main
+database file, no `-wal`/`-shm` needed), and restart.
+
+#### Upgrading this deployment from v1 to v2 (one-time manual step)
+
+This repository's first deployed release predates migration history and is
+treated as schema version 1. Commit `0bc92208314bd685a63bd0b8415eda65c511cea0`
+on `main` is the last version-1 commit; the first commit that changes
+`schema.sql` (`b3c0c33`, "Replace the coverage map with per-root coverage
+entries") is what upgrades a deployed instance to version 2. Manual operator
+care is only required for *this* first upgrade — every later migration is
+meant to be invisible, per the rule above.
+
+Before pulling a v2+ image onto a running v1 deployment:
+
+1. Stop the container: `docker compose down` (or `docker stop <container>`).
+2. Copy the entire mounted data directory by hand as an out-of-band safety
+   net, in addition to the automatic in-app backup:
+   `cp -a "$GOSSIPMEMO_DATA_DIR" "$GOSSIPMEMO_DATA_DIR.pre-v2-backup"`.
+3. Pull/build the new image and start the container normally
+   (`docker compose up --build`).
+4. Verify the migration succeeded:
+   - `docker compose logs` should show `world_start_complete` with no
+     migration errors.
+   - `GET /healthz` returns 200.
+   - `sqlite3 "$GOSSIPMEMO_DATA_DIR/gossipmemo.db" "SELECT version, description FROM schema_migrations ORDER BY version;"`
+     should list version 1 (legacy baseline) and version 2 (the coverage
+     migration).
+   - `sqlite3 "$GOSSIPMEMO_DATA_DIR/gossipmemo.db" "SELECT name FROM sqlite_master WHERE name = 'coverage_maps';"`
+     should return nothing; `coverage_roots` and `coverage_entries` should
+     exist and be non-empty for spaces with prior data.
+5. Once confirmed, the manual directory copy from step 2 and the automatic
+   `.gossipmemo.db.pre-migration-v1.*.bak` file in the data directory can be
+   archived elsewhere or deleted.
+
 ### Code layout
 
 The provider seam is deliberately narrow. `transport.py` is a leaf module —

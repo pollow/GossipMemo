@@ -480,6 +480,33 @@ Projection 可以删除并从 active Memory 重建。人工编辑 projection 时
 
 `WorldStore` 是 implementation 内部 seam。未来 PostgreSQL Adapter 可以使用不同 SQL、JSONB 或索引实现，但必须满足相同的幂等、projection freshness check 和 provenance 行为；具体 freshness watermark 的持久化形式仍待决定。
 
+### schema_migrations：迁移历史
+
+```yaml
+version: 2
+applied_at: 2026-08-17T00:00:00Z
+description: "coverage_maps -> coverage_roots/coverage_entries; learning_goals.criteria_refs/boundary_ids -> entry_ids"
+checksum: "<sha256 of \"version:description\">"
+```
+
+`schema.sql` 的每次结构变更都对应一行历史记录，由 `src/gossipmemo/migrations.py`
+在 `SqliteWorldStore.initialize()` 启动时写入，行只增不改：
+
+| 字段 | 含义 |
+| --- | --- |
+| `version` | 该行把数据库升级到的 schema 版本；主键，必须与已存在行连续递增 |
+| `applied_at` | 迁移执行时间 |
+| `description` | 迁移内容的固定文字说明；与 `version` 一起决定 `checksum` |
+| `checksum` | 校验值；篡改或伪造的历史行在下次启动时会被拒绝而不是被信任 |
+
+已部署的第一版 schema（`coverage_maps`、`learning_goals.criteria_refs`/
+`boundary_ids`）被视为 version 1，即使它从未在自己的数据库里写过
+`schema_migrations` 行——迁移器识别出这个遗留结构后回填一条 version 1
+基线行，再应用到 version 2。全新创建的空数据库直接标记为当前版本，不回放历史。
+迁移永远不自动删除、降级或静默采用无法识别的数据库结构；应用每个升级前先在
+挂载数据目录内创建一次性 SQLite 备份，升级在一个写事务内完成，失败即回滚。
+完整规则见 README.md 的 "Schema migrations" 一节。
+
 ## 11. 示例：转述与直接导入归一
 
 ### 通过 Agent 转述

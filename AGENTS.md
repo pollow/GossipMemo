@@ -4,7 +4,7 @@
 
 - Keep the product MVP-oriented. Prefer the smallest design that solves a demonstrated problem; add abstractions and components only when real usage requires them.
 - Discuss data schema and interface semantics before implementing consequential changes.
-- Database migration compatibility is not required during this stage. The SQLite database may be deleted and rebuilt when the schema changes.
+- Every change to `schema.sql` ships with a migration in `src/gossipmemo/migrations.py` (bump `CURRENT_VERSION`, add a `Migration` entry, extend `tests/test_migrations.py`). The deployed database is never deleted or rebuilt; `SqliteWorldStore.initialize()` runs `migrate_database()` first and upgrades it in place, backing it up beforehand. See README.md's "Schema migrations" section for the operator-facing contract.
 - Split development into independently useful slices. Run sub-agents sequentially with concise context and medium reasoning effort, and commit each feature separately.
 - Preserve simple domain language and use `ExtractedXXX` consistently for LLM extraction models.
 - Verify changes with `UV_CACHE_DIR=/tmp/gossipmemo-uv-cache uv run pytest -q` and `git diff --check`.

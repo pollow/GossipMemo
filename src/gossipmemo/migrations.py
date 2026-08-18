@@ -31,7 +31,7 @@ Detection rule (see `migrate_database` for the implementation):
   database, per the migration policy in CLAUDE.md.
 
 Every marker/checksum recorded in `schema_migrations` either matches a
-known `Migration.checksum` (a real, applied upgrade) or one of the sentinel
+known `Migration.checksum` (a real, applied upgrade) or one of the
 sentinels below (`_LEGACY_BASELINE_MARKER`, `_FRESH_CREATE_MARKER`,
 `_ADOPTED_MARKER`), and only as the very first row. Anything else -- a
 version number matching no known migration, a gap in the sequence, a
