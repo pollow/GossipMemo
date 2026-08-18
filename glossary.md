@@ -8,9 +8,9 @@
 - **Memory**：一条 durable semantic claim/record（系统决定长期保留的语义认识）。它可以被检索、修正、retract、supersede 和追溯，但不保证客观真实；`reported`、`inferred` 等 `basis` 必须保留。
 - **fact**：`Memory.kind` 的一种静态陈述分类。`fact ⊂ Memory`；它不是 Memory 的同义词，也不表示该记录已被客观验证。
 - **Hypothesis**：一个有依据、但尚不足以作为稳定认识使用的 tentative interpretation。它属于 `user`、`person` 或 `relationship` owner，支持 support/counter evidence 和显式 lifecycle；它不是 Memory，也不能作为后续 reasoning 的 evidence。
-- **CoverageEntry**：一条「我们在某个 path 上了解到什么程度」的总结（数十条 Memory → 一小段话），由 coverage audit 从非 inferred Memory 增量产生。entry 只写「知道什么」，不写「还不知道什么」；它不是 Memory 的复述，不是用户画像，也不是回忆录草稿。`root` 级 overview entry 就是 path 为空的那条 entry——两者只有粒度差异，没有类型差异。
+- **CoverageEntry**：一条「我们在某个 path 上知道什么」的总结（数十条 Memory → 一小段话），由 coverage audit 从非 inferred Memory 增量产生。entry 只写「知道什么」，不写「还不知道什么」；它不是 Memory 的复述，不是用户画像，也不是回忆录草稿。`root` 级 overview entry 就是 path 为空的那条 entry——两者只有粒度差异，没有类型差异。
 - **coverage root**：20 个稳定 memoir/persona 视角之一，是 coverage entries 唯一的结构锚点。它由 audit 的调用结构决定（哪次请求产生的就属于哪个 root），模型不填。每个 root 各自持有增量 cursor 与 CAS revision。
-- **coverage**：一个 Space 的全部 coverage entries，即「我们对这个用户了解到什么程度」的累积状态。它是**可重放的累积状态而不是可重建 projection**：entries 允许自由改写，删库重跑会得到不同但同样有效的结果。它只被 goal planning 消费，不直接暴露给 chat agent。
+- **coverage**：一个 Space 的全部 coverage entries，即「我们对这个用户知道什么」的累积状态。它是**可重放的累积状态而不是可重建 projection**：entries 允许自由改写，删库重跑会得到不同但同样有效的结果。它只被 goal planning 消费，不直接暴露给 chat agent。
 - **LearningGoal**：由 UserLearningGoalReasoner 按 root 扇出读 coverage entries 规划出的、user-owned 可选了解方向。它描述“值得进一步了解什么”，不表示用户有义务回答，也不会因创建而提高 coverage。消费端不做相关性排序，随机取 3–5 条随 turn 返回，是否使用由消费 agent 判断。
 - **projection**：从 canonical data（主要是 active Memories）生成的、可删除并重建的 card 或 context，例如 Person、Relationship、UserModel card 和 rolling continuity。projection 本身不是新的 evidence。
 

@@ -1,8 +1,8 @@
 """Coverage-audit reasoner and its prompt.
 
-Coverage is one recursive table of entries: an entry summarizes how well one
-path under one root is understood, and the root-level entry (empty path) is
-the overview of that root. Auditing fans out over roots -- one request per
+Coverage is one recursive table of entries: an entry summarizes what is known
+on one path under one root, and the root-level entry (empty path) is the
+overview of that root. Auditing fans out over roots -- one request per
 root, carrying that root's active entries plus a chunk of its new evidence --
 so an entry's root is decided by which request produced it and never by a
 field the model fills in.
@@ -26,8 +26,8 @@ from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
 
-COVERAGE_AUDIT_SYSTEM_PROMPT = """Summarize how well one area of a person's life and
-persona is already understood. Return only the supplied JSON schema. An entry is a
+COVERAGE_AUDIT_SYSTEM_PROMPT = """Summarize what is known about one area of a person's
+life and persona. Return only the supplied JSON schema. An entry is a
 summary over many memories -- roughly dozens of memories into a short paragraph -- not a
 retelling of them and not memoir prose. Write only what is known; never write what is
 missing, unclear, or worth asking about. Do not invent facts, evidence, or private
@@ -51,8 +51,8 @@ def coverage_audit_prompt(
         "changes or extends; leaving an entry out changes nothing. An entry that only one "
         "memory supports is almost always wrong -- that is a single event, not an "
         "understanding of a topic. Keep exactly one entry with an empty path: the overview "
-        "of this root, naming which areas exist under it and how much is understood about "
-        "each. Paths are free text; reuse a stored path when you mean the same area, and do "
+        "of this root, naming which areas exist under it and what each covers. Paths are "
+        "free text; reuse a stored path when you mean the same area, and do "
         "not renumber or normalize the others. Keep content under about two hundred words: "
         "when an entry outgrows that, split it by narrowing that entry and adding the "
         "areas it no longer covers. To merge two entries, rewrite one to absorb the other "

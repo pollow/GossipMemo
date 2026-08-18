@@ -436,7 +436,7 @@ POST /v1/spaces/{space_id}/reason
 ### Epistemic guidance 与 user learning
 
 - Person/Relationship reasoner 显式维护 inferred Memory 与 Hypothesis；User reasoner 只维护 Hypothesis。
-- Coverage 是一张递归的 entry 表：一条 entry 是某个 path 上「了解到什么程度」的总结，`root` 级 overview 就是 path 为空的那条。20 个稳定 memoir/persona 视角降级为 root 与 prompt 视角提示，不再是 `unknown/fragmentary/grounded/rich` 这样的刻度，也不再有独立的 boundary 记录。
+- Coverage 是一张递归的 entry 表：一条 entry 是某个 path 上「知道什么」的总结，`root` 级 overview 就是 path 为空的那条。20 个稳定 memoir/persona 视角降级为 root 与 prompt 视角提示，不再是 `unknown/fragmentary/grounded/rich` 这样的刻度，也不再有独立的 boundary 记录。
 - Coverage audit 按 root 扇出增量更新，操作面只有 add 与 modify；entry 只写「知道什么」，找缺口是 goal planning 的创造性工作。
 - Coverage catch up 后单独规划 LearningGoals，同样按 root 扇出，只读 entries，沿纵向、横向、时间纵深和 entry 中出现的人四个方向扩展；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
 - Planner 忠实维护包括私密与敏感内容在内的未知方向；现在是否问、怎样问由消费 agent 决定。goal 是可拒绝的邀请，禁止直接病理诊断。

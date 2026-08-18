@@ -147,7 +147,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
                 })
             if "Review the projection above" in combined:
                 return json.dumps({})
-            if "Summarize how well one area of a person's life and" in combined:
+            if "Summarize what is known about one area of a person's" in combined:
                 # Make it observable that import waits for induction spawned
                 # by extraction instead of returning as soon as messages
                 # complete.
