@@ -363,13 +363,14 @@ process is a product invariant — SQLite plus the in-process, single-permit
 provider gate — so there is deliberately no worker-count option.
 
 The database runs in WAL mode, so readers never block behind the writer. The
-cost is that the database is no longer a single file: `world.db` is
-accompanied by `world.db-wal` and `world.db-shm`, and the newest writes live
-in the `-wal` file until a checkpoint folds them back. **Copying `world.db`
-alone from a running server silently loses recent data.** To move or back up
-a database, either stop the server first and copy the file, or copy all three
-files together. The server refuses to start if the filesystem will not accept
-WAL — a network mount, usually — rather than falling back silently.
+cost is that the database is no longer a single file: `gossipmemo.db` is
+accompanied by `gossipmemo.db-wal` and `gossipmemo.db-shm`, and the newest
+writes live in the `-wal` file until a checkpoint folds them back. **Copying
+`gossipmemo.db` alone from a running server silently loses recent data.** To
+move or back up a database, either stop the server first and copy the file,
+or copy all three files together. The server refuses to start if the
+filesystem will not accept WAL — a network mount, usually — rather than
+falling back silently.
 
 ### Schema migrations
 
@@ -402,10 +403,10 @@ a database it does not trust. Concretely, on every startup:
    to start — this program build cannot safely serve it. Never downgrade a
    database by rolling the image back onto a newer schema.
 
-**Restore path**: stop the container, replace the live `world.db` /
-`world.db-wal` / `world.db-shm` (or your configured `GOSSIPMEMO_DATABASE_PATH`)
-with the `.bak` snapshot (a plain SQLite file — restore it as the main
-database file, no `-wal`/`-shm` needed), and restart.
+**Restore path**: stop the container, replace the live `gossipmemo.db` /
+`gossipmemo.db-wal` / `gossipmemo.db-shm` (or your configured
+`GOSSIPMEMO_DATABASE_PATH`) with the `.bak` snapshot (a plain SQLite file —
+restore it as the main database file, no `-wal`/`-shm` needed), and restart.
 
 #### Upgrading this deployment from v1 to v2 (one-time manual step)
 
