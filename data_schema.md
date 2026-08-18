@@ -413,7 +413,6 @@ Coverage 是一张递归的 entry 表。一条 entry 是「我们在这个 path 
 | `path` | 自由文本、不规范化；`root` 级 overview entry 的 path 为空 |
 | `content` | 该 path 上的认识总结，上限约一两百字，超了应拆 |
 | `status` | `active \| superseded` |
-| `evidence_memory_ids` | 由 store 维护，并在写入时剔除已失效 Memory |
 
 Audit 的操作面只有 add 与 modify：合并 = 改写一条 + 把另一条标 `superseded`，
 拆分 = 缩小一条 + 新增一条，两步都不需要原子性保证。

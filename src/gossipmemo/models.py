@@ -316,7 +316,6 @@ class CoverageEntryView(BaseModel):
     path: str = ""
     content: str
     status: CoverageEntryStatus = "active"
-    evidence_memory_ids: list[str] = Field(default_factory=list)
     created_at: str
     updated_at: str
 

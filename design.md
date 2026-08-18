@@ -457,7 +457,7 @@ POST /v1/spaces/{space_id}/reason
 - 每个 persistence 方法只进行短原子写入；调用方看不到 transaction interface，LLM 调用期间不持有 transaction。
 - Reasoning 失败不回滚 Message 或 Memory；projection 保持 stale 并可重试。
 - owner reasoning 的第二个 call 失败时，projection 和 epistemic actions 都不写入；两个阶段作为一次 optimistic refresh 提交。
-- 每个 coverage root 用自己的 composite cursor 防止相同 timestamp 的 Memory 被跳过；retract/supersede 会显式进入 audit 并移除失效 evidence。单个 root 的 audit 失败只让该 root 停在原地重试。
+- 每个 coverage root 用自己的 composite cursor 防止相同 timestamp 的 Memory 被跳过；retract/supersede 会显式进入 audit，让下一次审阅据此改写受影响的 entry。单个 root 的 audit 失败只让该 root 停在原地重试。
 - Query 必须识别 stale projection，并补充读取比 projection 更新的 active Memories。
 - 重复 ingest 由 source identity 或 idempotency key 去重。
 - Memory retract 和 supersede 由 SQLite Adapter 保证单次 apply 的原子性，但领域流程不依赖跨阶段 transaction。

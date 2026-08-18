@@ -1355,7 +1355,7 @@ def test_coverage_entries_accumulate_per_root_and_feed_goal_planning(store):
         "personal", root.root, root.source_watermark, root.source_cursor_id,
         ExtractedCoverageAudit(additions=[ExtractedCoverageEntry(
             content="Early chapters are anchored to a coastal childhood.")]),
-        {memory_id}, set(),
+        memories, set(),
     )
 
     # The same evidence is still backlog for every other root.
@@ -1364,8 +1364,8 @@ def test_coverage_entries_accumulate_per_root_and_feed_goal_planning(store):
     assert [memory.id for memory in next_memories] == [memory_id]
 
     revision, planning_entries, _, _ = store.learning_goal_context("personal")
-    assert [(item.root, item.path, item.evidence_memory_ids) for item in planning_entries] == [
-        ("M1", "", [memory_id])]
+    assert [(item.root, item.path) for item in planning_entries] == [
+        ("M1", "")]
     store.apply_goal_planning(
         "personal", revision,
         GoalPlanningResult(upserts=[LearningGoalUpsert(
@@ -1390,7 +1390,7 @@ def test_coverage_entries_are_modified_and_superseded_by_a_later_audit(store):
             ExtractedCoverageEntry(content="Chapters known: university."),
             ExtractedCoverageEntry(path="university", content="Four years in Hangzhou."),
         ]),
-        {memory.id for memory in memories}, set(),
+        memories, set(),
     )
     store.add_manual_memory(
         "personal", ManualMemoryRequest(content="Dorm ties loosened later.", about_user=True))
@@ -1408,7 +1408,7 @@ def test_coverage_entries_are_modified_and_superseded_by_a_later_audit(store):
             ExtractedCoverageEntryEdit(
                 entry_id=overview.id, content="absorbed", status="superseded"),
         ]),
-        {memory.id for memory in memories}, {item.id for item in entries},
+        memories, {item.id for item in entries},
     )
     entries = _coverage_entries(store)
     assert [(item.path, item.content) for item in entries] == [
@@ -1419,7 +1419,7 @@ def test_coverage_entries_are_modified_and_superseded_by_a_later_audit(store):
 def test_coverage_audit_ignores_entry_ids_outside_the_audited_root(store):
     store.add_manual_memory("personal", ManualMemoryRequest(content="scene", about_user=True))
     root, _, memories = store.coverage_context("personal")
-    evidence = {memory.id for memory in memories}
+    evidence = memories
     assert store.apply_coverage_audit(
         "personal", root.root, root.source_watermark, root.source_cursor_id,
         ExtractedCoverageAudit(additions=[ExtractedCoverageEntry(content="M1 overview.")]),
@@ -1450,7 +1450,7 @@ def test_coverage_cursor_is_per_root_and_survives_equal_timestamps(store):
         seen.extend(memory.id for memory in memories)
         assert store.apply_coverage_audit(
             "personal", root.root, root.source_watermark, root.source_cursor_id,
-            ExtractedCoverageAudit(), {memories[0].id}, set(),
+            ExtractedCoverageAudit(), memories, set(),
         )
     assert set(seen) == set(ids)
     # M1 is caught up; every other root still starts from the beginning.
@@ -1458,14 +1458,14 @@ def test_coverage_cursor_is_per_root_and_survives_equal_timestamps(store):
     assert root.root == "M2" and {memory.id for memory in memories} == set(ids)
 
 
-def test_coverage_entry_evidence_drops_retracted_memories(store):
+def test_coverage_entry_can_be_modified_after_a_source_memory_is_retracted(store):
     ids = [store.add_manual_memory("personal", ManualMemoryRequest(
         content=f"scene {index}", about_user=True)) for index in range(2)]
     root, _, memories = store.coverage_context("personal")
     assert store.apply_coverage_audit(
         "personal", root.root, root.source_watermark, root.source_cursor_id,
         ExtractedCoverageAudit(additions=[ExtractedCoverageEntry(content="Two scenes are known.")]),
-        {memory.id for memory in memories}, set(),
+        memories, set(),
     )
     assert store.retract_memory("personal", ids[-1])
     root, entries, memories = store.coverage_context("personal")
@@ -1473,9 +1473,9 @@ def test_coverage_entry_evidence_drops_retracted_memories(store):
         "personal", root.root, root.source_watermark, root.source_cursor_id,
         ExtractedCoverageAudit(modifications=[ExtractedCoverageEntryEdit(
             entry_id=entries[0].id, content="One scene is known.")]),
-        {memory.id for memory in memories}, {entries[0].id},
+        memories, {entries[0].id},
     )
-    assert _coverage_entries(store)[0].evidence_memory_ids == [ids[0]]
+    assert [item.content for item in _coverage_entries(store)] == ["One scene is known."]
 
 
 def test_goal_planning_uses_coverage_revision_cas(store):
@@ -1525,7 +1525,7 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
     root, _, memories = store.coverage_context("personal", limit=1)
     assert store.apply_coverage_audit("personal", root.root, root.source_watermark,
                                       root.source_cursor_id, ExtractedCoverageAudit(),
-                                      {memories[0].id}, set())
+                                      memories, set())
     # This models a process restart: stale discovery must notice the second row
     # even though it shares the persisted timestamp.
     assert store.stale_coverage_spaces() == ["personal"]

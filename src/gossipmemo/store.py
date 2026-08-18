@@ -187,7 +187,7 @@ class WorldStore(Protocol):
     ) -> tuple[CoverageRootView, list[CoverageEntryView], list[MemoryView]] | None: ...
 
     def apply_coverage_audit(self, space_id: str, root: str, expected_watermark: str | None, expected_cursor_id: str | None,
-                             audit: ExtractedCoverageAudit, evidence_ids: set[str], context_entry_ids: set[str]) -> bool: ...
+                             audit: ExtractedCoverageAudit, chunk: list[MemoryView], context_entry_ids: set[str]) -> bool: ...
 
     def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView],
                                                             list[LearningGoalView], list[LearningGoalView]] | None: ...
@@ -1794,7 +1794,6 @@ class SqliteWorldStore:
         return CoverageEntryView(
             id=row["id"], space_id=row["space_id"], root=row["root"], path=row["path"],
             content=row["content"], status=row["status"],
-            evidence_memory_ids=_loads(row["evidence_memory_ids"], []),
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
 
@@ -1854,21 +1853,19 @@ class SqliteWorldStore:
                 )
             return None
 
-    def apply_coverage_audit(self, space_id: str, root: str, expected_watermark: str | None, expected_cursor_id: str | None, audit: ExtractedCoverageAudit, evidence_ids: set[str], context_entry_ids: set[str]) -> bool:
+    def apply_coverage_audit(self, space_id: str, root: str, expected_watermark: str | None, expected_cursor_id: str | None, audit: ExtractedCoverageAudit, chunk: list[MemoryView], context_entry_ids: set[str]) -> bool:
         """Commit one root's audit and advance that root's cursor alone.
 
-        `evidence_memory_ids` is maintained here rather than by the model:
-        an entry records the evidence of the requests that wrote it, pruned
-        to Memories that are still active.
+        `chunk` is the evidence the audit actually read; the cursor advances
+        to whichever of those Memories has the latest `(updated_at, id)`,
+        matching the order `coverage_context` read them in.
         """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM coverage_roots WHERE space_id = ? AND root = ?", (space_id, root)).fetchone()
             if not row or row["source_watermark"] != expected_watermark or row["source_cursor_id"] != expected_cursor_id:
                 return False
-            active_ids = {item["id"] for item in connection.execute(
-                "SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND basis <> 'inferred'", (space_id,)).fetchall()}
-            evidence = sorted(memory_id for memory_id in evidence_ids if memory_id in active_ids)
+            chunk_ids = [item.id for item in chunk]
             now = _now()
             entries = {item.id: item for item in self._coverage_entries(
                 connection, space_id, root)}
@@ -1876,11 +1873,10 @@ class SqliteWorldStore:
                 entry = entries.get(edit.entry_id)
                 if edit.entry_id not in context_entry_ids or entry is None:
                     continue
-                merged = sorted(set(entry.evidence_memory_ids + evidence) & active_ids)
                 connection.execute(
-                    "UPDATE coverage_entries SET path = ?, content = ?, status = ?, evidence_memory_ids = ?, updated_at = ? WHERE id = ? AND space_id = ?",
+                    "UPDATE coverage_entries SET path = ?, content = ?, status = ?, updated_at = ? WHERE id = ? AND space_id = ?",
                     (entry.path if edit.path is None else edit.path, edit.content, edit.status,
-                     _json(merged), now, edit.entry_id, space_id),
+                     now, edit.entry_id, space_id),
                 )
                 entries.pop(edit.entry_id)
             existing = {(item.path, item.content) for item in entries.values()}
@@ -1891,12 +1887,12 @@ class SqliteWorldStore:
                     continue
                 existing.add((addition.path, addition.content))
                 connection.execute(
-                    "INSERT INTO coverage_entries(id, space_id, root, path, content, evidence_memory_ids, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (_id("entry"), space_id, root, addition.path, addition.content,
-                     _json(evidence), now, now),
+                    "INSERT INTO coverage_entries(id, space_id, root, path, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (_id("entry"), space_id, root, addition.path, addition.content, now, now),
                 )
-            cursor_row = connection.execute("SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1" % ",".join(
-                "?" for _ in evidence_ids), list(evidence_ids)).fetchone() if evidence_ids else None
+            cursor_row = connection.execute(
+                "SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1"
+                % ",".join("?" for _ in chunk_ids), chunk_ids).fetchone() if chunk_ids else None
             next_watermark = cursor_row["updated_at"] if cursor_row else expected_watermark
             next_cursor_id = cursor_row["id"] if cursor_row else expected_cursor_id
             connection.execute(

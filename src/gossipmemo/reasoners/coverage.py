@@ -124,7 +124,7 @@ def build_coverage_reasoner(store: WorldStore, model: "LlmTransport") -> Descrip
         audit, audited = result
         return store.apply_coverage_audit(
             space_id, root.root, root.source_watermark, root.source_cursor_id, audit,
-            {memory.id for memory in audited}, {entry.id for entry in entries},
+            list(audited), {entry.id for entry in entries},
         )
 
     def continue_when(context, result, applied: bool) -> bool:

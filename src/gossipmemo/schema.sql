@@ -35,7 +35,6 @@ CREATE TABLE IF NOT EXISTS coverage_entries (
     path TEXT NOT NULL DEFAULT '',
     content TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded')),
-    evidence_memory_ids TEXT NOT NULL DEFAULT '[]',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
