@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
 from typing import Any, TypeVar
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -194,6 +194,21 @@ class _ClientCommon:
     def _space_path(self, suffix: str) -> str:
         space = quote(self.space_id, safe="")
         return f"/v1/spaces/{space}/{suffix.lstrip('/')}"
+
+    def _recall_path(
+        self,
+        query: str,
+        *,
+        about_user: bool | None,
+        person_ids: Sequence[str] | None,
+        limit: int,
+    ) -> str:
+        params: list[tuple[str, str]] = [("q", query), ("limit", str(limit))]
+        if about_user is not None:
+            params.append(("about_user", "true" if about_user else "false"))
+        for person_id in person_ids or []:
+            params.append(("person_id", person_id))
+        return f"{self._space_path('memories')}?{urlencode(params)}"
 
 
 class GossipMemo(_ClientCommon):
@@ -428,6 +443,21 @@ class GossipMemo(_ClientCommon):
         identifier = quote(memory_id, safe="")
         return self._request(
             "POST", self._space_path(f"memories/{identifier}/supersede"), payload
+        )
+
+    def recall(
+        self,
+        q: str,
+        *,
+        about_user: bool | None = None,
+        person_ids: Sequence[str] | None = None,
+        limit: int = 20,
+    ) -> Any:
+        """Cheap, LLM-free keyword search over stored memories."""
+
+        return self._request(
+            "GET",
+            self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
         )
 
     def person_dossier(self, person_id: str) -> Any:
@@ -681,6 +711,21 @@ class AsyncGossipMemo(_ClientCommon):
         identifier = quote(memory_id, safe="")
         return await self._request(
             "POST", self._space_path(f"memories/{identifier}/supersede"), payload
+        )
+
+    async def recall(
+        self,
+        q: str,
+        *,
+        about_user: bool | None = None,
+        person_ids: Sequence[str] | None = None,
+        limit: int = 20,
+    ) -> Any:
+        """Cheap, LLM-free keyword search over stored memories."""
+
+        return await self._request(
+            "GET",
+            self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
         )
 
     async def person_dossier(self, person_id: str) -> Any:

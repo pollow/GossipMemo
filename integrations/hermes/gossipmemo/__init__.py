@@ -543,7 +543,9 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 "gossipmemo_query",
                 "Ask a question and get a synthesized, provenance-aware answer over memories, "
                 "people, and relationships in GossipMemo. This runs an LLM synthesis call, so "
-                "it is slower than a lookup; reserve it for genuine questions, not routine checks.",
+                "it is slower than a lookup; reserve it for genuine questions, not routine checks. "
+                "For a plain keyword lookup ('what do I have on file about X'), prefer the cheaper "
+                "gossipmemo_recall instead.",
                 {
                     "query": {"type": "string", "description": "Question or memory to search for."},
                     "people": {"type": "array", "items": {"type": "string"}},
@@ -553,6 +555,23 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30},
                 },
                 ("query",),
+            ),
+            _schema(
+                "gossipmemo_recall",
+                "Cheap, LLM-free keyword search over stored GossipMemo memories. This is the "
+                "default lookup for 'what do I have on file matching these keywords' -- it does "
+                "direct FTS matching with no synthesis, so prefer it over gossipmemo_query for "
+                "plain lookups; reach for gossipmemo_query only when you need a synthesized answer.",
+                {
+                    "q": {"type": "string", "description": "Keyword text to search for."},
+                    "about_user": {
+                        "type": "boolean",
+                        "description": "Restrict to (or exclude) memories about the current user.",
+                    },
+                    "person_ids": {"type": "array", "items": {"type": "string"}},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+                },
+                ("q",),
             ),
             _schema(
                 "gossipmemo_store",
@@ -625,6 +644,18 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     expand_relationships=int(args.get("expand_relationships", 0)),
                     include_evidence=bool(args.get("include_evidence", True)),
                     limit=min(max(int(args.get("limit", 30)), 1), 100),
+                )
+                return _json_result(result)
+            if tool_name == "gossipmemo_recall":
+                q = str(args.get("q", "")).strip()
+                if not q:
+                    return _json_result({"error": "q is required"})
+                about_user = args.get("about_user")
+                result = client.recall(
+                    q,
+                    about_user=bool(about_user) if about_user is not None else None,
+                    person_ids=args.get("person_ids") or [],
+                    limit=min(max(int(args.get("limit", 20)), 1), 100),
                 )
                 return _json_result(result)
             if tool_name == "gossipmemo_store":

@@ -28,6 +28,34 @@ def test_sync_context_and_turn_payload_validation():
         raise AssertionError("assistant turn must be normalized/rejected")
 
 
+def _recall_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path.endswith("/memories")
+    params = dict(request.url.params)
+    assert params["q"] == "tea"
+    assert params["about_user"] == "true"
+    assert params["limit"] == "5"
+    assert request.url.params.get_list("person_id") == ["p1", "p2"]
+    return httpx.Response(200, json={"memories": [{"content": "likes tea"}]})
+
+
+def test_sync_recall_builds_query_params():
+    client = GossipMemo(
+        "http://test", client=httpx.Client(transport=httpx.MockTransport(_recall_handler)))
+    result = client.recall("tea", about_user=True, person_ids=["p1", "p2"], limit=5)
+    assert result["memories"][0]["content"] == "likes tea"
+
+
+def test_async_recall_builds_query_params():
+    async def run():
+        client = AsyncGossipMemo(
+            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_recall_handler)))
+        result = await client.recall("tea", about_user=True, person_ids=["p1", "p2"], limit=5)
+        assert result["memories"][0]["content"] == "likes tea"
+        await client.close()
+
+    asyncio.run(run())
+
+
 def test_async_context_and_turn_payload_validation():
     async def run():
         client = AsyncGossipMemo(

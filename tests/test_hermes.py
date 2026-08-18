@@ -28,6 +28,12 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
         def retract(self, memory_id, **kwargs):
             return {"id": memory_id, "status": "retracted"}
 
+        def recall(self, q, **kwargs):
+            self.recall_calls.append((q, kwargs))
+            return {"memories": [{"content": f"recalled for {q}"}]}
+
+        recall_calls: list = []
+
         def close(self):
             return None
 
@@ -46,8 +52,29 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
             "gossipmemo_query", {"query": "Bob"}
         )
         assert "answer for Bob" in result
+
+        recall_result = provider.handle_tool_call(
+            "gossipmemo_recall",
+            {"q": "tea", "about_user": True, "person_ids": ["p1"], "limit": 500},
+        )
+        assert "recalled for tea" in recall_result
+        recalled_q, recalled_kwargs = provider._client.recall_calls[-1]
+        assert recalled_q == "tea"
+        assert recalled_kwargs["about_user"] is True
+        assert recalled_kwargs["person_ids"] == ["p1"]
+        assert recalled_kwargs["limit"] == 100
+
+        empty_q_result = provider.handle_tool_call("gossipmemo_recall", {"q": "  "})
+        assert "error" in empty_q_result
     finally:
         provider.shutdown()
+
+
+def test_hermes_tool_schemas_offer_recall_as_the_cheap_default():
+    schemas = {schema["name"]: schema for schema in GossipMemoMemoryProvider().get_tool_schemas()}
+    assert "gossipmemo_recall" in schemas
+    assert "gossipmemo_query" in schemas["gossipmemo_recall"]["description"]
+    assert "gossipmemo_recall" in schemas["gossipmemo_query"]["description"]
 
 
 def test_hermes_labels_guidance_as_tentative_or_optional():

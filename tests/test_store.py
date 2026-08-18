@@ -535,6 +535,142 @@ def test_memory_fts_triggers_track_insert_update_and_delete(store):
     )
 
 
+def test_recall_memories_filters_by_about_user_and_person_and_handles_empty_query(store):
+    store.add_manual_memory(
+        "personal",
+        ManualMemoryRequest(content="Distinctive tea preference",
+                            people=["Alice"], about_user=True),
+    )
+    store.add_manual_memory(
+        "personal",
+        ManualMemoryRequest(content="Distinctive tea event", people=["Bob"], about_user=False),
+    )
+    alice_id = store.read(
+        "personal", QueryRequest(question="x", people=["Alice"])
+    ).people[0].id
+    bob_id = store.read(
+        "personal", QueryRequest(question="x", people=["Bob"])
+    ).people[0].id
+
+    all_matches = store.recall_memories("personal", "distinctive", limit=10)
+    assert {memory.content for memory in all_matches} == {
+        "Distinctive tea preference",
+        "Distinctive tea event",
+    }
+
+    about_user_only = store.recall_memories("personal", "distinctive", about_user=True, limit=10)
+    assert [memory.content for memory in about_user_only] == ["Distinctive tea preference"]
+
+    not_about_user = store.recall_memories("personal", "distinctive", about_user=False, limit=10)
+    assert [memory.content for memory in not_about_user] == ["Distinctive tea event"]
+
+    alice_only = store.recall_memories("personal", "distinctive", person_ids=[alice_id], limit=10)
+    assert [memory.content for memory in alice_only] == ["Distinctive tea preference"]
+
+    both = store.recall_memories("personal", "distinctive", person_ids=[alice_id, bob_id], limit=10)
+    assert {memory.content for memory in both} == {
+        "Distinctive tea preference",
+        "Distinctive tea event",
+    }
+
+    assert store.recall_memories("personal", "", limit=10) == []
+    assert store.recall_memories("personal", "   ", limit=10) == []
+
+    # recall_user_memories keeps its existing hardcoded about_user=1 behavior.
+    assert [memory.content for memory in store.recall_user_memories("personal", "distinctive")] == [
+        "Distinctive tea preference"
+    ]
+
+
+def test_recall_memories_route_is_protected_llm_free_and_caps_limit(store):
+    pytest.importorskip("fastapi")
+    httpx = pytest.importorskip("httpx")
+
+    from gossipmemo.app import create_app
+    from gossipmemo.config import Settings
+    from gossipmemo.context_budget import ContextBudget
+    from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
+    from gossipmemo.world import SocialMemoryWorld
+
+    class ExplodingModel:
+        """Any LLM call here proves the route is not LLM-free; fail loudly."""
+
+        configured = True
+        gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        user_name = "CurrentUser"
+        extraction_policy = "balanced"
+
+        async def aclose(self):
+            return None
+
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            raise AssertionError("recall route must not call the LLM")
+
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            raise AssertionError("recall route must not call the LLM")
+
+    store.add_manual_memory(
+        "personal",
+        ManualMemoryRequest(content="Distinctive tea preference",
+                            people=["Alice"], about_user=True),
+    )
+
+    async def scenario():
+        world = SocialMemoryWorld(store, ExplodingModel())
+        app = create_app(
+            settings=Settings(
+                database_path=store.path,
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+                api_key="secret-token",
+            ),
+            world=world,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                unauthorized = await client.get("/v1/spaces/personal/memories?q=distinctive")
+                assert unauthorized.status_code == 401
+
+                headers = {"Authorization": "Bearer secret-token"}
+                ok = await client.get(
+                    "/v1/spaces/personal/memories", params={"q": "distinctive"}, headers=headers
+                )
+                assert ok.status_code == 200
+                body = ok.json()
+                assert [memory["content"] for memory in body["memories"]] == [
+                    "Distinctive tea preference"
+                ]
+
+                about_user_filtered = await client.get(
+                    "/v1/spaces/personal/memories",
+                    params={"q": "distinctive", "about_user": "false"},
+                    headers=headers,
+                )
+                assert about_user_filtered.json()["memories"] == []
+
+                empty_query = await client.get(
+                    "/v1/spaces/personal/memories", params={"q": ""}, headers=headers
+                )
+                assert empty_query.status_code == 200
+                assert empty_query.json()["memories"] == []
+
+                capped = await client.get(
+                    "/v1/spaces/personal/memories",
+                    params={"q": "distinctive", "limit": "1000"},
+                    headers=headers,
+                )
+                assert capped.status_code == 200
+                assert len(capped.json()["memories"]) <= 100
+
+    asyncio.run(scenario())
+
+
 def test_fastapi_lifespan_ingest_wait_and_query(store):
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")

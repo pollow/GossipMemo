@@ -7,7 +7,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from .config import Settings
@@ -210,6 +210,23 @@ def create_app(
             "relationship": relationship.model_dump(),
             "memories": [memory.model_dump() for memory in memories],
         }
+
+    @app.get(
+        "/v1/spaces/{space_id}/memories",
+        dependencies=protected,
+    )
+    async def recall_memories(
+        space_id: str,
+        q: str = "",
+        about_user: bool | None = None,
+        person_id: Annotated[list[str] | None, Query()] = None,
+        limit: int = 20,
+    ) -> dict:
+        capped_limit = max(0, min(limit, 100))
+        memories = world.store.recall_memories(
+            space_id, q, about_user=about_user, person_ids=person_id, limit=capped_limit,
+        )
+        return {"memories": [memory.model_dump() for memory in memories]}
 
     @app.post(
         "/v1/spaces/{space_id}/memories",

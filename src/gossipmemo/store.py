@@ -227,6 +227,11 @@ class WorldStore(Protocol):
     def recall_user_memories(self, space_id: str, text: str,
                              limit: int = 5) -> list[MemoryView]: ...
 
+    def recall_memories(
+        self, space_id: str, text: str, about_user: bool | None = None,
+        person_ids: Iterable[str] | None = None, limit: int = 5,
+    ) -> list[MemoryView]: ...
+
     def stale_entities(
         self,
     ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
@@ -2403,15 +2408,34 @@ class SqliteWorldStore:
             }
 
     def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]:
+        return self.recall_memories(space_id, text, about_user=True, limit=limit)
+
+    def recall_memories(
+        self, space_id: str, text: str, about_user: bool | None = None,
+        person_ids: Iterable[str] | None = None, limit: int = 5,
+    ) -> list[MemoryView]:
         query = _fts_query(text)
         if not query:
             return []
+        clauses = ["memory_fts MATCH ?", "m.space_id = ?", "m.status = 'active'"]
+        params: list[Any] = [query, space_id]
+        if about_user is not None:
+            clauses.append("m.about_user = ?")
+            params.append(1 if about_user else 0)
+        person_ids = list(person_ids) if person_ids is not None else None
+        if person_ids:
+            placeholders = ",".join("?" for _ in person_ids)
+            clauses.append(
+                f"m.id IN (SELECT memory_id FROM memory_people WHERE person_id IN ({placeholders}))"
+            )
+            params.extend(person_ids)
+        params.append(limit)
         with self._connect() as connection:
             rows = connection.execute(
-                """SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
-                   WHERE memory_fts MATCH ? AND m.space_id = ? AND m.status = 'active'
-                     AND m.about_user = 1 ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
-                (query, space_id, limit),
+                f"""SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
+                   WHERE {' AND '.join(clauses)}
+                   ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
+                params,
             ).fetchall()
             return [self._memory_view(connection, row, False) for row in rows]
 
