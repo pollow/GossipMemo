@@ -260,12 +260,8 @@ class SqliteWorldStore:
     GUIDANCE_GOAL_MIN = 3
     GUIDANCE_GOAL_MAX = 5
 
-    def __init__(self, path: Path, rng: random.Random | None = None):
+    def __init__(self, path: Path):
         self.path = path
-        # Learning goals are sampled rather than ranked (see `_guidance`), so
-        # the source of randomness is a constructor dependency: a caller that
-        # needs reproducible sampling passes a seeded Random.
-        self.rng = rng if rng is not None else random.Random()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -2072,7 +2068,15 @@ class SqliteWorldStore:
             )
             return True
 
-    def _guidance(self, connection: sqlite3.Connection, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
+    def _guidance(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        activated_person_ids: Iterable[str] = (),
+        query: str = "",
+        *,
+        version: str,
+    ) -> GuidanceBundle:
         """Return a bounded set; coverage itself never leaves this method.
 
         Hypotheses and learning goals are selected differently on purpose.
@@ -2081,10 +2085,18 @@ class SqliteWorldStore:
         match is a useful thing to confirm. A learning goal is a direction
         rather than a claim: only the consuming agent knows what the
         conversation is currently about, and this method has nothing but a
-        query string to judge with. So goals are not ranked at all — a random
-        3-5 are offered and the agent decides which, if any, fit. Diversity
-        of the pool is what makes the sample useful, and that is the
-        planner's job (it fans out per coverage root).
+        query string to judge with. So goals are not ranked at all — 3-5 are
+        sampled and the agent decides which, if any, fit. Diversity of the
+        pool is what makes the sample useful, and that is the planner's job
+        (it fans out per coverage root).
+
+        The sample is a deterministic function of the context bundle
+        `version` and the candidate pool: a local RNG is seeded from a hash
+        of the two, so identical version + identical pool always produce the
+        identical selection. This keeps the sample stable across repeated
+        reads (KV-cache-friendly for the agent-side prompt prefix) while
+        still rotating whenever the durable context or the pool actually
+        changes.
         """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
@@ -2119,44 +2131,62 @@ class SqliteWorldStore:
                 sum(text.count(g) for g in grams)
             return (relevance, updated[item.id], item.id)
         selected = sorted(hypotheses, key=rank, reverse=True)[:1]
+        pool_ids = sorted(item.id for item in learning_goals)
+        seed = int(hashlib.sha256(
+            f"{version}|{','.join(pool_ids)}".encode()).hexdigest()[:16], 16)
+        goal_rng = random.Random(seed)
         sample_size = min(len(learning_goals),
-                          self.rng.randint(self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
-        selected.extend(self.rng.sample(learning_goals, sample_size))
+                          goal_rng.randint(self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
+        selected.extend(goal_rng.sample(learning_goals, sample_size))
         selected.sort(key=lambda item: (item.kind, item.id))
         return GuidanceBundle(items=selected)
 
+    def _context_state(
+        self, connection: sqlite3.Connection, space_id: str
+    ) -> tuple[UserModelView | None, ContinuityView | None, list[PersonView], str]:
+        """Compute the durable context payload and its version.
+
+        Shared by `context_bundle` and `guidance_bundle` so the turn path
+        derives guidance from the exact same version string the context
+        path would compute for the same space.
+        """
+        user = connection.execute(
+            "SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
+        cont = connection.execute(
+            "SELECT * FROM continuities WHERE space_id = ?", (space_id,)).fetchone()
+        user_view = UserModelView(space_id=space_id, profile_card=_loads(user["profile_card"], {}),
+                                  profile_source_updated_at=user["profile_source_updated_at"],
+                                  profile_updated_at=user["profile_updated_at"]) if user else None
+        continuity = ContinuityView(text=cont["text"], related_person_ids=_loads(cont["related_person_ids"], []),
+                                    through_message_id=cont["through_message_id"]) if cont else None
+        ids = continuity.related_person_ids if continuity else []
+        people = []
+        for person_id in ids:
+            row = connection.execute(
+                "SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'", (person_id, space_id)).fetchone()
+            if row:
+                people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
+                                         profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
+        # Guidance is deliberately outside this payload: the learning-goal
+        # sample is *derived from* the version (see `_guidance`), so hashing
+        # it here would be circular -- the version could never settle.
+        # Excluding it keeps that derivation acyclic while still making
+        # guidance stable for as long as the version itself is unchanged.
+        payload = {"user_model": user_view.model_dump(mode="json") if user_view else None,
+                   "continuity": continuity.model_dump(mode="json") if continuity else None,
+                   "people": [item.model_dump(mode="json") for item in people]}
+        version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
+        return user_view, continuity, people, version
+
     def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
         with self._connect() as connection:
-            return self._guidance(connection, space_id, activated_person_ids, query)
+            _, _, _, version = self._context_state(connection, space_id)
+            return self._guidance(connection, space_id, activated_person_ids, query, version=version)
 
     def context_bundle(self, space_id: str) -> ContextBundle:
         with self._connect() as connection:
-            user = connection.execute(
-                "SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
-            cont = connection.execute(
-                "SELECT * FROM continuities WHERE space_id = ?", (space_id,)).fetchone()
-            user_view = UserModelView(space_id=space_id, profile_card=_loads(user["profile_card"], {}),
-                                      profile_source_updated_at=user["profile_source_updated_at"],
-                                      profile_updated_at=user["profile_updated_at"]) if user else None
-            continuity = ContinuityView(text=cont["text"], related_person_ids=_loads(cont["related_person_ids"], []),
-                                        through_message_id=cont["through_message_id"]) if cont else None
-            ids = continuity.related_person_ids if continuity else []
-            people = []
-            for person_id in ids:
-                row = connection.execute(
-                    "SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'", (person_id, space_id)).fetchone()
-                if row:
-                    people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
-                                             profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
-            guidance = self._guidance(connection, space_id)
-            # Guidance is deliberately outside the version: learning goals are
-            # sampled fresh on every read, so hashing them would invalidate the
-            # caller's cached bundle every turn and defeat the whole point of
-            # the version. The version tracks the durable context state.
-            payload = {"user_model": user_view.model_dump(mode="json") if user_view else None,
-                       "continuity": continuity.model_dump(mode="json") if continuity else None,
-                       "people": [item.model_dump(mode="json") for item in people]}
-            version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
+            user_view, continuity, people, version = self._context_state(connection, space_id)
+            guidance = self._guidance(connection, space_id, version=version)
             return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people, guidance=guidance)
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]:

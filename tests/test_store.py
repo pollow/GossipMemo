@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1568,25 +1567,31 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
     assert store.stale_coverage_spaces() == ["personal"]
 
 
-def _seeded_store(tmp_path, seed: int, goal_count: int) -> SqliteWorldStore:
-    world = SqliteWorldStore(tmp_path / f"guidance-{seed}.db", rng=random.Random(seed))
+def _seeded_store(tmp_path, seed: int, goal_count: int, *, id_prefix: str | None = None) -> SqliteWorldStore:
+    world = SqliteWorldStore(tmp_path / f"guidance-{seed}.db")
     world.initialize()
     world.ensure_space("s")
+    prefix = id_prefix if id_prefix is not None else "g"
     with world._connect() as connection:
         for index in range(goal_count):
             connection.execute(
                 "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
                 "created_at,updated_at) VALUES (?,'s',?,'context','[]','1','1')",
-                (f"g{index:02d}", f"goal {index}"),
+                (f"{prefix}{index:02d}", f"goal {index}"),
             )
     return world
 
 
 def test_guidance_samples_three_to_five_learning_goals(tmp_path):
-    """Goals are sampled, not ranked: only the count and the pool are promised."""
+    """Goals are sampled, not ranked: only the count and the pool are promised.
+
+    The sample is now a deterministic function of the version and the goal
+    pool, so varying the pool's id set (rather than an injected RNG seed) is
+    what drives different sample sizes across iterations here.
+    """
     sizes = set()
     for seed in range(20):
-        world = _seeded_store(tmp_path, seed, goal_count=30)
+        world = _seeded_store(tmp_path, seed, goal_count=30, id_prefix=f"g{seed}-")
         ids = [item.id for item in world.guidance_bundle("s").items]
         assert all(item.startswith("g") for item in ids)
         assert len(set(ids)) == len(ids)
@@ -1595,10 +1600,9 @@ def test_guidance_samples_three_to_five_learning_goals(tmp_path):
 
 
 def test_guidance_ignores_query_relevance_for_learning_goals(tmp_path):
-    """A seeded store returns the same sample whatever the query says."""
+    """The sample is deterministic given a fixed version and pool, whatever the query says."""
     world = _seeded_store(tmp_path, 7, goal_count=30)
     first = [item.id for item in world.guidance_bundle("s", [], "goal 3").items]
-    world.rng.seed(7)
     second = [item.id for item in world.guidance_bundle("s", [], "something else").items]
     assert first == second
 
@@ -1631,13 +1635,27 @@ def test_guidance_returns_the_whole_small_goal_pool(tmp_path):
     assert sorted(item.id for item in world.guidance_bundle("s").items) == ["g00", "g01"]
 
 
-def test_context_version_is_stable_while_guidance_is_sampled(tmp_path):
+def test_guidance_is_stable_across_repeated_reads_at_an_unchanged_version(tmp_path):
+    """Guidance is derived from the version, so an unchanged version must
+    reproduce the identical selection on every read -- this is what keeps
+    the agent-side prompt prefix KV-cache friendly across turns."""
     world = _seeded_store(tmp_path, 3, goal_count=30)
     first = world.context_bundle("s")
     second = world.context_bundle("s")
     assert first.version == second.version
-    assert [item.id for item in first.guidance.items] != [
+    assert [item.id for item in first.guidance.items] == [
         item.id for item in second.guidance.items]
+
+
+def test_guidance_rotates_when_the_version_changes(tmp_path):
+    """A durable context change moves the version, which rotates the sample."""
+    world = _seeded_store(tmp_path, 3, goal_count=30)
+    before = world.context_bundle("s")
+    world.overwrite_user_model("s", {"note": "mutated"})
+    after = world.context_bundle("s")
+    assert after.version != before.version
+    assert [item.id for item in after.guidance.items] != [
+        item.id for item in before.guidance.items]
 
 
 def test_initialize_enables_wal_and_a_short_busy_timeout(store):
