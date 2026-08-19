@@ -58,6 +58,21 @@ def test_continuity_uses_rowid_watermark_and_filters_person_refs(tmp_path: Path)
     assert bundle.version == store.context_bundle("space").version
 
 
+def test_pending_continuities_filters_by_space(tmp_path: Path):
+    store = SqliteWorldStore(tmp_path / "continuity.db")
+    store.initialize()
+    store.record_messages(
+        "space-a", [MessageInput(author="user", content=f"a {i}") for i in range(3)]
+    )
+    store.record_messages(
+        "space-b", [MessageInput(author="user", content=f"b {i}") for i in range(3)]
+    )
+    assert sorted(store.pending_continuities(3)) == ["space-a", "space-b"]
+    assert store.pending_continuities(3, "space-a") == ["space-a"]
+    assert store.pending_continuities(3, "space-b") == ["space-b"]
+    assert store.pending_continuities(3, "space-missing") == []
+
+
 class _ContinuityModel:
     """An `LlmTransport` double; every stage is told apart by prompt marker
     in `complete` (see `tests/test_features.py`'s `FakeModel`).

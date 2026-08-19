@@ -213,7 +213,7 @@ class SocialMemoryWorld:
         if any(state != "completed" for state in states):
             raise RuntimeError("imported message extraction did not complete")
         self._schedule_all_stale()
-        if space_id in self.store.pending_continuities(self.continuity_threshold):
+        if self.store.pending_continuities(self.continuity_threshold, space_id):
             self._schedule_continuity_reason(space_id)
         # Wait for induction spawned by the imported Memories as well.
         while any(
@@ -275,7 +275,7 @@ class SocialMemoryWorld:
         while True:
             self._dirty_intake_spaces.discard(space_id)
             self._drain_extraction_batches(space_id)
-            if space_id in self.store.pending_continuities(self.continuity_threshold):
+            if self.store.pending_continuities(self.continuity_threshold, space_id):
                 self._schedule_continuity_reason(space_id)
             if space_id not in self._dirty_intake_spaces:
                 break

@@ -217,7 +217,8 @@ class WorldStore(Protocol):
         max_message_chars: int | None = None, max_total_chars: int | None = None,
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
 
-    def pending_continuities(self, threshold: int = 20) -> list[str]: ...
+    def pending_continuities(self, threshold: int = 20, space_id: str |
+                             None = None) -> list[str]: ...
 
     def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str |
                                    None, result: ContinuityReasoningResult) -> bool: ...
@@ -2060,13 +2061,19 @@ class SqliteWorldStore:
                 total_chars += len(content)
             return continuity, messages
 
-    def pending_continuities(self, threshold: int = 20) -> list[str]:
+    def pending_continuities(self, threshold: int = 20, space_id: str | None = None) -> list[str]:
         with self._connect() as connection:
-            return [row["space_id"] for row in connection.execute(
+            query = (
                 "SELECT c.space_id FROM continuities c LEFT JOIN messages m "
                 "ON m.space_id = c.space_id AND m.rowid > COALESCE(c.through_message_rowid, 0) "
-                "GROUP BY c.space_id HAVING COUNT(m.rowid) >= ?", (threshold,)
-            ).fetchall()]
+            )
+            params: tuple[Any, ...] = ()
+            if space_id is not None:
+                query += "WHERE c.space_id = ? "
+                params += (space_id,)
+            query += "GROUP BY c.space_id HAVING COUNT(m.rowid) >= ?"
+            params += (threshold,)
+            return [row["space_id"] for row in connection.execute(query, params).fetchall()]
 
     def apply_continuity_reasoning(
         self, space_id: str, expected_through_message_id: str | None,
