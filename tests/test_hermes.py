@@ -136,20 +136,12 @@ def test_hermes_people_tool_precedes_merge_and_guardrail_survives():
     assert "only call this after the user" in merge_description.lower()
 
 
-def test_hermes_labels_guidance_as_tentative_or_optional():
-    formatted = GossipMemoMemoryProvider._format_context({
-        "guidance": {"items": [
-            {"id": "h", "kind": "hypothesis", "content": "Maybe true"},
-            {"id": "g", "kind": "learning_goal", "content": "Learn more"},
-        ]}
-    })
-    assert "Tentative hypothesis: Maybe true" in formatted
-    assert "Optional learning goal: Learn more" in formatted
-    assert "Memory" not in formatted
-
-
 def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
-    """Several goals at once read as an interview script without this framing."""
+    """Several goals at once read as an interview script without this framing.
+
+    This also covers the item labels themselves: guidance renders as
+    "Tentative hypothesis"/"Optional learning goal", never as a Memory.
+    """
     formatted = GossipMemoMemoryProvider._format_context({
         "guidance": {"items": [
             {"id": "h", "kind": "hypothesis", "content": "Maybe true"},
@@ -166,6 +158,7 @@ def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
     # bundle carries hypotheses only.
     assert lines.index(note) < lines.index("Optional learning goal: First")
     assert lines.index("Tentative hypothesis: Maybe true") < lines.index(note)
+    assert "Memory" not in formatted
     hypothesis_only = GossipMemoMemoryProvider._format_context({
         "guidance": {"items": [{"id": "h", "kind": "hypothesis", "content": "Maybe true"}]}
     })

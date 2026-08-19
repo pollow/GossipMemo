@@ -39,14 +39,14 @@ def _recall_handler(request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json={"memories": [{"content": "likes tea"}]})
 
 
-def test_sync_recall_builds_query_params():
+def test_recall_builds_query_params():
+    """Both clients share one query-string builder; check them together."""
+
     client = GossipMemo(
         "http://test", client=httpx.Client(transport=httpx.MockTransport(_recall_handler)))
     result = client.recall("tea", about_user=True, person_ids=["p1", "p2"], limit=5)
     assert result["memories"][0]["content"] == "likes tea"
 
-
-def test_async_recall_builds_query_params():
     async def run():
         client = AsyncGossipMemo(
             "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_recall_handler)))
@@ -68,14 +68,12 @@ def _list_people_handler(request: httpx.Request) -> httpx.Response:
     )
 
 
-def test_sync_list_people_builds_query_params():
+def test_list_people_builds_query_params():
     client = GossipMemo(
         "http://test", client=httpx.Client(transport=httpx.MockTransport(_list_people_handler)))
     result = client.list_people("al", limit=10)
     assert result["people"][0]["display_name"] == "Alice"
 
-
-def test_async_list_people_builds_query_params():
     async def run():
         client = AsyncGossipMemo(
             "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_list_people_handler)))
@@ -99,14 +97,12 @@ def _guidance_handler(request: httpx.Request) -> httpx.Response:
     )
 
 
-def test_sync_guidance_builds_query_params():
+def test_guidance_builds_query_params():
     client = GossipMemo(
         "http://test", client=httpx.Client(transport=httpx.MockTransport(_guidance_handler)))
     result = client.guidance(person_ids=["p1", "p2"], kind="hypothesis", limit=10)
     assert result["items"][0]["id"] == "h1"
 
-
-def test_async_guidance_builds_query_params():
     async def run():
         client = AsyncGossipMemo(
             "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_guidance_handler)))
