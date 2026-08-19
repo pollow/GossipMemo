@@ -12,10 +12,10 @@ from gossipmemo.config import Settings
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
     ContinuityReasoningResult,
-    IngestRequest,
     ManualMemoryRequest,
     MessageInput,
     QueryRequest,
+    TurnRequest,
 )
 from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
@@ -122,9 +122,9 @@ def test_continuity_schedules_asynchronously_at_injected_threshold(tmp_path: Pat
         )
         await world.start()
         try:
-            response = await world.ingest(
+            response = await world.turn(
                 "space",
-                IngestRequest(
+                TurnRequest(
                     messages=[
                         MessageInput(author="user", content="one"),
                         MessageInput(author="user", content="two"),

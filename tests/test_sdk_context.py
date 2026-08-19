@@ -11,15 +11,16 @@ def _handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"version": "v1", "people": []})
     assert request.url.path.endswith("/turns")
     payload = request.read()
+    assert b'"messages":[' in payload
     assert b'"author":"user"' in payload
     assert b'"idempotency_key":"stable"' in payload
-    return httpx.Response(202, json={"status": "accepted", "message_id": "m"})
+    return httpx.Response(202, json={"status": "accepted", "message_ids": ["m"]})
 
 
 def test_sync_context_and_turn_payload_validation():
     client = GossipMemo("http://test", client=httpx.Client(transport=httpx.MockTransport(_handler)))
     assert client.context()["version"] == "v1"
-    assert client.turn(" hello ", idempotency_key="stable")["message_id"] == "m"
+    assert client.turn(" hello ", idempotency_key="stable")["message_ids"] == ["m"]
     try:
         client.prepare_turn({"author": "assistant", "content": "bad"})
     except ValueError:
@@ -121,7 +122,7 @@ def test_async_context_and_turn_payload_validation():
         client = AsyncGossipMemo(
             "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_handler)))
         assert (await client.context())["version"] == "v1"
-        assert (await client.turn("hello", idempotency_key="stable"))["message_id"] == "m"
+        assert (await client.turn("hello", idempotency_key="stable"))["message_ids"] == ["m"]
         await client.close()
 
     asyncio.run(run())

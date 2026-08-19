@@ -760,7 +760,7 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
                 transport=transport, base_url="http://testserver"
             ) as client:
                 ingest = await client.post(
-                    "/v1/spaces/personal/ingest",
+                    "/v1/spaces/personal/turns",
                     json={
                         "messages": [
                             {

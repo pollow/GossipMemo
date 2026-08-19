@@ -265,11 +265,15 @@ Reported Memory 可以参与 reasoning，但不能在归纳时丢失其性质：
 
 HTTP 只是 `SocialMemoryWorld` interface 的 transport adapter。
 
-### 5.1 Ingest
+### 5.1 Turns (write path)
 
 ```http
-POST /v1/spaces/{space_id}/ingest
+POST /v1/spaces/{space_id}/turns
 ```
+
+这是唯一的写入端点，合并了原先分开的 `/ingest` 和 `/turns`：两者的写入路径完全相同
+（`record_messages` + 触发后台 intake），过去唯一的差别只是 `/turns` 限定单条 user
+消息并附带读富化。现在 `messages` 接受 1–100 条、任意 author 顺序的批次：
 
 ```json
 {
@@ -284,18 +288,31 @@ POST /v1/spaces/{space_id}/ingest
         "item_id": "turn_789"
       }
     }
-  ]
+  ],
+  "context_version": null,
+  "memory_limit": 5
 }
 ```
 
-返回：
+返回（202）：
 
 ```json
 {
   "status": "accepted",
-  "message_ids": ["message_123"]
+  "message_ids": ["message_123"],
+  "known_people": [],
+  "memory_recall": [],
+  "guidance": {"items": []},
+  "context_update": null,
+  "context_status": "available"
 }
 ```
+
+读富化（alias matching、guidance、FTS recall、context version 比对，即 5.3 描述的
+turn facade 行为）当且仅当这批消息的**最后一条**消息 `author == "user"` 时才发生，
+用的是那条消息的 content；否则以上字段返回空值，`context_status` 保持
+`"available"`。这条规则由数据本身推导（批次最后一条消息的 author），而不是一个
+`enrich` 之类的布尔开关——加开关等价于让两个端点换皮共存，违背合并的初衷。
 
 ### 5.2 Query
 
@@ -345,9 +362,9 @@ POST /v1/spaces/{space_id}/turns
 
 Context 返回带稳定 version 的 compact UserModel、rolling continuity、continuity-related
 Person cards，以及最多一条 user-owned open Hypothesis 和随机 3–5 条 open/partial
-LearningGoal。Turn 先持久化 user Message，再用 deterministic alias matching、SQLite FTS
-和本轮文字选择相关 context；Person/Relationship guidance 只有 owner 被本轮激活时才返回。
-两条路径都不调用 LLM。
+LearningGoal。Turn（见 5.1）先持久化整批 Message，当批次最后一条消息来自 user 时，
+再用 deterministic alias matching、SQLite FTS 和该条消息文字选择相关 context；
+Person/Relationship guidance 只有 owner 被本轮激活时才返回。两条路径都不调用 LLM。
 
 两类 guidance 的选取方式不同，是刻意的。Hypothesis 是关于某个 owner 的断言，激活的
 Person 已经把它收窄到当轮主体，取最匹配的一条去确认是有意义的。LearningGoal 是长期

@@ -61,15 +61,6 @@ class MessageInput(BaseModel):
         return value.astimezone(timezone.utc)
 
 
-class IngestRequest(BaseModel):
-    messages: list[MessageInput] = Field(min_length=1, max_length=100)
-
-
-class IngestResponse(BaseModel):
-    status: Literal["accepted"] = "accepted"
-    message_ids: list[str]
-
-
 class GuidanceItem(BaseModel):
     """Small, tentative prompts that may help an agent guide a conversation."""
     id: str
@@ -86,23 +77,22 @@ class GuidanceBundle(BaseModel):
 
 
 class TurnRequest(BaseModel):
-    """One user turn, plus the SDK's cached context watermark."""
+    """A batch of messages (durable write), plus the SDK's cached context watermark.
 
-    message: MessageInput
+    This is the merged write path: what used to be a separate `/ingest`
+    endpoint is just a `turns` batch whose last message happens not to be
+    from the user. See `SocialMemoryWorld.turn` for the read-enrichment
+    rule that follows from that.
+    """
+
+    messages: list[MessageInput] = Field(min_length=1, max_length=100)
     context_version: str | None = None
     memory_limit: int = Field(default=5, ge=1, le=10)
-
-    @field_validator("message")
-    @classmethod
-    def require_user_message(cls, value: MessageInput) -> MessageInput:
-        if value.author != "user":
-            raise ValueError("turn message author must be user")
-        return value
 
 
 class TurnResponse(BaseModel):
     status: Literal["accepted"] = "accepted"
-    message_id: str
+    message_ids: list[str]
     known_people: list[PersonView] = Field(default_factory=list)
     memory_recall: list[MemoryView] = Field(default_factory=list)
     guidance: GuidanceBundle = Field(default_factory=GuidanceBundle)

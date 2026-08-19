@@ -71,14 +71,14 @@ def test_turn_matches_longest_alias_and_recalls_user_memory(tmp_path: Path):
         await world.start()
         try:
             response = await world.turn(
-                "s", TurnRequest(message=MessageInput(author="user", content="ALICE likes tea"))
+                "s", TurnRequest(messages=[MessageInput(author="user", content="ALICE likes tea")])
             )
             assert response.status == "accepted"
             assert [person.display_name for person in response.known_people] == ["Alice"]
             assert response.memory_recall[0].content == "Alice likes tea"
             assert store.unbatched_messages("s")
             same = await world.turn(
-                "s", TurnRequest(message=MessageInput(author="user", content="another"),
+                "s", TurnRequest(messages=[MessageInput(author="user", content="another")],
                                  context_version=response.context_update.version)
             )
             assert same.context_update is None
@@ -101,7 +101,7 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
         _ for _ in ()).throw(RuntimeError("offline"))
 
     async def scenario():
-        response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="hello")))
+        response = await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="hello")]))
         assert response.status == "accepted"
         assert response.context_status == "unavailable"
         assert store.pending_extractions()
@@ -110,7 +110,7 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
     store._context_state = original
 
 
-def test_turn_schedules_continuity_and_rejects_assistant(tmp_path: Path):
+def test_turn_schedules_continuity_and_batches_ending_in_assistant_skip_enrichment(tmp_path: Path):
     async def scenario():
         store = SqliteWorldStore(tmp_path / "continuity-turn.db")
         world = SocialMemoryWorld(
@@ -118,8 +118,8 @@ def test_turn_schedules_continuity_and_rejects_assistant(tmp_path: Path):
         )
         await world.start()
         try:
-            await world.turn("s", TurnRequest(message=MessageInput(author="user", content="one")))
-            await world.turn("s", TurnRequest(message=MessageInput(author="user", content="two")))
+            await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="one")]))
+            await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="two")]))
             for _ in range(50):
                 if store.context_bundle("s").continuity.text == "rolling":
                     break
@@ -134,11 +134,37 @@ def test_turn_schedules_continuity_and_rejects_assistant(tmp_path: Path):
             async with app.router.lifespan_context(app):
                 transport = httpx.ASGITransport(app=app)
                 async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                    # A batch whose last message is from the assistant is
+                    # still accepted and persisted, but read-enrichment
+                    # (alias matching, guidance, FTS recall, context
+                    # version comparison) is skipped -- it is derived from
+                    # the batch's last message, not a caller flag.
                     response = await client.post(
                         "/v1/spaces/s/turns",
-                        json={"message": {"author": "assistant", "content": "no"}},
+                        json={"messages": [{"author": "assistant", "content": "no"}]},
                     )
-                    assert response.status_code == 422
+                    assert response.status_code == 202
+                    payload = response.json()
+                    assert payload["known_people"] == []
+                    assert payload["memory_recall"] == []
+                    assert payload["context_update"] is None
+                    assert payload["context_status"] == "available"
+
+                    # A batch ending in a user message still enriches, even
+                    # when an assistant message precedes it in the batch.
+                    enriched = await client.post(
+                        "/v1/spaces/s/turns",
+                        json={
+                            "messages": [
+                                {"author": "assistant", "content": "no"},
+                                {"author": "user", "content": "Alice likes tea"},
+                            ]
+                        },
+                    )
+                    assert enriched.status_code == 202
+                    enriched_payload = enriched.json()
+                    assert enriched_payload["context_status"] == "available"
+                    assert enriched_payload["context_update"] is not None
         finally:
             await world.stop()
 
@@ -174,7 +200,7 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
 
     async def scenario():
         world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
-        response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="Alice?")))
+        response = await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="Alice?")]))
         assert any(item.id == "h" for item in response.guidance.items)
     before = store.context_bundle("s").version
     asyncio.run(scenario())

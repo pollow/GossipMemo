@@ -15,8 +15,6 @@ from .llm import create_llm
 from .logging import configure_logging, elapsed_ms, request_id_context
 from .models import (
     HealthResponse,
-    IngestRequest,
-    IngestResponse,
     ManualMemoryRequest,
     MergePersonRequest,
     MergePersonResponse,
@@ -136,15 +134,6 @@ def create_app(
     @app.get("/healthz", response_model=HealthResponse, include_in_schema=False)
     async def health() -> HealthResponse:
         return world.health()
-
-    @app.post(
-        "/v1/spaces/{space_id}/ingest",
-        response_model=IngestResponse,
-        status_code=status.HTTP_202_ACCEPTED,
-        dependencies=protected,
-    )
-    async def ingest(space_id: str, request: IngestRequest) -> IngestResponse:
-        return await world.ingest(space_id, request)
 
     @app.post(
         "/v1/spaces/{space_id}/turns",

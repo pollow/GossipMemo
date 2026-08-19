@@ -8,9 +8,8 @@ from typing import Any
 
 from .logging import elapsed_ms
 from .models import (
+    GuidanceBundle,
     HealthResponse,
-    IngestRequest,
-    IngestResponse,
     ManualMemoryRequest,
     MergePersonResponse,
     MessageInput,
@@ -158,14 +157,6 @@ class SocialMemoryWorld:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
-        started = asyncio.get_running_loop().time()
-        message_ids = self.store.record_messages(space_id, request.messages)
-        self._schedule_intake(space_id)
-        logger.info("ingest_completed", extra={"space_id": space_id, "message_count": len(
-            message_ids), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
-        return IngestResponse(message_ids=message_ids)
-
     def merge_person(
         self, space_id: str, source_person_id: str, target_person_id: str
     ) -> MergePersonResponse:
@@ -244,18 +235,35 @@ class SocialMemoryWorld:
         }
 
     async def turn(self, space_id: str, request: TurnRequest) -> TurnResponse:
-        """Persist this turn first; all enrichment is best-effort and local."""
+        """Persist this batch first; all enrichment is best-effort and local.
+
+        This is the merged write path for both a plain message batch (the
+        old `/ingest`) and a user turn: they record messages and schedule
+        intake identically, so there is nothing left to branch on except
+        whether read-enrichment (alias matching, guidance, FTS recall,
+        context-version comparison) makes sense for this batch. That is
+        derived from the data itself -- the batch's last message is from
+        the user, or it is not -- rather than from a caller-supplied
+        `enrich` flag, because a flag here would just be `/ingest` and
+        `/turns` wearing the same skin under one route.
+        """
         started = asyncio.get_running_loop().time()
-        message_ids = self.store.record_messages(space_id, [request.message])
+        message_ids = self.store.record_messages(space_id, request.messages)
         self._schedule_intake(space_id)
-        message_id = message_ids[0]
-        known_people, guidance, memory_recall, context_update, context_status = self.store.turn_view(
-            space_id, request.message.content, request.memory_limit, request.context_version,
-        )
-        logger.info("turn_completed", extra={"space_id": space_id, "message_count": 1, "known_people": len(known_people), "recalled_memories": len(
+        last_message = request.messages[-1]
+        known_people: list[Any] = []
+        guidance = GuidanceBundle()
+        memory_recall: list[Any] = []
+        context_update = None
+        context_status = "available"
+        if last_message.author == "user":
+            known_people, guidance, memory_recall, context_update, context_status = self.store.turn_view(
+                space_id, last_message.content, request.memory_limit, request.context_version,
+            )
+        logger.info("turn_completed", extra={"space_id": space_id, "message_count": len(message_ids), "known_people": len(known_people), "recalled_memories": len(
             memory_recall), "context_status": context_status, "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return TurnResponse(
-            message_id=message_id,
+            message_ids=message_ids,
             known_people=known_people,
             memory_recall=memory_recall,
             guidance=guidance,

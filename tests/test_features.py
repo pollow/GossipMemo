@@ -13,7 +13,6 @@ from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
     ExtractionResult,
     ExtractedPerson,
-    IngestRequest,
     ManualMemoryRequest,
     ExtractedMemory,
     MessageInput,
@@ -25,6 +24,7 @@ from gossipmemo.models import (
     ExtractedRelationship,
     SourceRef,
     SupersedeRequest,
+    TurnRequest,
 )
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.llm import OpenAICompatibleAdapter
@@ -309,9 +309,9 @@ def test_extraction_batches_default_to_six_messages(tmp_path):
         )
         await world.start()
         try:
-            await world.ingest(
+            await world.turn(
                 "personal",
-                IngestRequest(
+                TurnRequest(
                     messages=[
                         MessageInput(author="user", content=f"message {index}")
                         for index in range(13)
@@ -347,9 +347,9 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
         )
         await world.start()
         try:
-            await world.ingest(
+            await world.turn(
                 "personal",
-                IngestRequest(
+                TurnRequest(
                     messages=[
                         MessageInput(author="user", content=f"message {index}")
                         for index in range(5)
@@ -359,9 +359,9 @@ def test_partial_extraction_batch_waits_until_full(tmp_path):
             await asyncio.sleep(0)
             assert calls == []
 
-            await world.ingest(
+            await world.turn(
                 "personal",
-                IngestRequest(
+                TurnRequest(
                     messages=[MessageInput(author="assistant", content="message 5")]
                 ),
             )
@@ -643,7 +643,7 @@ def test_sync_and_async_sdk_follow_server_contract():
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if request.url.path.endswith("/ingest"):
+        if request.url.path.endswith("/turns"):
             return httpx.Response(
                 202,
                 json={"status": "accepted", "message_ids": ["message_1"]},

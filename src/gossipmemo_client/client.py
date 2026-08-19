@@ -79,7 +79,7 @@ def _normalise_turn_message(
     source: Any = None,
     idempotency_key: str | None = None,
 ) -> Json:
-    """Normalize the deliberately narrow user message accepted by ``turn``."""
+    """Normalize the deliberately narrow single user message ``turn`` accepts."""
     if isinstance(message, str):
         value: Any = {"content": message}
     else:
@@ -105,6 +105,32 @@ def _normalise_turn_message(
         key = uuid.uuid4().hex
     result["idempotency_key"] = str(key).strip()
     return result
+
+
+def _normalise_turn_messages(
+    message: Any,
+    *,
+    source: Any = None,
+    idempotency_key: str | None = None,
+) -> list[Json]:
+    """Accept one user message or an iterable of them for ``prepare_turn``."""
+    if isinstance(message, str) or isinstance(message, Mapping) or callable(
+        getattr(message, "model_dump", None)
+    ):
+        items: Iterable[Any] = [message]
+    else:
+        try:
+            items = list(message)
+        except TypeError as exc:
+            raise TypeError(
+                "message must be a string, mapping, model, or iterable of those"
+            ) from exc
+        if not items:
+            raise ValueError("messages must contain at least one message")
+    return [
+        _normalise_turn_message(item, source=source, idempotency_key=idempotency_key)
+        for item in items
+    ]
 
 
 def _response_detail(response: httpx.Response) -> str:
@@ -302,13 +328,13 @@ class GossipMemo(_ClientCommon):
         source: Any = None,
         idempotency_key: str | None = None,
     ) -> Json:
-        """Build a validated turn payload; useful to inspect or queue it."""
+        """Build a validated turns payload from one message or a list of them."""
         if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
             raise ValueError("memory_limit must be between 1 and 10")
         if context_version is not None and not str(context_version).strip():
             raise ValueError("context_version must be non-empty when provided")
         return {
-            "message": _normalise_turn_message(message, source=source, idempotency_key=idempotency_key),
+            "messages": _normalise_turn_messages(message, source=source, idempotency_key=idempotency_key),
             "context_version": context_version,
             "memory_limit": memory_limit,
         }
@@ -327,7 +353,14 @@ class GossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
     ) -> Any:
-        """Persist one or more messages and queue background extraction."""
+        """Deprecated: persist one or more messages via the merged turns write path.
+
+        This is now a thin wrapper that POSTs to the same
+        ``/v1/spaces/{space_id}/turns`` endpoint as :meth:`turn`, with a
+        batch whose messages need not end in a user message. Prefer
+        :meth:`turn` directly; this is kept for the "single-field vs
+        messages list" normalization existing callers rely on.
+        """
 
         if messages is not None and not isinstance(messages, str) and any(
             value is not None
@@ -361,7 +394,7 @@ class GossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
             }
         return self._request(
-            "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
+            "POST", self._space_path("turns"), {"messages": _normalise_messages(messages)}
         )
 
     def query(
@@ -612,12 +645,13 @@ class AsyncGossipMemo(_ClientCommon):
         source: Any = None,
         idempotency_key: str | None = None,
     ) -> Json:
+        """Build a validated turns payload from one message or a list of them."""
         if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
             raise ValueError("memory_limit must be between 1 and 10")
         if context_version is not None and not str(context_version).strip():
             raise ValueError("context_version must be non-empty when provided")
         return {
-            "message": _normalise_turn_message(message, source=source, idempotency_key=idempotency_key),
+            "messages": _normalise_turn_messages(message, source=source, idempotency_key=idempotency_key),
             "context_version": context_version,
             "memory_limit": memory_limit,
         }
@@ -635,6 +669,15 @@ class AsyncGossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
     ) -> Any:
+        """Deprecated: persist one or more messages via the merged turns write path.
+
+        This is now a thin wrapper that POSTs to the same
+        ``/v1/spaces/{space_id}/turns`` endpoint as :meth:`turn`, with a
+        batch whose messages need not end in a user message. Prefer
+        :meth:`turn` directly; this is kept for the "single-field vs
+        messages list" normalization existing callers rely on.
+        """
+
         if messages is not None and not isinstance(messages, str) and any(
             value is not None
             for value in (
@@ -667,7 +710,7 @@ class AsyncGossipMemo(_ClientCommon):
                 "idempotency_key": idempotency_key,
             }
         return await self._request(
-            "POST", self._space_path("ingest"), {"messages": _normalise_messages(messages)}
+            "POST", self._space_path("turns"), {"messages": _normalise_messages(messages)}
         )
 
     async def query(

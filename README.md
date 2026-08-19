@@ -148,9 +148,8 @@ from gossipmemo_client import GossipMemo
 
 memory = GossipMemo("http://localhost:8765", space_id="personal")
 
-result = memory.ingest(
-    content="Alice told me Bob may be preparing to leave.",
-    author="user",
+result = memory.turn(
+    "Alice told me Bob may be preparing to leave.",
     source={"provider": "hermes", "conversation_key": "chat-1", "item_id": "turn-1"},
 )
 print(result["message_ids"])
@@ -158,6 +157,12 @@ print(result["message_ids"])
 answer = memory.query("What do I know about Bob?", people=["Bob"])
 print(answer["answer"])
 ```
+
+`turn()` and `ingest()` both write to the same `POST /v1/spaces/{space_id}/turns`
+endpoint; `ingest()` is a deprecated thin wrapper kept for its "single-field vs
+messages list" normalization and for batches whose messages are not
+necessarily user-authored (e.g. importing a whole conversation). Prefer
+`turn()` for new code.
 
 Manual memories can be corrected without erasing history through
 `memory.supersede(...)` or withdrawn through `memory.retract(...)`.
@@ -193,7 +198,7 @@ Writing a message is synchronous and durable. Everything that turns messages
 into semantic memory happens later, off the request path.
 
 ```text
-POST /ingest ─→ Message persisted (idempotent) ─→ returns {"status": "accepted"}
+POST /v1/spaces/{space_id}/turns ─→ Messages persisted (idempotent) ─→ returns {"status": "accepted", "message_ids": [...]}
                      │
                      │  once 6 messages accumulate, or the oldest has waited 30 min
                      ↓
