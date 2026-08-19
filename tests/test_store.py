@@ -2094,6 +2094,7 @@ def test_initialize_enables_wal_and_a_short_busy_timeout(store):
     with store._connect() as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
         assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 1000
+        assert connection.execute("PRAGMA synchronous").fetchone()[0] == 1
 
 
 def test_initialize_fails_loudly_when_wal_is_refused(tmp_path, monkeypatch):
