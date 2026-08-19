@@ -116,7 +116,9 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._prefetch_lock = threading.Lock()
         self._prefetch_cache: dict[str, dict[str, Any]] = {}
         self._context_cache: dict[str, dict[str, Any]] = {}
-        self._pending_turns: dict[str, list[dict[str, str]]] = {}
+        # A conversation is strictly serial, so at most one turn is in flight
+        # per conversation: a single slot, not a list that can only grow.
+        self._current_turn: dict[str, dict[str, Any]] = {}
         self._prefetch_threads: list[threading.Thread] = []
 
     @property
@@ -215,7 +217,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._stop_requested = False
         self._prefetch_cache.clear()
         self._context_cache.clear()
-        self._pending_turns.clear()
+        self._current_turn.clear()
         try:
             self._client = self._client_factory(
                 base_url=base_url,
@@ -252,6 +254,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
         user_content: str,
         assistant_content: str,
         session_id: str = "",
+        *,
+        include_user: bool = True,
     ) -> list[dict[str, Any]]:
         conversation_key = self._conversation_key(session_id)
         now = datetime.now(timezone.utc).isoformat()
@@ -263,20 +267,25 @@ class GossipMemoMemoryProvider(MemoryProvider):
         user_source["metadata"] = {"role": "user"}
         assistant_source = dict(source_base)
         assistant_source["metadata"] = {"role": "assistant"}
-        return [
-            {
-                "author": "user",
-                "content": user_content,
-                "occurred_at": now,
-                "source": user_source,
-            },
+        messages: list[dict[str, Any]] = []
+        if include_user:
+            messages.append(
+                {
+                    "author": "user",
+                    "content": user_content,
+                    "occurred_at": now,
+                    "source": user_source,
+                }
+            )
+        messages.append(
             {
                 "author": "assistant",
                 "content": assistant_content,
                 "occurred_at": now,
                 "source": assistant_source,
-            },
-        ]
+            }
+        )
+        return messages
 
     def _write_loop(self) -> None:
         while True:
@@ -315,19 +324,31 @@ class GossipMemoMemoryProvider(MemoryProvider):
         del messages
         conversation = session_id or self._session_id or "default"
         with self._prefetch_lock:
-            pending = self._pending_turns.get(conversation, [])
-            idem = ""
-            for index, item in enumerate(pending):
-                if item.get("content") == user_content:
-                    idem = item.get("idempotency_key", "")
-                    del pending[index]
-                    break
-        if not idem:
-            idem = uuid.uuid4().hex
+            # The turn is over either way, so the slot is always released here.
+            entry = self._current_turn.pop(conversation, None)
+            if entry is not None and entry.get("content") == user_content:
+                idem = str(entry.get("idempotency_key", ""))
+                persisted = bool(entry.get("persisted"))
+            else:
+                # No prefetch ran for this content (or Hermes called us
+                # directly): assume nothing was written yet.
+                idem = ""
+                persisted = False
+        if persisted:
+            # The prefetch turn already stored the user message, so resending it
+            # would only rely on the server to deduplicate work we can skip.
+            self._queue.put(
+                self._turn_messages(
+                    user_content, assistant_content, session_id, include_user=False
+                )
+            )
+            return
         messages = self._turn_messages(user_content, assistant_content, session_id)
-        messages[0]["idempotency_key"] = idem
-        # The same stable key is used by the turn façade and this asynchronous
-        # assistant write, so a slow prefetch cannot create a duplicate user row.
+        # The idempotency key stays a fuse rather than a routine deduplicator:
+        # the prefetch write may have committed on the server even though its
+        # response never reached us (a timeout), and only this stable key keeps
+        # that ambiguous case from creating a duplicate user row.
+        messages[0]["idempotency_key"] = idem or uuid.uuid4().hex
         self._queue.put(messages)
 
     def _turn_context(self, query: str, key: str) -> tuple[str, str]:
@@ -336,13 +357,20 @@ class GossipMemoMemoryProvider(MemoryProvider):
             return "", ""
         with self._prefetch_lock:
             cached = dict(self._context_cache.get(key, {}))
-            pending = self._pending_turns.setdefault(key, [])
-            entry = next((item for item in pending if item.get("content") == query), None)
-            if entry is None:
-                entry = {"content": query, "idempotency_key": uuid.uuid4().hex, "started": False}
-                pending.append(entry)
+            entry = self._current_turn.get(key)
+            if entry is None or entry.get("content") != query:
+                # A different content means the previous turn is over and its
+                # entry can never be claimed again, so the slot is overwritten.
+                entry = {
+                    "content": query,
+                    "idempotency_key": uuid.uuid4().hex,
+                    "started": False,
+                    "persisted": False,
+                    "event": threading.Event(),
+                }
+                self._current_turn[key] = entry
             idem = entry["idempotency_key"]
-            event = entry.setdefault("event", threading.Event())
+            event = entry["event"]
             if entry.get("started"):
                 started = False
             else:
@@ -370,6 +398,16 @@ class GossipMemoMemoryProvider(MemoryProvider):
             return "", idem
         update = result.get("context_update")
         with self._prefetch_lock:
+            # Only a well-formed response with message IDs proves the user
+            # message reached storage; every other path (exception, timeout,
+            # unexpected body) leaves ``persisted`` false and makes sync_turn
+            # resend the user message.
+            message_ids = result.get("message_ids")
+            entry["persisted"] = bool(
+                isinstance(message_ids, Sequence)
+                and not isinstance(message_ids, (str, bytes))
+                and len(message_ids) > 0
+            )
             if isinstance(update, Mapping):
                 self._context_cache[key] = dict(update)
             elif cached:

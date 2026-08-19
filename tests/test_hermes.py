@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from integrations.hermes.gossipmemo import GossipMemoMemoryProvider
 
@@ -169,3 +170,104 @@ def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
         "guidance": {"items": [{"id": "h", "kind": "hypothesis", "content": "Maybe true"}]}
     })
     assert "About the optional learning goals" not in hypothesis_only
+
+
+class _TurnClient:
+    """A fake SDK client that records turn/ingest calls."""
+
+    def __init__(self, *, turn_result=None, turn_error=None):
+        self.turn_result = turn_result
+        self.turn_error = turn_error
+        self.turn_calls: list[tuple] = []
+        self.ingested: list[list[dict]] = []
+        self.turned = threading.Event()
+        self.received = threading.Event()
+
+    def turn(self, message, **kwargs):
+        self.turn_calls.append((message, kwargs))
+        try:
+            if self.turn_error is not None:
+                raise self.turn_error
+            return self.turn_result
+        finally:
+            self.turned.set()
+
+    def ingest(self, messages):
+        self.ingested.append(messages)
+        self.received.set()
+
+    def close(self):
+        return None
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.005)
+    return predicate()
+
+
+def test_hermes_skips_resending_the_user_message_once_prefetch_persisted_it():
+    client = _TurnClient(turn_result={"message_ids": ["message_1"], "known_people": []})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-persisted")
+    try:
+        provider.queue_prefetch("Alice called.")
+        assert _wait_for(
+            lambda: provider._current_turn.get("s-persisted", {}).get("persisted"))
+        provider.sync_turn("Alice called.", "Noted.")
+        assert client.received.wait(2)
+        batch = client.ingested[0]
+        assert [message["author"] for message in batch] == ["assistant"]
+        assert batch[0]["content"] == "Noted."
+        assert "idempotency_key" not in batch[0]
+        # The slot is released, so nothing accumulates across turns.
+        assert provider._current_turn == {}
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_resends_the_user_message_with_its_key_when_prefetch_failed():
+    client = _TurnClient(turn_error=RuntimeError("server down"))
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-failed")
+    try:
+        provider.queue_prefetch("Bob called.")
+        assert client.turned.wait(2)
+        assert _wait_for(lambda: "s-failed" in provider._current_turn)
+        prefetch_key = provider._current_turn["s-failed"]["idempotency_key"]
+        assert provider._current_turn["s-failed"]["persisted"] is False
+        provider.sync_turn("Bob called.", "Noted.")
+        assert client.received.wait(2)
+        batch = client.ingested[0]
+        assert [message["author"] for message in batch] == ["user", "assistant"]
+        # The key is kept as a fuse: the failed call may still have committed.
+        assert batch[0]["idempotency_key"] == prefetch_key
+        assert batch[0]["idempotency_key"] == client.turn_calls[0][1]["idempotency_key"]
+        assert provider._current_turn == {}
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_keeps_one_turn_slot_per_conversation():
+    client = _TurnClient(turn_result={"message_ids": ["message_1"]})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-slot")
+    try:
+        provider.queue_prefetch("First question.")
+        assert _wait_for(lambda: len(client.turn_calls) == 1)
+        provider.queue_prefetch("Second question.")
+        assert _wait_for(lambda: len(client.turn_calls) == 2)
+        assert list(provider._current_turn) == ["s-slot"]
+        entry = provider._current_turn["s-slot"]
+        assert entry["content"] == "Second question."
+        assert isinstance(entry, dict)
+        # An abandoned first turn leaves nothing behind to reclaim.
+        provider.sync_turn("Second question.", "Noted.")
+        assert client.received.wait(2)
+        assert [message["author"] for message in client.ingested[0]] == ["assistant"]
+        assert provider._current_turn == {}
+    finally:
+        provider.shutdown()
