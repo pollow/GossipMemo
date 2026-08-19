@@ -85,6 +85,37 @@ def test_async_list_people_builds_query_params():
     asyncio.run(run())
 
 
+def _guidance_handler(request: httpx.Request) -> httpx.Response:
+    assert request.url.path.endswith("/guidance")
+    params = dict(request.url.params)
+    assert params["limit"] == "10"
+    assert params["kind"] == "hypothesis"
+    assert request.url.params.get_list("person_id") == ["p1", "p2"]
+    return httpx.Response(
+        200,
+        json={"items": [{"id": "h1", "kind": "hypothesis", "content": "maybe",
+                        "owner_kind": "user", "status": "open"}]},
+    )
+
+
+def test_sync_guidance_builds_query_params():
+    client = GossipMemo(
+        "http://test", client=httpx.Client(transport=httpx.MockTransport(_guidance_handler)))
+    result = client.guidance(person_ids=["p1", "p2"], kind="hypothesis", limit=10)
+    assert result["items"][0]["id"] == "h1"
+
+
+def test_async_guidance_builds_query_params():
+    async def run():
+        client = AsyncGossipMemo(
+            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_guidance_handler)))
+        result = await client.guidance(person_ids=["p1", "p2"], kind="hypothesis", limit=10)
+        assert result["items"][0]["id"] == "h1"
+        await client.close()
+
+    asyncio.run(run())
+
+
 def test_async_context_and_turn_payload_validation():
     async def run():
         client = AsyncGossipMemo(

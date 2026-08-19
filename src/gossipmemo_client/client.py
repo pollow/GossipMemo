@@ -210,6 +210,20 @@ class _ClientCommon:
             params.append(("person_id", person_id))
         return f"{self._space_path('memories')}?{urlencode(params)}"
 
+    def _guidance_path(
+        self,
+        *,
+        person_ids: Sequence[str] | None,
+        kind: str | None,
+        limit: int,
+    ) -> str:
+        params: list[tuple[str, str]] = [("limit", str(limit))]
+        for person_id in person_ids or []:
+            params.append(("person_id", person_id))
+        if kind is not None:
+            params.append(("kind", kind))
+        return f"{self._space_path('guidance')}?{urlencode(params)}"
+
 
 class GossipMemo(_ClientCommon):
     """Synchronous GossipMemo client.
@@ -458,6 +472,26 @@ class GossipMemo(_ClientCommon):
         return self._request(
             "GET",
             self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
+        )
+
+    def guidance(
+        self,
+        *,
+        person_ids: Sequence[str] | None = None,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> Any:
+        """Full, unsampled list of open hypotheses and open/partial learning goals.
+
+        Unlike the small sample riding along in `context()`/`turn()`
+        (deliberately KV-cache-friendly), this returns everything matching
+        the focus filter -- for an agent that explicitly asks what it still
+        wants to find out about the user or about given people.
+        """
+
+        return self._request(
+            "GET",
+            self._guidance_path(person_ids=person_ids, kind=kind, limit=limit),
         )
 
     def list_people(self, q: str = "", *, limit: int = 50) -> Any:
@@ -736,6 +770,26 @@ class AsyncGossipMemo(_ClientCommon):
         return await self._request(
             "GET",
             self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
+        )
+
+    async def guidance(
+        self,
+        *,
+        person_ids: Sequence[str] | None = None,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> Any:
+        """Full, unsampled list of open hypotheses and open/partial learning goals.
+
+        Unlike the small sample riding along in `context()`/`turn()`
+        (deliberately KV-cache-friendly), this returns everything matching
+        the focus filter -- for an agent that explicitly asks what it still
+        wants to find out about the user or about given people.
+        """
+
+        return await self._request(
+            "GET",
+            self._guidance_path(person_ids=person_ids, kind=kind, limit=limit),
         )
 
     async def list_people(self, q: str = "", *, limit: int = 50) -> Any:

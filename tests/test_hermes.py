@@ -36,8 +36,14 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
             self.list_people_calls.append((q, kwargs))
             return {"people": [{"id": "person_1", "display_name": f"match for {q}", "aliases": []}]}
 
+        def guidance(self, **kwargs):
+            self.guidance_calls.append(kwargs)
+            return {"items": [{"id": "h1", "kind": "hypothesis", "content": "maybe true",
+                              "owner_kind": "user", "status": "open"}]}
+
         recall_calls: list = []
         list_people_calls: list = []
+        guidance_calls: list = []
 
         def close(self):
             return None
@@ -82,6 +88,24 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
 
         listing_result = provider.handle_tool_call("gossipmemo_people", {})
         assert "match for" in listing_result
+
+        guidance_result = provider.handle_tool_call(
+            "gossipmemo_guidance",
+            {"person_ids": ["p1"], "kind": "hypothesis", "limit": 500},
+        )
+        assert "maybe true" in guidance_result
+        guidance_kwargs = provider._client.guidance_calls[-1]
+        assert guidance_kwargs["person_ids"] == ["p1"]
+        assert guidance_kwargs["kind"] == "hypothesis"
+        assert guidance_kwargs["limit"] == 200
+
+        default_guidance_result = provider.handle_tool_call("gossipmemo_guidance", {})
+        assert "maybe true" in default_guidance_result
+        assert provider._client.guidance_calls[-1]["kind"] is None
+
+        bad_kind_result = provider.handle_tool_call(
+            "gossipmemo_guidance", {"kind": "nonsense"})
+        assert "error" in bad_kind_result
     finally:
         provider.shutdown()
 
@@ -91,6 +115,15 @@ def test_hermes_tool_schemas_offer_recall_as_the_cheap_default():
     assert "gossipmemo_recall" in schemas
     assert "gossipmemo_query" in schemas["gossipmemo_recall"]["description"]
     assert "gossipmemo_recall" in schemas["gossipmemo_query"]["description"]
+
+
+def test_hermes_guidance_tool_frames_hypotheses_and_goals_as_the_context_bundle_does():
+    schemas = {schema["name"]: schema for schema in GossipMemoMemoryProvider().get_tool_schemas()}
+    assert "gossipmemo_guidance" in schemas
+    description = schemas["gossipmemo_guidance"]["description"].lower()
+    assert "tentative" in description
+    assert "optional" in description
+    assert "not instructions" in description or "not a checklist" in description
 
 
 def test_hermes_people_tool_precedes_merge_and_guardrail_survives():

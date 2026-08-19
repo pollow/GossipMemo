@@ -1860,6 +1860,236 @@ def test_guidance_rotates_when_the_version_changes(tmp_path):
         item.id for item in before.guidance.items]
 
 
+def test_guidance_route_is_protected_llm_free_supports_filters_and_caps_limit(store):
+    pytest.importorskip("fastapi")
+    httpx = pytest.importorskip("httpx")
+
+    from gossipmemo.app import create_app
+    from gossipmemo.config import Settings
+    from gossipmemo.context_budget import ContextBudget
+    from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
+    from gossipmemo.world import SocialMemoryWorld
+
+    class ExplodingModel:
+        configured = True
+        gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+        user_name = "CurrentUser"
+        extraction_policy = "balanced"
+
+        async def aclose(self):
+            return None
+
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            raise AssertionError("guidance route must not call the LLM")
+
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            raise AssertionError("guidance route must not call the LLM")
+
+    store.ensure_space("personal")
+    _insert_hypothesis(store, "h1", "personal", "user", None, "User likes tea.")
+    store.add_manual_memory("personal", ManualMemoryRequest(content="x", people=["Alice"]))
+    alice_id = store.list_people("personal")[0].id
+    _insert_hypothesis(store, "ha", "personal", "person", alice_id, "About Alice.")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
+            "created_at, updated_at) VALUES ('g1', 'personal', 'a goal', 'context', '[]', '1', '1')"
+        )
+
+    async def scenario():
+        world = SocialMemoryWorld(store, ExplodingModel())
+        app = create_app(
+            settings=Settings(
+                database_path=store.path,
+                llm_base_url="http://llm.test/v1",
+                llm_api_key="test-key",
+                llm_model="test-model",
+                api_key="secret-token",
+            ),
+            world=world,
+        )
+        transport = httpx.ASGITransport(app=app)
+        async with app.router.lifespan_context(app):
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                unauthorized = await client.get("/v1/spaces/personal/guidance")
+                assert unauthorized.status_code == 401
+
+                headers = {"Authorization": "Bearer secret-token"}
+                global_scope = await client.get(
+                    "/v1/spaces/personal/guidance", headers=headers)
+                assert global_scope.status_code == 200
+                assert {item["id"] for item in global_scope.json()["items"]} == {"h1", "g1"}
+
+                focused = await client.get(
+                    "/v1/spaces/personal/guidance",
+                    params={"person_id": alice_id},
+                    headers=headers,
+                )
+                assert {item["id"] for item in focused.json()["items"]} == {"h1", "ha", "g1"}
+
+                kind_filtered = await client.get(
+                    "/v1/spaces/personal/guidance",
+                    params={"kind": "hypothesis"},
+                    headers=headers,
+                )
+                assert {item["id"] for item in kind_filtered.json()["items"]} == {"h1"}
+
+                bad_kind = await client.get(
+                    "/v1/spaces/personal/guidance",
+                    params={"kind": "nonsense"},
+                    headers=headers,
+                )
+                assert bad_kind.status_code == 422
+
+                capped = await client.get(
+                    "/v1/spaces/personal/guidance",
+                    params={"limit": "1"},
+                    headers=headers,
+                )
+                assert capped.status_code == 200
+                assert len(capped.json()["items"]) == 1
+
+    asyncio.run(scenario())
+
+
+def _insert_hypothesis(
+    store: SqliteWorldStore, hypothesis_id: str, space_id: str,
+    owner_kind: str, owner_id: str | None, content: str, status: str = "open",
+) -> None:
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO hypotheses(id, space_id, owner_kind, owner_id, content, kind, "
+            "confidence, status, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, 'impression', 'low', ?, '1', '1')",
+            (hypothesis_id, space_id, owner_kind, owner_id, content, status),
+        )
+
+
+def _insert_relationship(store: SqliteWorldStore, relationship_id: str, space_id: str,
+                         person_a_id: str, person_b_id: str) -> None:
+    ordered = sorted([person_a_id, person_b_id])
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO relationships(id, space_id, person_a_id, person_b_id, "
+            "created_at, updated_at) VALUES (?, ?, ?, ?, '1', '1')",
+            (relationship_id, space_id, ordered[0], ordered[1]),
+        )
+
+
+def test_list_guidance_includes_user_scoped_items_by_default(store):
+    """User-scoped hypotheses and goals always come back, no focus needed."""
+    store.ensure_space("personal")
+    _insert_hypothesis(store, "h1", "personal", "user", None, "User likes tea.")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
+            "created_at, updated_at) VALUES ('g1', 'personal', 'What do they do for fun?', "
+            "'context', '[]', '1', '1')"
+        )
+    items = store.list_guidance("personal")
+    assert {(item.id, item.kind, item.status) for item in items} == {
+        ("h1", "hypothesis", "open"),
+        ("g1", "learning_goal", "open"),
+    }
+
+
+def test_list_guidance_person_focus_filter_excludes_unrelated_people(store):
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="x", people=["Alice", "Bob"]))
+    people = {p.display_name: p.id for p in store.list_people("personal")}
+    _insert_hypothesis(store, "ha", "personal", "person", people["Alice"], "About Alice.")
+    _insert_hypothesis(store, "hb", "personal", "person", people["Bob"], "About Bob.")
+
+    alice_only = store.list_guidance("personal", person_ids=[people["Alice"]])
+    assert [item.id for item in alice_only] == ["ha"]
+
+    neither = store.list_guidance("personal")
+    assert neither == []
+
+
+def test_list_guidance_reaches_relationship_owned_items_via_member_people(store):
+    store.add_manual_memory(
+        "personal", ManualMemoryRequest(content="x", people=["Alice", "Bob"]))
+    people = {p.display_name: p.id for p in store.list_people("personal")}
+    _insert_relationship(store, "rel1", "personal", people["Alice"], people["Bob"])
+    _insert_hypothesis(store, "hr", "personal", "relationship", "rel1", "Close friends.")
+
+    assert store.list_guidance("personal") == []
+    reached = store.list_guidance("personal", person_ids=[people["Alice"]])
+    assert [item.id for item in reached] == ["hr"]
+
+
+def test_list_guidance_includes_partial_goals(store):
+    store.ensure_space("personal")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, status, "
+            "created_at, updated_at) VALUES ('gp', 'personal', 'Half answered', 'context', "
+            "'[]', 'partial', '1', '1')"
+        )
+    items = store.list_guidance("personal")
+    assert [(item.id, item.status) for item in items] == [("gp", "partial")]
+
+
+def test_list_guidance_excludes_closed_and_resolved_items(store):
+    store.ensure_space("personal")
+    _insert_hypothesis(store, "h_open", "personal", "user", None, "open one")
+    _insert_hypothesis(store, "h_promoted", "personal", "user",
+                       None, "promoted one", status="promoted")
+    _insert_hypothesis(store, "h_rejected", "personal", "user",
+                       None, "rejected one", status="rejected")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, status, "
+            "created_at, updated_at) VALUES ('g_answered', 'personal', 'answered', 'context', "
+            "'[]', 'answered', '1', '1')"
+        )
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, status, "
+            "created_at, updated_at) VALUES ('g_retired', 'personal', 'retired', 'context', "
+            "'[]', 'retired', '1', '1')"
+        )
+    items = store.list_guidance("personal")
+    assert [item.id for item in items] == ["h_open"]
+
+
+def test_list_guidance_limit_is_honored(store):
+    store.ensure_space("personal")
+    for index in range(5):
+        _insert_hypothesis(store, f"h{index}", "personal", "user", None, f"claim {index}")
+    assert len(store.list_guidance("personal", limit=2)) == 2
+    assert len(store.list_guidance("personal", limit=50)) == 5
+
+
+def test_list_guidance_kind_filter_restricts_to_one_kind(store):
+    store.ensure_space("personal")
+    _insert_hypothesis(store, "h1", "personal", "user", None, "a hypothesis")
+    with store._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
+            "created_at, updated_at) VALUES ('g1', 'personal', 'a goal', 'context', '[]', '1', '1')"
+        )
+    only_hypotheses = store.list_guidance("personal", kind="hypothesis")
+    assert [item.id for item in only_hypotheses] == ["h1"]
+    only_goals = store.list_guidance("personal", kind="learning_goal")
+    assert [item.id for item in only_goals] == ["g1"]
+    both = store.list_guidance("personal")
+    assert {item.id for item in both} == {"h1", "g1"}
+
+
+def test_guidance_bundle_sampling_is_unaffected_by_the_list_guidance_refactor(tmp_path):
+    """`_guidance` must keep sampling; `list_guidance` must not, after sharing the filter SQL."""
+    world = _seeded_store(tmp_path, 99, goal_count=30)
+    sampled = world.guidance_bundle("s").items
+    assert 3 <= len(sampled) <= 5
+    full = world.list_guidance("s", kind="learning_goal", limit=1000)
+    assert len(full) == 30
+
+
 def test_initialize_enables_wal_and_a_short_busy_timeout(store):
     with store._connect() as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"

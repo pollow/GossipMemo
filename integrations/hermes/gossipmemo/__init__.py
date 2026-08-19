@@ -621,6 +621,29 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 },
             ),
             _schema(
+                "gossipmemo_guidance",
+                "Retrieve the open learning goals and working hypotheses GossipMemo currently "
+                "holds for the user, or for given people -- the things it still wants to find "
+                "out or is tentatively inferring. This is the full list for an explicit ask, not "
+                "the small sample that already rides along in context/turn prefetch. Treat "
+                "hypotheses as tentative: never state one to the user as settled fact. Treat "
+                "learning goals as optional directions, not instructions to follow or a "
+                "checklist to work through -- use one only if the conversation already touches "
+                "it, in your own words.",
+                {
+                    "person_ids": {
+                        "type": "array", "items": {"type": "string"},
+                        "description": "Optional person IDs to focus on. Omit for the user/global scope.",
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["hypothesis", "learning_goal"],
+                        "description": "Restrict to just hypotheses or just learning goals. Omit for both.",
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+                },
+            ),
+            _schema(
                 "gossipmemo_merge_people",
                 "Merge two confirmed Person records. Use gossipmemo_people first to "
                 "discover candidate duplicates. Only call this after the user "
@@ -733,6 +756,18 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 q = str(args.get("q", "")).strip()
                 limit = min(max(int(args.get("limit", 50)), 1), 200)
                 result = client.list_people(q, limit=limit)
+                return _json_result(result)
+            if tool_name == "gossipmemo_guidance":
+                kind = args.get("kind")
+                kind = str(kind).strip() if kind else None
+                if kind and kind not in ("hypothesis", "learning_goal"):
+                    return _json_result(
+                        {"error": "kind must be 'hypothesis' or 'learning_goal'"})
+                result = client.guidance(
+                    person_ids=args.get("person_ids") or [],
+                    kind=kind,
+                    limit=min(max(int(args.get("limit", 50)), 1), 200),
+                )
                 return _json_result(result)
             if tool_name == "gossipmemo_merge_people":
                 source_person_id = str(args.get("source_person_id", "")).strip()

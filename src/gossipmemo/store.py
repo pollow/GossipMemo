@@ -220,8 +220,14 @@ class WorldStore(Protocol):
                                    None, result: ContinuityReasoningResult) -> bool: ...
 
     def context_bundle(self, space_id: str) -> ContextBundle: ...
+
     def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (
     ), query: str = "") -> GuidanceBundle: ...
+
+    def list_guidance(
+        self, space_id: str, person_ids: Iterable[str] = (),
+        kind: str | None = None, limit: int = 50,
+    ) -> list[GuidanceItem]: ...
 
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
 
@@ -2078,6 +2084,36 @@ class SqliteWorldStore:
             )
             return True
 
+    def _open_hypothesis_rows(
+        self, connection: sqlite3.Connection, space_id: str, person_ids: tuple[str, ...],
+    ) -> list[sqlite3.Row]:
+        """Open hypotheses reachable from `person_ids`, user-scoped ones always included.
+
+        Shared by `_guidance` (sampled) and `list_guidance` (full list) so the
+        owner-filtering shape cannot drift between the two paths.
+        """
+        placeholders = ','.join('?' for _ in person_ids) or 'NULL'
+        return connection.execute(
+            f"SELECT id, owner_kind, owner_id, content, confidence, status, updated_at FROM hypotheses "
+            f"WHERE space_id = ? AND status = 'open' AND (owner_kind = 'user' OR (owner_kind = 'person' AND owner_id IN ({placeholders})) OR "
+            f"(owner_kind = 'relationship' AND owner_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "ORDER BY updated_at DESC, id",
+            (space_id, *person_ids, space_id, *person_ids, *person_ids),
+        ).fetchall()
+
+    def _open_learning_goal_rows(
+        self, connection: sqlite3.Connection, space_id: str, person_ids: tuple[str, ...],
+    ) -> list[sqlite3.Row]:
+        """Open/partial learning goals reachable from `person_ids`; mirrors `_open_hypothesis_rows`."""
+        placeholders = ','.join('?' for _ in person_ids) or 'NULL'
+        return connection.execute(
+            f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
+            f"WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' OR (focus_kind = 'person' AND focus_id IN ({placeholders})) OR "
+            f"(focus_kind = 'relationship' AND focus_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "ORDER BY updated_at DESC, id",
+            (space_id, *person_ids, space_id, *person_ids, *person_ids),
+        ).fetchall()
+
     def _guidance(
         self,
         connection: sqlite3.Connection,
@@ -2109,24 +2145,11 @@ class SqliteWorldStore:
         changes.
         """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
-        placeholders = ','.join('?' for _ in person_ids) or 'NULL'
-        rows = connection.execute(
-            f"SELECT id, owner_kind, owner_id, content, confidence, status, updated_at FROM hypotheses "
-            f"WHERE space_id = ? AND status = 'open' AND (owner_kind = 'user' OR (owner_kind = 'person' AND owner_id IN ({placeholders})) OR "
-            f"(owner_kind = 'relationship' AND owner_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
-            "ORDER BY updated_at DESC, id",
-            (space_id, *person_ids, space_id, *person_ids, *person_ids),
-        ).fetchall()
+        rows = self._open_hypothesis_rows(connection, space_id, person_ids)
         hypotheses = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
                                    owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
         updated = {row['id']: row['updated_at'] for row in rows}
-        goals = connection.execute(
-            f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
-            f"WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' OR (focus_kind = 'person' AND focus_id IN ({placeholders})) OR "
-            f"(focus_kind = 'relationship' AND focus_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
-            "ORDER BY updated_at DESC, id",
-            (space_id, *person_ids, space_id, *person_ids, *person_ids),
-        ).fetchall()
+        goals = self._open_learning_goal_rows(connection, space_id, person_ids)
         learning_goals = [GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
                                        owner_kind=row['focus_kind'], owner_id=row['focus_id'],
                                        status=row['status']) for row in goals]
@@ -2192,6 +2215,37 @@ class SqliteWorldStore:
         with self._connect() as connection:
             _, _, _, version = self._context_state(connection, space_id)
             return self._guidance(connection, space_id, activated_person_ids, query, version=version)
+
+    def list_guidance(
+        self, space_id: str, person_ids: Iterable[str] = (),
+        kind: str | None = None, limit: int = 50,
+    ) -> list[GuidanceItem]:
+        """Return the full set of open hypotheses and open/partial learning goals for a focus.
+
+        Unlike `_guidance` (which samples a small, version-stable set for the
+        passive, KV-cache-friendly context bundle), this is for an agent that
+        explicitly asks: it returns everything matching the owner/focus
+        filter, unsampled and not ranked by anything but recency. It shares
+        the exact filtering SQL with `_guidance` via `_open_hypothesis_rows`
+        and `_open_learning_goal_rows` so the two paths cannot drift apart.
+        """
+        ids = tuple(dict.fromkeys(person_ids))
+        capped = max(0, limit)
+        items: list[GuidanceItem] = []
+        with self._connect() as connection:
+            if kind in (None, 'hypothesis'):
+                rows = self._open_hypothesis_rows(connection, space_id, ids)
+                items.extend(GuidanceItem(
+                    id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
+                    owner_id=row['owner_id'], status=row['status'], confidence=row['confidence'],
+                ) for row in rows)
+            if kind in (None, 'learning_goal'):
+                rows = self._open_learning_goal_rows(connection, space_id, ids)
+                items.extend(GuidanceItem(
+                    id=row['id'], kind='learning_goal', content=row['prompt'],
+                    owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status'],
+                ) for row in rows)
+        return items[:capped]
 
     def context_bundle(self, space_id: str) -> ContextBundle:
         with self._connect() as connection:

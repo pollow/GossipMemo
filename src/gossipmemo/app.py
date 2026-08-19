@@ -168,6 +168,25 @@ def create_app(
         return world.store.context_bundle(space_id).model_dump()
 
     @app.get(
+        "/v1/spaces/{space_id}/guidance",
+        dependencies=protected,
+    )
+    async def list_guidance(
+        space_id: str,
+        person_id: Annotated[list[str] | None, Query()] = None,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> dict:
+        if kind is not None and kind not in ("hypothesis", "learning_goal"):
+            raise HTTPException(
+                status_code=422, detail="kind must be 'hypothesis' or 'learning_goal'")
+        capped_limit = max(0, min(limit, 200))
+        items = world.store.list_guidance(
+            space_id, person_id or [], kind=kind, limit=capped_limit,
+        )
+        return {"items": [item.model_dump() for item in items]}
+
+    @app.get(
         "/v1/spaces/{space_id}/people",
         dependencies=protected,
     )
