@@ -92,8 +92,13 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
     store = SqliteWorldStore(tmp_path / "turn-fail.db")
     store.initialize()
     world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
-    original = store.context_bundle
-    store.context_bundle = lambda space_id: (_ for _ in ()).throw(RuntimeError("offline"))
+    original = store._context_state
+    # `turn_view` now shares one `_context_state` read across guidance and
+    # the context bundle, so that shared read is the surface to fail here
+    # (this used to patch `context_bundle` directly, back when the turn
+    # path called it as an independent, separately-connected store call).
+    store._context_state = lambda connection, space_id: (
+        _ for _ in ()).throw(RuntimeError("offline"))
 
     async def scenario():
         response = await world.turn("s", TurnRequest(message=MessageInput(author="user", content="hello")))
@@ -102,7 +107,7 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
         assert store.pending_extractions()
 
     asyncio.run(scenario())
-    store.context_bundle = original
+    store._context_state = original
 
 
 def test_turn_schedules_continuity_and_rejects_assistant(tmp_path: Path):

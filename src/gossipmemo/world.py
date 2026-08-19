@@ -8,8 +8,6 @@ from typing import Any
 
 from .logging import elapsed_ms
 from .models import (
-    ContextBundle,
-    GuidanceBundle,
     HealthResponse,
     IngestRequest,
     IngestResponse,
@@ -251,36 +249,9 @@ class SocialMemoryWorld:
         message_ids = self.store.record_messages(space_id, [request.message])
         self._schedule_intake(space_id)
         message_id = message_ids[0]
-        known_people = []
-        memory_recall = []
-        context_update: ContextBundle | None = None
-        guidance = GuidanceBundle()
-        context_status = "available"
-        try:
-            known_people = self.store.match_people_in_text(space_id, request.message.content)
-        except Exception:
-            context_status = "unavailable"
-            logger.exception("turn person matching failed for %s", space_id)
-        try:
-            guidance = self.store.guidance_bundle(
-                space_id, [person.id for person in known_people], request.message.content
-            )
-        except Exception:
-            context_status = "unavailable"
-            logger.exception("turn guidance preparation failed for %s", space_id)
-        try:
-            memory_recall = self.store.recall_user_memories(
-                space_id, request.message.content, request.memory_limit
-            )
-        except Exception:
-            logger.exception("turn memory recall failed for %s", space_id)
-        try:
-            latest = self.store.context_bundle(space_id)
-            if latest.version != request.context_version:
-                context_update = latest
-        except Exception:
-            context_status = "unavailable"
-            logger.exception("turn context preparation failed for %s", space_id)
+        known_people, guidance, memory_recall, context_update, context_status = self.store.turn_view(
+            space_id, request.message.content, request.memory_limit, request.context_version,
+        )
         logger.info("turn_completed", extra={"space_id": space_id, "message_count": 1, "known_people": len(known_people), "recalled_memories": len(
             memory_recall), "context_status": context_status, "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return TurnResponse(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import re
 import sqlite3
@@ -50,6 +51,8 @@ from .models import (
     utc_now,
 )
 
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXTRACTION_COMPARISON_LIMIT = 12
 
@@ -220,6 +223,10 @@ class WorldStore(Protocol):
                                    None, result: ContinuityReasoningResult) -> bool: ...
 
     def context_bundle(self, space_id: str) -> ContextBundle: ...
+
+    def turn_view(
+        self, space_id: str, text: str, memory_limit: int, known_version: str | None,
+    ) -> tuple[list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None, str]: ...
 
     def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (
     ), query: str = "") -> GuidanceBundle: ...
@@ -2261,6 +2268,77 @@ class SqliteWorldStore:
             guidance = self._guidance(connection, space_id, version=version)
             return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people, guidance=guidance)
 
+    def turn_view(
+        self, space_id: str, text: str, memory_limit: int, known_version: str | None,
+    ) -> tuple[list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None, str]:
+        """One connection, one `_context_state` call, for the whole turn read path.
+
+        `world.turn` used to make four separate store calls -- alias
+        matching, `guidance_bundle`, `recall_user_memories`, and
+        `context_bundle` -- each opening its own connection, with
+        `guidance_bundle` and `context_bundle` *each* recomputing
+        `_context_state` (the `user_models`/`continuities`/related-people
+        read plus the version hash). This does the same reads once, on one
+        connection, and only builds the `ContextBundle` when `known_version`
+        is stale.
+
+        Degrade granularity mirrors the old per-call try/except in
+        `world.turn`: alias matching and the shared context-state-plus-
+        guidance step each independently flip `context_status` to
+        `"unavailable"` on failure (matching the old `match_people_in_text`
+        and `guidance_bundle` failures); memory recall failure is logged
+        only, same as before; building the final `ContextBundle` (once we
+        know a fresh version is needed) is its own guarded step, same as
+        the old `context_bundle` failure.
+
+        Guidance sampling is deliberately derived from the exact same
+        `version` the (possibly returned) `ContextBundle` uses -- see
+        `_guidance`'s docstring -- which now holds automatically since both
+        come from the single `_context_state` call below.
+        """
+        known_people: list[PersonView] = []
+        memory_recall: list[MemoryView] = []
+        context_update: ContextBundle | None = None
+        guidance = GuidanceBundle()
+        context_status = "available"
+        with self._connect() as connection:
+            try:
+                known_people = self._match_people(connection, space_id, text)
+            except Exception:
+                context_status = "unavailable"
+                logger.exception("turn person matching failed for %s", space_id)
+            state: tuple[UserModelView | None, ContinuityView |
+                         None, list[PersonView], str] | None = None
+            try:
+                state = self._context_state(connection, space_id)
+                _, _, _, version = state
+                guidance = self._guidance(
+                    connection, space_id,
+                    [person.id for person in known_people], text, version=version,
+                )
+            except Exception:
+                context_status = "unavailable"
+                logger.exception("turn guidance preparation failed for %s", space_id)
+            try:
+                memory_recall = self._recall_memories(
+                    connection, space_id, text, about_user=True, limit=memory_limit,
+                )
+            except Exception:
+                logger.exception("turn memory recall failed for %s", space_id)
+            if state is not None:
+                try:
+                    user_view, continuity, people, version = state
+                    if version != known_version:
+                        generic_guidance = self._guidance(connection, space_id, version=version)
+                        context_update = ContextBundle(
+                            version=version, user_model=user_view, continuity=continuity,
+                            people=people, guidance=generic_guidance,
+                        )
+                except Exception:
+                    context_status = "unavailable"
+                    logger.exception("turn context preparation failed for %s", space_id)
+        return known_people, guidance, memory_recall, context_update, context_status
+
     def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]:
         """Resolve explicit aliases without creating people or invoking an LLM."""
         with self._connect() as connection:
@@ -2542,6 +2620,18 @@ class SqliteWorldStore:
         self, space_id: str, text: str, about_user: bool | None = None,
         person_ids: Iterable[str] | None = None, limit: int = 5,
     ) -> list[MemoryView]:
+        with self._connect() as connection:
+            return self._recall_memories(
+                connection, space_id, text, about_user=about_user,
+                person_ids=person_ids, limit=limit,
+            )
+
+    def _recall_memories(
+        self, connection: sqlite3.Connection, space_id: str, text: str,
+        about_user: bool | None = None, person_ids: Iterable[str] | None = None,
+        limit: int = 5,
+    ) -> list[MemoryView]:
+        """FTS recall on a caller's connection, so `turn_view` can share it."""
         query = _fts_query(text)
         if not query:
             return []
@@ -2558,14 +2648,13 @@ class SqliteWorldStore:
             )
             params.extend(person_ids)
         params.append(limit)
-        with self._connect() as connection:
-            rows = connection.execute(
-                f"""SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
-                   WHERE {' AND '.join(clauses)}
-                   ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
-                params,
-            ).fetchall()
-            return [self._memory_view(connection, row, False) for row in rows]
+        rows = connection.execute(
+            f"""SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
+               WHERE {' AND '.join(clauses)}
+               ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+        return [self._memory_view(connection, row, False) for row in rows]
 
     def _user_model_watermark(self, connection: sqlite3.Connection, space_id: str) -> str | None:
         row = connection.execute(
