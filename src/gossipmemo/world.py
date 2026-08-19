@@ -83,6 +83,7 @@ class SocialMemoryWorld:
         self._tasks: set[asyncio.Task[Any]] = set()
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
+        self._dirty_intake_spaces: set[str] = set()
         self._background_errors: dict[tuple[str, str, str], Exception] = {}
         self._stopping = False
         self._induction_task: asyncio.Task[None] | None = None
@@ -162,9 +163,7 @@ class SocialMemoryWorld:
     async def ingest(self, space_id: str, request: IngestRequest) -> IngestResponse:
         started = asyncio.get_running_loop().time()
         message_ids = self.store.record_messages(space_id, request.messages)
-        self._drain_extraction_batches(space_id)
-        if space_id in self.store.pending_continuities(self.continuity_threshold):
-            self._schedule_continuity_reason(space_id)
+        self._schedule_intake(space_id)
         logger.info("ingest_completed", extra={"space_id": space_id, "message_count": len(
             message_ids), "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
         return IngestResponse(message_ids=message_ids)
@@ -250,9 +249,7 @@ class SocialMemoryWorld:
         """Persist this turn first; all enrichment is best-effort and local."""
         started = asyncio.get_running_loop().time()
         message_ids = self.store.record_messages(space_id, [request.message])
-        self._drain_extraction_batches(space_id)
-        if space_id in self.store.pending_continuities(self.continuity_threshold):
-            self._schedule_continuity_reason(space_id)
+        self._schedule_intake(space_id)
         message_id = message_ids[0]
         known_people = []
         memory_recall = []
@@ -294,6 +291,23 @@ class SocialMemoryWorld:
             context_update=context_update,
             context_status=context_status,
         )
+
+    def _schedule_intake(self, space_id: str) -> None:
+        """Move batch-drain + continuity scheduling off the request path."""
+        self._dirty_intake_spaces.add(space_id)
+        self._spawn(("intake", space_id, space_id), self._intake_loop(space_id))
+
+    async def _intake_loop(self, space_id: str) -> None:
+        # Loop again if new messages marked this space dirty while we were
+        # draining, so nothing arriving between the check and task end is
+        # missed. The 30-minute partial flush remains the final backstop.
+        while True:
+            self._dirty_intake_spaces.discard(space_id)
+            self._drain_extraction_batches(space_id)
+            if space_id in self.store.pending_continuities(self.continuity_threshold):
+                self._schedule_continuity_reason(space_id)
+            if space_id not in self._dirty_intake_spaces:
+                break
 
     def _catch_up(self, reasoner: Reasoner, space_id: str) -> Coroutine[Any, Any, None]:
         # The driver contributes only the stop predicate; the reasoner owns
