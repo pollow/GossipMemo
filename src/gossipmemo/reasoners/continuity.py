@@ -155,7 +155,7 @@ def build_continuity_reasoner(store: WorldStore, model: LlmTransport) -> Descrip
     reason_continuity = partial(_reason_continuity, model)
 
     def load_context(space_id: str):
-        context = store.continuity_context(space_id, limit=None)
+        context = store.continuity_context(space_id)
         if not context:
             return None
         _, messages = context

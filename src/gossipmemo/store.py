@@ -213,8 +213,7 @@ class WorldStore(Protocol):
     ) -> None: ...
 
     def continuity_context(
-        self, space_id: str, limit: int | None = 32,
-        max_message_chars: int | None = None, max_total_chars: int | None = None,
+        self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
 
     def pending_continuities(self, threshold: int = 20, space_id: str |
@@ -2016,8 +2015,7 @@ class SqliteWorldStore:
             return True
 
     def continuity_context(
-        self, space_id: str, limit: int | None = 32,
-        max_message_chars: int | None = None, max_total_chars: int | None = None,
+        self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None:
         with self._connect() as connection:
             row = connection.execute(
@@ -2034,31 +2032,21 @@ class SqliteWorldStore:
                 after = 0
             else:
                 after = row["through_message_rowid"]
-            query = "SELECT * FROM messages WHERE space_id = ? AND rowid > ? ORDER BY rowid"
-            params: tuple[Any, ...] = (space_id, after)
-            if limit is not None:
-                query += " LIMIT ?"
-                params += (limit,)
-            rows = connection.execute(query, params).fetchall()
-            messages: list[ModelMessage] = []
-            total_chars = 0
-            for item in rows:
-                if max_total_chars is not None and total_chars >= max_total_chars:
-                    break
-                content = item["content"]
-                if max_message_chars is not None:
-                    content = content[:max_message_chars]
-                if max_total_chars is not None:
-                    content = content[:max_total_chars - total_chars]
-                messages.append(ModelMessage(
+            rows = connection.execute(
+                "SELECT * FROM messages WHERE space_id = ? AND rowid > ? ORDER BY rowid",
+                (space_id, after),
+            ).fetchall()
+            messages = [
+                ModelMessage(
                     id=item["id"], space_id=item["space_id"], author=item["author"],
-                    content=content, occurred_at=item["occurred_at"],
+                    content=item["content"], occurred_at=item["occurred_at"],
                     source_provider=item["source_provider"],
                     source_conversation_key=item["source_conversation_key"],
                     source_item_id=item["source_item_id"],
                     source_metadata=_loads(item["source_metadata"], {}),
-                ))
-                total_chars += len(content)
+                )
+                for item in rows
+            ]
             return continuity, messages
 
     def pending_continuities(self, threshold: int = 20, space_id: str | None = None) -> list[str]:

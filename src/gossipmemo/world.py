@@ -56,7 +56,6 @@ class SocialMemoryWorld:
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
         continuity_threshold: int = 20,
-        reasoning_pipeline_order: tuple[str, ...] = DEFAULT_REASONING_PIPELINE,
     ) -> None:
         self.store = store
         self.model = model
@@ -74,7 +73,7 @@ class SocialMemoryWorld:
         self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
         self._extraction_reasoner: Reasoner = build_extraction_reasoner(self.store, self.model)
         self.reasoning_pipeline = ReasoningPipeline(
-            [reasoners[name] for name in reasoning_pipeline_order],
+            [reasoners[name] for name in DEFAULT_REASONING_PIPELINE],
             should_continue=lambda: not self._stopping,
         )
         self._tasks: set[asyncio.Task[Any]] = set()
