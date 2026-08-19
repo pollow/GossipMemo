@@ -200,18 +200,6 @@ class WorldStore(Protocol):
     def apply_goal_planning(self, space_id: str, expected_revision: int,
                             result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
 
-    def apply_inferred_memory_actions(
-        self, space_id: str, owner_kind: str, owner_id: str | None,
-        source_memory_ids: set[str], context_inferred_memory_ids: set[str],
-        actions: InferredMemoryActions,
-    ) -> None: ...
-
-    def apply_hypothesis_actions(
-        self, space_id: str, owner_kind: str, owner_id: str | None,
-        source_memory_ids: set[str], context_hypothesis_ids: set[str],
-        actions: HypothesisActions,
-    ) -> None: ...
-
     def continuity_context(
         self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
@@ -1465,14 +1453,10 @@ class SqliteWorldStore:
             )
             matched.add(memory_id)
 
-    def apply_inferred_memory_actions(
-        self,
-        space_id: str,
-        owner_kind: str,
-        owner_id: str | None,
-        source_memory_ids: set[str],
-        context_inferred_memory_ids: set[str],
-        actions: InferredMemoryActions,
+    def _apply_inferred_memory_actions(
+        self, connection: sqlite3.Connection, space_id: str, owner_kind: str,
+        owner_id: str | None, source_memory_ids: set[str],
+        context_inferred_memory_ids: set[str], actions: InferredMemoryActions,
     ) -> None:
         """Apply explicitly scoped inferred-Memory lifecycle actions.
 
@@ -1480,21 +1464,6 @@ class SqliteWorldStore:
         reasoner. Retractions additionally require the target-owned inference
         to have been supplied by the trusted caller in context.
         """
-        if owner_kind not in {"user", "person", "relationship"}:
-            raise ValueError("owner_kind must be user, person, or relationship")
-        if (owner_kind == "user") != (owner_id is None):
-            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
-        with self._connect() as connection:
-            self._apply_inferred_memory_actions(
-                connection, space_id, owner_kind, owner_id, source_memory_ids,
-                context_inferred_memory_ids, actions,
-            )
-
-    def _apply_inferred_memory_actions(
-        self, connection: sqlite3.Connection, space_id: str, owner_kind: str,
-        owner_id: str | None, source_memory_ids: set[str],
-        context_inferred_memory_ids: set[str], actions: InferredMemoryActions,
-    ) -> None:
         if actions.upserts:
             target = {"person": "person_id", "relationship": "relationship_id"}.get(owner_kind)
             target_kwargs = {target: owner_id} if target else {}
@@ -1528,32 +1497,15 @@ class SqliteWorldStore:
                 (now, retraction.reason, now, retraction.memory_id),
             )
 
-    def apply_hypothesis_actions(
-        self,
-        space_id: str,
-        owner_kind: str,
-        owner_id: str | None,
-        source_memory_ids: set[str],
-        context_hypothesis_ids: set[str],
-        actions: HypothesisActions,
-    ) -> None:
-        """Persist standalone hypotheses and explicit, context-scoped transitions."""
-        if owner_kind not in {"user", "person", "relationship"}:
-            raise ValueError("owner_kind must be user, person, or relationship")
-        if (owner_kind == "user") != (owner_id is None):
-            raise ValueError("user hypotheses have no owner_id; other hypotheses require one")
-        with self._connect() as connection:
-            self._apply_hypothesis_actions(
-                connection, space_id, owner_kind, owner_id,
-                source_memory_ids, context_hypothesis_ids, actions,
-            )
-
     def _apply_hypothesis_actions(
         self, connection: sqlite3.Connection, space_id: str, owner_kind: str,
         owner_id: str | None, source_memory_ids: set[str],
         context_hypothesis_ids: set[str], actions: HypothesisActions,
     ) -> None:
-        """Apply hypothesis actions inside an existing atomic reasoning write."""
+        """Persist standalone hypotheses and explicit, context-scoped transitions.
+
+        Runs inside an existing atomic reasoning write.
+        """
         for item in actions.upserts:
             if item.hypothesis_id and item.hypothesis_id not in context_hypothesis_ids:
                 continue
