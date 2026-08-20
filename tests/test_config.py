@@ -117,3 +117,23 @@ def test_serve_command_exits_before_uvicorn_when_config_is_missing(
 
     with pytest.raises(SystemExit, match="GossipMemo configuration error"):
         main()
+
+
+def test_induction_time_is_loaded_from_environment(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.setenv("GOSSIPMEMO_INDUCTION_TIME", "03:45")
+
+    assert get_settings().induction_time == "03:45"
+
+
+@pytest.mark.parametrize("value", ["24:00", "9:00", "noon", "12:60", "", "03:45:00"])
+def test_settings_reject_malformed_induction_time(value):
+    with pytest.raises(ConfigurationError, match="induction_time"):
+        Settings(
+            llm_base_url="http://model.test/v1",
+            llm_api_key="secret",
+            llm_model="model-a",
+            induction_time=value,
+        )

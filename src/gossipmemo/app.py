@@ -36,6 +36,7 @@ def build_world(settings: Settings) -> SocialMemoryWorld:
         model=create_llm(settings),
         extraction_batch_size=settings.extraction_batch_size,
         extraction_batch_timeout_seconds=settings.extraction_batch_timeout_seconds,
+        induction_time=settings.induction_time,
     )
 
 

@@ -9,6 +9,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from gossipmemo import world as world_module
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.context_budget import ContextBudget
@@ -983,3 +984,25 @@ def test_http_list_people_route_coexists_with_person_dossier_route(tmp_path):
                 assert dossier.json()["people"][0]["id"] == person_id
 
     asyncio.run(scenario())
+
+
+def _freeze_local_now(monkeypatch, moment: datetime) -> None:
+    class FrozenClock:
+        @staticmethod
+        def now(tz=None):
+            return moment if tz is None else moment.astimezone(tz)
+
+    monkeypatch.setattr(world_module, "datetime", FrozenClock)
+
+
+def test_next_induction_delay_follows_configured_time_of_day(tmp_path, monkeypatch):
+    world = SocialMemoryWorld(_store(tmp_path), FakeModel(), induction_time="09:30")
+
+    _freeze_local_now(monkeypatch, datetime(2026, 8, 19, 8, 0))
+    assert world._next_induction_delay() == 90 * 60
+
+    _freeze_local_now(monkeypatch, datetime(2026, 8, 19, 10, 0))
+    assert world._next_induction_delay() == 23.5 * 3600
+
+    world.induction_interval_seconds = 42.0
+    assert world._next_induction_delay() == 42.0

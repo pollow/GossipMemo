@@ -184,7 +184,7 @@ goal planning（每 root 一次 + 一次 reconciliation）：该 root 的 entrie
 
 ### 4.2 Reasoning 什么时候触发
 
-Reasoning 不在每条 Message 写入时同步执行。应用每天在本地午夜运行一次 induction，扫描 stale projection 后进入同一个本地 sequential queue；启动时先执行一次 stale catch-up。
+Reasoning 不在每条 Message 写入时同步执行。应用每天在本地午夜（可用 `GOSSIPMEMO_INDUCTION_TIME` 配置为其他 `HH:MM` 本地时间）运行一次 induction，扫描 stale projection 后进入同一个本地 sequential queue；启动时先执行一次 stale catch-up。
 
 触发条件：
 

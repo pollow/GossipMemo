@@ -67,8 +67,10 @@ and `GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS`. Requests that exceed the usable
 input budget fail before any provider HTTP call. Reasoning catch-up runs through
 the internal ordered pipeline.
 
-Profile induction runs once per day at local midnight. Startup performs one
-stale-profile catch-up before waiting for the next induction run.
+Profile induction runs once per day at local midnight. Set
+`GOSSIPMEMO_INDUCTION_TIME` to another 24-hour `HH:MM` local time (default:
+`00:00`) to move the daily run. Startup performs one stale-profile catch-up
+before waiting for the next induction run.
 
 Application logs go to stderr in structured JSON at `INFO` by default. Set
 `GOSSIPMEMO_LOG_LEVEL` to `DEBUG`, `WARNING`, or another standard level, and
@@ -216,7 +218,8 @@ POST /v1/spaces/{space_id}/turns ─→ Messages persisted (idempotent) ─→ r
 Two consequences worth planning around: a Memory is not queryable the instant
 you ingest it, and a Person card can lag a Memory by up to a day. The batch
 size and timeout are tunable (`GOSSIPMEMO_EXTRACTION_BATCH_SIZE`,
-`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`); the induction schedule is not.
+`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`), as is the daily induction
+time (`GOSSIPMEMO_INDUCTION_TIME`).
 
 Raw Messages are durable evidence and are never rewritten. Memories are the
 durable semantic record, and support active, retracted, and superseded states,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+
+_INDUCTION_TIME_PATTERN = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 
 
 class ConfigurationError(RuntimeError):
@@ -44,6 +47,7 @@ class Settings:
     llm_output_reserve_tokens: int = 8192
     llm_context_safety_tokens: int = 4096
     llm_trace_path: Path | None = None
+    induction_time: str = "00:00"
 
     def __post_init__(self) -> None:
         missing = [
@@ -92,6 +96,10 @@ class Settings:
         }:
             raise ConfigurationError(
                 "logging_level must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG"
+            )
+        if not _INDUCTION_TIME_PATTERN.fullmatch(self.induction_time):
+            raise ConfigurationError(
+                "induction_time must be a 24-hour HH:MM value between 00:00 and 23:59"
             )
         if self.logging_format.lower() not in {"json", "text"}:
             raise ConfigurationError("logging_format must be json or text")
@@ -143,6 +151,7 @@ class Settings:
             llm_output_reserve_tokens=int(_env("GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS", "8192")),
             llm_context_safety_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS", "4096")),
             llm_trace_path=(Path(value) if (value := _env("GOSSIPMEMO_LLM_TRACE_PATH")) else None),
+            induction_time=_env("GOSSIPMEMO_INDUCTION_TIME", "00:00"),
         )
 
 

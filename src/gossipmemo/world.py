@@ -53,6 +53,7 @@ class SocialMemoryWorld:
         extraction_batch_size: int = 6,
         extraction_batch_timeout_seconds: float = 1800.0,
         induction_interval_seconds: float | None = None,
+        induction_time: str = "00:00",
         continuity_threshold: int = 20,
     ) -> None:
         self.store = store
@@ -60,6 +61,7 @@ class SocialMemoryWorld:
         self.extraction_batch_size = extraction_batch_size
         self.extraction_batch_timeout_seconds = extraction_batch_timeout_seconds
         self.induction_interval_seconds = induction_interval_seconds
+        self.induction_time = induction_time
         self.continuity_threshold = continuity_threshold
         reasoners: dict[str, Reasoner] = {
             "person": build_person_reasoner(self.store, self.model),
@@ -362,10 +364,13 @@ class SocialMemoryWorld:
         if self.induction_interval_seconds is not None:
             return self.induction_interval_seconds
         now = datetime.now().astimezone()
-        tomorrow = (now + timedelta(days=1)).replace(
-            hour=0, minute=0, second=0, microsecond=0
+        hour_text, minute_text = self.induction_time.split(":")
+        target = now.replace(
+            hour=int(hour_text), minute=int(minute_text), second=0, microsecond=0
         )
-        return max(0.0, (tomorrow - now).total_seconds())
+        if target <= now:
+            target += timedelta(days=1)
+        return max(0.0, (target - now).total_seconds())
 
     async def _induction_loop(self) -> None:
         while not self._stopping:
