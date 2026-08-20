@@ -25,7 +25,7 @@ from typing import Any
 from ..chunking import greedy_chunks
 from ..models import ContinuityReasoningResult, ContinuityView, ModelMessage
 from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier
-from ..prompts import schema_instruction
+from ..prompts import PromptLibrary, schema_instruction
 from ..prompts.render import _json
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
@@ -36,11 +36,11 @@ logger = logging.getLogger(__name__)
 
 
 def continuity_prompt(
-    continuity: ContinuityView | None, messages: list[ModelMessage]
+    continuity: ContinuityView | None, messages: list[ModelMessage], *, prompts: PromptLibrary,
 ) -> str:
     return (
-        "Rebuild continuity from the prior summary and newer raw messages. "
-        "Choose the last supplied message as through_message_id.\n\nPrior continuity:\n"
+        prompts.continuity_rebuild_rule
+        + "\n\nPrior continuity:\n"
         + _json(continuity)
         + "\n\nNew messages:\n"
         + _json(messages)
@@ -58,7 +58,8 @@ def _continuity_request(
                 content=settings.prompts.continuity_system + "\n\n" +
                 schema_instruction(ContinuityReasoningResult),
             ),
-            ChatMessage(role="user", content=continuity_prompt(prior, chunk)),
+            ChatMessage(role="user", content=continuity_prompt(
+                prior, chunk, prompts=settings.prompts)),
         ],
         structured=True,
     )

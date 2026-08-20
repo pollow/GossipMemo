@@ -121,7 +121,7 @@ def _first_messages(
 ) -> list[ChatMessage]:
     prefix = owner_reasoning_prefix(
         target, list(evidence), list(inferred), list(hypotheses),
-        user_name=settings.user_name,
+        prompts=settings.prompts, user_name=settings.user_name,
     )
     return [
         ChatMessage(role="system", content=system_prompt),
@@ -252,7 +252,7 @@ def _digest_request(
                 + schema_instruction(ExtractedOwnerEvidenceDigest),
             ),
             ChatMessage(role="user", content=owner_evidence_digest_prompt(
-                chunk, settings.user_name)),
+                chunk, settings.user_name, prompts=settings.prompts)),
         ],
         structured=True,
     )
@@ -394,7 +394,7 @@ async def _digest_evidence(
         return context_budget.estimate_text(
             owner_reasoning_prefix(
                 target, output, list(inferred_memories), list(hypotheses),
-                user_name=settings.user_name,
+                prompts=settings.prompts, user_name=settings.user_name,
             )
         )
 

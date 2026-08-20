@@ -42,17 +42,7 @@ def coverage_audit_prompt(
         + prompts.coverage_root_viewpoints.get(root, "") + "\n</coverage-root>\n"
         "<current-entries>\n" + entry_lines + "\n</current-entries>\n"
         "<new-evidence>\n" + _evidence_lines(list(memories)) + "\n</new-evidence>\n"
-        "Fold this evidence into the entries for this root. Add an entry for a topic that "
-        "the entries do not cover yet, and modify an entry whose summary this evidence "
-        "changes or extends; leaving an entry out changes nothing. An entry that only one "
-        "memory supports is almost always wrong -- that is a single event, not an "
-        "understanding of a topic. Keep exactly one entry with an empty path: the overview "
-        "of this root, naming which areas exist under it and what each covers. Paths are "
-        "free text; reuse a stored path when you mean the same area, and do "
-        "not renumber or normalize the others. Keep content under about two hundred words: "
-        "when an entry outgrows that, split it by narrowing that entry and adding the "
-        "areas it no longer covers. To merge two entries, rewrite one to absorb the other "
-        "and modify the other with status \"superseded\"."
+        + prompts.coverage_audit_folding_rule + " " + prompts.coverage_audit_entry_shape_rule
     )
 
 

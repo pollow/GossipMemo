@@ -79,12 +79,19 @@ preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
 counts, status, and durations—not message bodies, bearer tokens, or LLM API
 keys.
 
-The static prompt text ships in `src/gossipmemo/prompts/defaults.py`. To change
-any of it without editing code, set `GOSSIPMEMO_PROMPTS_PATH` to a TOML file of
-`field = "text"` overrides; `prompts.example.toml` lists every field name. Keys
-left out keep the shipped wording, the two per-root coverage tables merge one
-root at a time, and an unknown key, an unknown root id, or a missing file is a
-startup error rather than a silent fall back to the default.
+The static prompt text ships in `src/gossipmemo/prompts/defaults.py`: the
+system prompts, the coverage rubric tables, and the instruction paragraphs the
+prompt builders assemble around rendered data. To change any of it without
+editing code, set `GOSSIPMEMO_PROMPTS_PATH` to a TOML file of `field = "text"`
+overrides; `prompts.example.toml` lists every field name. Keys left out keep the
+shipped wording, the two per-root coverage tables merge one root at a time, and
+an unknown key, an unknown root id, or a missing file is a startup error rather
+than a silent fall back to the default. Only prose is configurable: which
+messages count as evidence, how a record is serialized, and the section
+scaffolding stay in code, so an override retunes wording without reshaping a
+request. Two extraction fragments interpolate the configured user name and must
+keep their `$quoted_user_name` / `$user_name` placeholder; an override that
+invents a placeholder or drops a required one fails at startup.
 
 To audit prompt construction, set `GOSSIPMEMO_LLM_TRACE_PATH` to a JSONL file.
 Every provider request is then appended verbatim together with its completion,

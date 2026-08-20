@@ -26,6 +26,34 @@ claim that anything was saved. Answer in the language of the question.
 # projection_stage = "..."
 # actions_stage = "..."
 
+# The instruction paragraphs the prompt builders assemble around rendered data.
+# Only the prose is configurable: which messages count as evidence, how a
+# memory is serialized, and the section scaffolding stay in code.
+#
+# Two of them interpolate the configured user name and must keep their
+# placeholder: `$quoted_user_name` expands to the quoted name ('Deus'),
+# `$user_name` to the bare name (Deus). Using another `$name`, or dropping the
+# one a fragment declares, is a startup error rather than a runtime failure in
+# a background reasoner; write `$$` for a literal dollar sign. Fragments not
+# listed here take no placeholders and are used verbatim.
+
+# extraction_retention_rule = "..."
+# extraction_user_evidence_rule = """The fixed current user is named $quoted_user_name. ..."""
+# extraction_person_identity_rule = """... about $user_name; $user_name must never appear ..."""
+# extraction_time_bound_rule = "..."
+# extraction_known_people_rule = "..."
+# extraction_comparison_rule = "..."
+# owner_evidence_scope_rule = "..."
+# owner_evidence_digest_rule = "..."
+# continuity_rebuild_rule = "..."
+# coverage_audit_folding_rule = "..."
+# coverage_audit_entry_shape_rule = "..."
+# goal_candidate_expansion_rule = "..."
+# goal_candidate_closure_rule = "..."
+# goal_reconciliation_merge_rule = "..."
+# goal_reconciliation_lifecycle_rule = "..."
+# goal_candidate_reduction_rule = "..."
+
 # The per-root tables merge per root: naming M1 leaves M2..P11 at their
 # defaults, and an unknown root id is an error.
 [coverage_root_viewpoints]

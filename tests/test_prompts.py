@@ -34,7 +34,7 @@ def message(
 
 
 def test_extraction_prompt_states_retention_rule_and_dates():
-    prompt = extraction_prompt([message("m-1"), message("m-2")])
+    prompt = extraction_prompt([message("m-1"), message("m-2")], prompts=PROMPTS)
 
     assert (
         "Keep explicit durable information and a transient detail only when "
@@ -69,6 +69,7 @@ def test_extraction_prompt_separates_recent_context_from_new_evidence():
             }
         ],
         comparison_memories=[comparison],
+        prompts=PROMPTS,
     )
     assert "Recent context (context only)" in prompt
     assert "Alex Wang" in prompt
@@ -89,6 +90,7 @@ def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
             message("advice", author="assistant", content="Try a direct conversation."),
         ],
         user_name="Deus",
+        prompts=PROMPTS,
     )
 
     assert "The fixed current user is named 'Deus'" in prompt
@@ -101,7 +103,7 @@ def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
 
 
 def test_extraction_prompt_requires_stable_specific_person_identity():
-    prompt = extraction_prompt([message("identity")], user_name="Deus")
+    prompt = extraction_prompt([message("identity")], user_name="Deus", prompts=PROMPTS)
 
     assert "one concrete human whose identity is distinguishable" in prompt
     assert "evidence-supported durable identity anchor" in prompt
@@ -223,7 +225,7 @@ def test_goal_planning_leaves_asking_now_to_the_consuming_agent():
 
 def test_goal_reconciliation_is_the_only_lifecycle_pass_and_keeps_breadth():
     candidates = goal_candidate_prompt("M1", [], [], prompts=PROMPTS)
-    final = goal_reconciliation_prompt([], [], [])
+    final = goal_reconciliation_prompt([], [], [], prompts=PROMPTS)
     assert "do not transition, retire, defer, update" in candidates
     assert "only pass that may transition a goal's lifecycle" in final
     assert "Keep breadth" in final
@@ -236,13 +238,15 @@ def test_goal_reconciliation_weighs_closure_recommendations_as_evidence():
     stay open if the rest of its scope is unanswered.
     """
     recommendation = GoalClosureRecommendation(goal_id="goal-1", reason="fully covered now")
-    final = " ".join(goal_reconciliation_prompt([], [], [], [recommendation]).split())
+    final = " ".join(
+        goal_reconciliation_prompt([], [], [], [recommendation], prompts=PROMPTS).split()
+    )
     assert "goal_id='goal-1'" in final and "fully covered now" in final
     assert "<closure-recommendations>" in final
     assert "not an instruction" in final
     assert "can still be worth holding open" in final
 
-    empty = " ".join(goal_reconciliation_prompt([], [], []).split())
+    empty = " ".join(goal_reconciliation_prompt([], [], [], prompts=PROMPTS).split())
     assert "(none)" in empty and "<closure-recommendations>" in empty
 
 

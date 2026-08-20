@@ -27,6 +27,7 @@ from .defaults import (
 from .library import PromptLibrary
 from .render import (
     actions_stage_prompt,
+    fill,
     owner_evidence_digest_prompt,
     owner_reasoning_prefix,
     projection_stage_prompt,
@@ -49,6 +50,7 @@ __all__ = [
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "actions_stage_prompt",
+    "fill",
     "owner_evidence_digest_prompt",
     "owner_reasoning_prefix",
     "projection_stage_prompt",

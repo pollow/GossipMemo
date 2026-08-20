@@ -190,15 +190,200 @@ ACTIONS_STAGE_PROMPT = ("<stage>Review the projection above. Return only explici
                         "IDs must be from supplied context.</stage>")
 
 
+# The instruction paragraphs the prompt builders assemble around rendered data.
+# Each is prose only: which messages are evidence, how a memory is serialized,
+# and the XML-ish scaffolding stay in the builders, so an override can retune
+# wording without reshaping a request. A `$name` placeholder is filled by
+# `prompts.render.fill` at use time; `library.PLACEHOLDERS` lists the names each
+# fragment may use, and an override that invents or drops one fails at load.
+
+# --- reasoners/extraction.py ---
+
+EXTRACTION_RETENTION_RULE = (
+    "Keep explicit durable information and a transient detail only when "
+    "it affects an ongoing situation or helps reveal a recurring pattern."
+)
+
+EXTRACTION_USER_EVIDENCE_RULE = (
+    "The fixed current user is named $quoted_user_name. Use that name when referring "
+    "to the current user; the current user is not a Person. User-authored "
+    "messages in the current batch are the only evidence allowed to create "
+    "memories. Assistant-authored messages in the batch and recent context are "
+    "context only: use them to resolve references and conversational meaning, "
+    "but never save their restatements, summaries, analyses, or advice as new "
+    "memories. Assistant content may supply a proposition only when a current "
+    "user evidence message explicitly confirms, adopts, or corrects it."
+)
+
+EXTRACTION_PERSON_IDENTITY_RULE = (
+    "The current user/assistant author role is context and never a Person. List every "
+    "specific, external human individual referenced by a memory in its `people` "
+    "refs; express who said or did what in the memory content itself. A Person "
+    "must denote one concrete human whose identity is distinguishable from "
+    "other people in the evidence and could remain recognizable across "
+    "conversations. It needs an evidence-supported durable identity anchor: a "
+    "proper name, an explicit alias, or a role whose single holder is uniquely "
+    "and temporally determined by the evidence. Do not treat a grammatical "
+    "anaphor, an unbounded group or category, a non-human entity, or a merely "
+    "situational description as an identity. For an unnamed but sufficiently "
+    "anchored individual, choose the most stable, specific, neutral canonical "
+    "label supported by the evidence, in the evidence language, and keep each "
+    "observed surface wording as an alias. Do not create separate identities "
+    "merely because synonymous wording was used. Never guess that differently "
+    "named people are the same person. If identity is vague, preserve any "
+    "otherwise useful durable "
+    "memory with the original reference in its content and leave its `people` "
+    "refs empty; identity uncertainty alone is not a reason to discard that "
+    "memory. Preserve reported claims as "
+    "`reported`, not facts. Set `about_user` for a claim or event about "
+    "$user_name; $user_name must never appear in "
+    "`people`."
+)
+
+EXTRACTION_TIME_BOUND_RULE = (
+    "Record valid_from/valid_to when the message gives a time bound."
+)
+
+EXTRACTION_KNOWN_PEOPLE_RULE = (
+    "In natural-language memory content and generated display fields, use "
+    "a known person's canonical display_name when the messages refer to them. "
+    "In every ExtractedMemory.people and ExtractedRelationship.person_a_ref/"
+    "person_b_ref, use the supplied stable Person `id` (never a display_name "
+    "or alias). "
+    "If the messages explicitly introduce a new short name, return "
+    "it in that person's `aliases` field. Omit a known person unless a new "
+    "memory references them or the messages explicitly add an alias. Do not "
+    "echo the known-people list."
+)
+
+EXTRACTION_COMPARISON_RULE = (
+    "For comparison memories only: omit a memory when the current user batch "
+    "merely repeats it. When current user evidence explicitly corrects, updates, or "
+    "refines one, emit the new memory and set `supersedes_memory_id` to that supplied "
+    "comparison memory ID. Never copy details from a comparison memory unless those "
+    "details also appear in current user evidence. Do not use an inferred comparison "
+    "memory as evidence."
+)
+
+# --- prompts/render.py (the owner-reasoning family) ---
+
+OWNER_EVIDENCE_SCOPE_RULE = (
+    "Only evidence-memories are evidence. Current inferred "
+    "memories and open hypotheses may be reviewed for duplication or explicit "
+    "lifecycle actions, never used as support."
+)
+
+OWNER_EVIDENCE_DIGEST_RULE = (
+    "Compress supplied raw evidence only. Preserve chronology, basis, uncertainty, "
+    "contradictions, semantic subject, and exact source_memory_ids. Do not infer people, "
+    "traits, or actions; never invent IDs. Return exactly one digest item covering every "
+    "supplied source ID."
+)
+
+# --- reasoners/continuity.py ---
+
+CONTINUITY_REBUILD_RULE = (
+    "Rebuild continuity from the prior summary and newer raw messages. "
+    "Choose the last supplied message as through_message_id."
+)
+
+# --- reasoners/coverage.py ---
+
+COVERAGE_AUDIT_FOLDING_RULE = (
+    "Fold this evidence into the entries for this root. Add an entry for a topic that "
+    "the entries do not cover yet, and modify an entry whose summary this evidence "
+    "changes or extends; leaving an entry out changes nothing. An entry that only one "
+    "memory supports is almost always wrong -- that is a single event, not an "
+    "understanding of a topic."
+)
+
+COVERAGE_AUDIT_ENTRY_SHAPE_RULE = (
+    "Keep exactly one entry with an empty path: the overview "
+    "of this root, naming which areas exist under it and what each covers. Paths are "
+    "free text; reuse a stored path when you mean the same area, and do "
+    "not renumber or normalize the others. Keep content under about two hundred words: "
+    "when an entry outgrows that, split it by narrowing that entry and adding the "
+    "areas it no longer covers. To merge two entries, rewrite one to absorb the other "
+    "and modify the other with status \"superseded\"."
+)
+
+# --- reasoners/learning_goals.py ---
+
+GOAL_CANDIDATE_EXPANSION_RULE = (
+    "These entries are everything that is understood about this root; the entry with "
+    "an empty path is its overview. Propose optional candidate directions only, and "
+    "none at all when this root has nothing worth opening. Expand in "
+    "four ways: deeper into one entry, at something it states but never unfolds; "
+    "sideways to a neighbouring or missing sibling, a stage or place or period the "
+    "entries step over; forward in time along a thread the entries already contain, "
+    "at what became of it -- a concrete hook like that usually yields the best "
+    "direction; and along a person an entry names, where the direction is that "
+    "person's part in the user's own life. Write each direction in the "
+    "language of the entries. Cite in `entry_ids` the entries a direction grew out of when you "
+    "can, leave it empty rather than guessing, and never withhold a direction for "
+    "having nothing to cite. Do not repeat a direction an open goal already covers."
+)
+
+GOAL_CANDIDATE_CLOSURE_RULE = (
+    "Candidates are non-mutating: do not transition, retire, defer, update, or "
+    "otherwise change any goal lifecycle. Separately, look over the open goals above "
+    "against what these entries now show: when one now reads as answered, overtaken, "
+    "or no longer worth holding open, add a closure recommendation citing its "
+    "`goal_id` and a short reason. This is a vote for a later pass to weigh, not a "
+    "transition -- do not remove or alter the goal here, and skip any goal this "
+    "root's entries say nothing new about."
+)
+
+GOAL_RECONCILIATION_MERGE_RULE = (
+    "These candidates come from separate per-root passes, so near-duplicates across "
+    "roots are expected: merge them, and keep the ones that read as an invitation "
+    "into this user's own life rather than a survey question. Keep breadth -- several "
+    "directions on one subject are worth less than the same number spread across "
+    "different parts of the life."
+)
+
+GOAL_RECONCILIATION_LIFECYCLE_RULE = (
+    "Reuse an existing `goal_id` to rewrite that goal, "
+    "and omit it to create a new one. This is the only pass that may transition a "
+    "goal's lifecycle: transition one when the evidence shows it is answered, "
+    "overtaken, or no longer worth holding open. The closure recommendations are each "
+    "one root's vote grounded in what its entries actually show, not an instruction: "
+    "weigh a recommendation as evidence, and a goal recommended closed by one root can "
+    "still be worth holding open if the rest of its scope is unanswered."
+)
+
+GOAL_CANDIDATE_REDUCTION_RULE = (
+    "Deduplicate and compress these non-mutating learning-goal candidates, keeping "
+    "their breadth across different parts of the life. Return candidates only; never "
+    "transition any lifecycle."
+)
+
+
 __all__ = [
     "ACTIONS_STAGE_PROMPT",
+    "CONTINUITY_REBUILD_RULE",
     "CONTINUITY_SYSTEM_PROMPT",
+    "COVERAGE_AUDIT_ENTRY_SHAPE_RULE",
+    "COVERAGE_AUDIT_FOLDING_RULE",
     "COVERAGE_AUDIT_SYSTEM_PROMPT",
     "COVERAGE_METHOD",
     "COVERAGE_ROOT_BLIND_SPOTS",
     "COVERAGE_ROOT_VIEWPOINTS",
+    "EXTRACTION_COMPARISON_RULE",
+    "EXTRACTION_KNOWN_PEOPLE_RULE",
+    "EXTRACTION_PERSON_IDENTITY_RULE",
+    "EXTRACTION_RETENTION_RULE",
     "EXTRACTION_SYSTEM_PROMPT",
+    "EXTRACTION_TIME_BOUND_RULE",
+    "EXTRACTION_USER_EVIDENCE_RULE",
+    "GOAL_CANDIDATE_CLOSURE_RULE",
+    "GOAL_CANDIDATE_EXPANSION_RULE",
+    "GOAL_CANDIDATE_REDUCTION_RULE",
     "GOAL_PLANNING_SYSTEM_PROMPT",
+    "GOAL_RECONCILIATION_LIFECYCLE_RULE",
+    "GOAL_RECONCILIATION_MERGE_RULE",
+    "OWNER_EVIDENCE_DIGEST_RULE",
+    "OWNER_EVIDENCE_SCOPE_RULE",
     "PERSON_REASONING_SYSTEM_PROMPT",
     "PROJECTION_STAGE_PROMPT",
     "QUERY_SYNTHESIS_SYSTEM_PROMPT",

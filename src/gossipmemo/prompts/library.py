@@ -10,6 +10,7 @@ seam exists to prevent.
 
 from __future__ import annotations
 
+import string
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
@@ -31,6 +32,16 @@ else:  # pragma: no cover - exercised only on Python 3.10
 _VIEWPOINTS: Mapping[str, str] = MappingProxyType(defaults.COVERAGE_ROOT_VIEWPOINTS)
 _BLIND_SPOTS: Mapping[str, str] = MappingProxyType(defaults.COVERAGE_ROOT_BLIND_SPOTS)
 
+# The fragments a builder fills in at use time, with the exact `$name`
+# placeholders each one may use. Every listed name is required: a fragment is
+# filled with `prompts.render.fill`, which uses `Template.substitute`, so an
+# override that invents a name or drops one would raise deep inside a
+# background reasoner. Checking the set here turns that into a startup error.
+PLACEHOLDERS: Mapping[str, frozenset[str]] = MappingProxyType({
+    "extraction_user_evidence_rule": frozenset({"quoted_user_name"}),
+    "extraction_person_identity_rule": frozenset({"user_name"}),
+})
+
 
 @dataclass(frozen=True, slots=True)
 class PromptLibrary:
@@ -49,6 +60,22 @@ class PromptLibrary:
     coverage_root_blind_spots: Mapping[str, str] = _BLIND_SPOTS
     projection_stage: str = defaults.PROJECTION_STAGE_PROMPT
     actions_stage: str = defaults.ACTIONS_STAGE_PROMPT
+    extraction_retention_rule: str = defaults.EXTRACTION_RETENTION_RULE
+    extraction_user_evidence_rule: str = defaults.EXTRACTION_USER_EVIDENCE_RULE
+    extraction_person_identity_rule: str = defaults.EXTRACTION_PERSON_IDENTITY_RULE
+    extraction_time_bound_rule: str = defaults.EXTRACTION_TIME_BOUND_RULE
+    extraction_known_people_rule: str = defaults.EXTRACTION_KNOWN_PEOPLE_RULE
+    extraction_comparison_rule: str = defaults.EXTRACTION_COMPARISON_RULE
+    owner_evidence_scope_rule: str = defaults.OWNER_EVIDENCE_SCOPE_RULE
+    owner_evidence_digest_rule: str = defaults.OWNER_EVIDENCE_DIGEST_RULE
+    continuity_rebuild_rule: str = defaults.CONTINUITY_REBUILD_RULE
+    coverage_audit_folding_rule: str = defaults.COVERAGE_AUDIT_FOLDING_RULE
+    coverage_audit_entry_shape_rule: str = defaults.COVERAGE_AUDIT_ENTRY_SHAPE_RULE
+    goal_candidate_expansion_rule: str = defaults.GOAL_CANDIDATE_EXPANSION_RULE
+    goal_candidate_closure_rule: str = defaults.GOAL_CANDIDATE_CLOSURE_RULE
+    goal_reconciliation_merge_rule: str = defaults.GOAL_RECONCILIATION_MERGE_RULE
+    goal_reconciliation_lifecycle_rule: str = defaults.GOAL_RECONCILIATION_LIFECYCLE_RULE
+    goal_candidate_reduction_rule: str = defaults.GOAL_CANDIDATE_REDUCTION_RULE
 
     @classmethod
     def from_file(cls, path: Path) -> PromptLibrary:
@@ -78,8 +105,29 @@ class PromptLibrary:
             elif not isinstance(value, str):
                 raise ConfigurationError(f"prompt override must be a string: {key}")
             else:
+                if key in PLACEHOLDERS:
+                    _check_placeholders(key, value)
                 values[key] = value
         return cls(**values)
+
+
+def _check_placeholders(key: str, value: str) -> None:
+    """Reject an override that invents or drops one of a fragment's placeholders."""
+
+    allowed = PLACEHOLDERS[key]
+    used: set[str] = set()
+    for match in string.Template.pattern.finditer(value):
+        if match.group("invalid") is not None:
+            raise ConfigurationError(
+                f"prompt override has a stray '$' in {key}; write '$$' for a literal dollar sign"
+            )
+        name = match.group("named") or match.group("braced")
+        if name is not None:
+            used.add(name)
+    for name in sorted(used - allowed):
+        raise ConfigurationError(f"unknown placeholder in prompt override {key}: ${name}")
+    for name in sorted(allowed - used):
+        raise ConfigurationError(f"prompt override {key} must still use the placeholder ${name}")
 
 
 def _merged_table(
@@ -100,4 +148,4 @@ def _merged_table(
     return MappingProxyType(merged)
 
 
-__all__ = ["PromptLibrary"]
+__all__ = ["PLACEHOLDERS", "PromptLibrary"]

@@ -75,25 +75,7 @@ def goal_candidate_prompt(
         + "\n</coverage-root>\n<method>\n" + prompts.coverage_method + "\n</method>\n"
         "<entries>\n" + _entry_lines(entries) + "\n</entries>\n"
         "<open-goals comparison-only=\"true\">\n" + _goal_lines(open_goals) + "\n</open-goals>\n"
-        "These entries are everything that is understood about this root; the entry with "
-        "an empty path is its overview. Propose optional candidate directions only, and "
-        "none at all when this root has nothing worth opening. Expand in "
-        "four ways: deeper into one entry, at something it states but never unfolds; "
-        "sideways to a neighbouring or missing sibling, a stage or place or period the "
-        "entries step over; forward in time along a thread the entries already contain, "
-        "at what became of it -- a concrete hook like that usually yields the best "
-        "direction; and along a person an entry names, where the direction is that "
-        "person's part in the user's own life. Write each direction in the "
-        "language of the entries. Cite in `entry_ids` the entries a direction grew out of when you "
-        "can, leave it empty rather than guessing, and never withhold a direction for "
-        "having nothing to cite. Do not repeat a direction an open goal already covers. "
-        "Candidates are non-mutating: do not transition, retire, defer, update, or "
-        "otherwise change any goal lifecycle. Separately, look over the open goals above "
-        "against what these entries now show: when one now reads as answered, overtaken, "
-        "or no longer worth holding open, add a closure recommendation citing its "
-        "`goal_id` and a short reason. This is a vote for a later pass to weigh, not a "
-        "transition -- do not remove or alter the goal here, and skip any goal this "
-        "root's entries say nothing new about."
+        + prompts.goal_candidate_expansion_rule + " " + prompts.goal_candidate_closure_rule
     )
 
 
@@ -107,6 +89,7 @@ def goal_reconciliation_prompt(
     candidates: Sequence[LearningGoalCandidate], open_goals: Sequence[LearningGoalView],
     recent_closed_goals: Sequence[LearningGoalView],
     closure_recommendations: Sequence[GoalClosureRecommendation] = (),
+    *, prompts: PromptLibrary,
 ) -> str:
     """The one mutating pass: candidates from every root, plus goal lifecycles."""
     return (
@@ -115,25 +98,17 @@ def goal_reconciliation_prompt(
         + "\n</open-goals>\n<recent-closed-goals>\n" + _goal_lines(recent_closed_goals)
         + "\n</recent-closed-goals>\n<closure-recommendations>\n"
         + _recommendation_lines(closure_recommendations) + "\n</closure-recommendations>\n"
-        "These candidates come from separate per-root passes, so near-duplicates across "
-        "roots are expected: merge them, and keep the ones that read as an invitation "
-        "into this user's own life rather than a survey question. Keep breadth -- several "
-        "directions on one subject are worth less than the same number spread across "
-        "different parts of the life. Reuse an existing `goal_id` to rewrite that goal, "
-        "and omit it to create a new one. This is the only pass that may transition a "
-        "goal's lifecycle: transition one when the evidence shows it is answered, "
-        "overtaken, or no longer worth holding open. The closure recommendations are each "
-        "one root's vote grounded in what its entries actually show, not an instruction: "
-        "weigh a recommendation as evidence, and a goal recommended closed by one root can "
-        "still be worth holding open if the rest of its scope is unanswered."
+        + prompts.goal_reconciliation_merge_rule + " "
+        + prompts.goal_reconciliation_lifecycle_rule
     )
 
 
-def goal_candidate_reduction_prompt(candidates: Sequence[LearningGoalCandidate]) -> str:
+def goal_candidate_reduction_prompt(
+    candidates: Sequence[LearningGoalCandidate], *, prompts: PromptLibrary,
+) -> str:
     return (
-        "Deduplicate and compress these non-mutating learning-goal candidates, keeping "
-        "their breadth across different parts of the life. Return candidates only; never "
-        "transition any lifecycle.\n<candidates>\n"
+        prompts.goal_candidate_reduction_rule
+        + "\n<candidates>\n"
         + _json([item.model_dump(mode="json") for item in candidates])
         + "\n</candidates>"
     )
@@ -209,7 +184,9 @@ async def _plan_learning_goals(
     def reconciliation_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
         return _structured_request(
             transport, settings.prompts.goal_planning_system,
-            goal_reconciliation_prompt(items, open_goals, recent_closed_goals, recommendations),
+            goal_reconciliation_prompt(
+                items, open_goals, recent_closed_goals, recommendations,
+                prompts=settings.prompts),
             GoalPlanningResult,
         )
 
@@ -219,7 +196,8 @@ async def _plan_learning_goals(
         def reduction_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
             return _structured_request(
                 transport, settings.prompts.goal_planning_system,
-                goal_candidate_reduction_prompt(items), GoalPlanningCandidates,
+                goal_candidate_reduction_prompt(items, prompts=settings.prompts),
+                GoalPlanningCandidates,
             )
 
         def reduction_fits(items: Sequence[LearningGoalCandidate]) -> bool:

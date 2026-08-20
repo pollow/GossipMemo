@@ -5,8 +5,16 @@ import pathlib
 import pytest
 
 from gossipmemo.config import ConfigurationError, Settings
+from gossipmemo.models import ModelMessage
 from gossipmemo.prompts import PromptLibrary, defaults
-from gossipmemo.reasoners import ReasoningSettings, coverage_audit_prompt, goal_candidate_prompt
+from gossipmemo.prompts.library import PLACEHOLDERS
+from gossipmemo.reasoners import (
+    ReasoningSettings,
+    continuity_prompt,
+    coverage_audit_prompt,
+    extraction_prompt,
+    goal_candidate_prompt,
+)
 
 
 def write(tmp_path, body: str) -> pathlib.Path:
@@ -63,6 +71,79 @@ def test_overridden_text_reaches_the_prompt_builders(tmp_path):
     candidates = goal_candidate_prompt("M1", [], [], prompts=prompts)
     assert "Which chapters are legible?" in candidates
     assert "Scan only what the user volunteered." in candidates
+
+
+def test_overridden_instruction_fragments_reach_the_assembled_builders(tmp_path):
+    """A fragment cut out of a builder is only configurable if the builder reads it."""
+
+    path = write(
+        tmp_path,
+        'extraction_retention_rule = "Keep only what recurs."\n'
+        'extraction_person_identity_rule = "$user_name is never in `people`."\n'
+        'continuity_rebuild_rule = "Summarize the thread."\n'
+        'coverage_audit_folding_rule = "Fold it in."\n',
+    )
+    prompts = PromptLibrary.from_file(path)
+
+    extraction = extraction_prompt([], user_name="Deus", prompts=prompts)
+    assert extraction.startswith("Keep only what recurs.\n")
+    assert "Deus is never in `people`." in extraction
+    assert "Keep explicit durable information" not in extraction
+    assert "Summarize the thread." in continuity_prompt(None, [], prompts=prompts)
+    assert "Fold it in." in coverage_audit_prompt("M1", [], [], prompts=prompts)
+
+
+def test_placeholder_fragment_is_filled_with_the_configured_user_name():
+    message = ModelMessage(
+        id="m-1", space_id="space", author="user", content="Hi.",
+        occurred_at="2026-08-14T12:00:00+00:00", source_provider="test",
+    )
+
+    prompt = extraction_prompt([message], user_name="Deus", prompts=PromptLibrary())
+
+    assert "The fixed current user is named 'Deus'." in prompt
+    assert "$user_name" not in prompt and "$quoted_user_name" not in prompt
+
+
+def test_shipped_defaults_use_exactly_their_declared_placeholders():
+    prompts = PromptLibrary()
+
+    for field, names in PLACEHOLDERS.items():
+        text: str = getattr(prompts, field)
+        for name in names:
+            assert f"${name}" in text
+
+
+def test_override_using_an_undeclared_placeholder_is_rejected_at_load(tmp_path):
+    path = write(
+        tmp_path,
+        'extraction_person_identity_rule = "$user_name lives in $city."\n',
+    )
+
+    with pytest.raises(ConfigurationError, match=r"extraction_person_identity_rule: \$city"):
+        PromptLibrary.from_file(path)
+
+
+def test_override_dropping_a_required_placeholder_is_rejected_at_load(tmp_path):
+    path = write(tmp_path, 'extraction_user_evidence_rule = "The user is the user."\n')
+
+    with pytest.raises(ConfigurationError, match=r"must still use the placeholder \$quoted"):
+        PromptLibrary.from_file(path)
+
+
+def test_stray_dollar_sign_in_a_placeholder_fragment_is_rejected_at_load(tmp_path):
+    path = write(tmp_path, 'extraction_person_identity_rule = "$user_name owes $ 5."\n')
+
+    with pytest.raises(ConfigurationError, match="stray"):
+        PromptLibrary.from_file(path)
+
+
+def test_fragments_without_placeholders_keep_a_dollar_sign_verbatim(tmp_path):
+    path = write(tmp_path, 'continuity_rebuild_rule = "Costs are in $ only."\n')
+
+    prompts = PromptLibrary.from_file(path)
+
+    assert "Costs are in $ only." in continuity_prompt(None, [], prompts=prompts)
 
 
 def test_unknown_override_key_is_rejected_rather_than_ignored(tmp_path):
