@@ -1,0 +1,451 @@
+"""Embedding storage: durable BLOB facts in the main database, plus a
+rebuildable vector-search sidecar (`<db>.vec.db`) backed by the `sqlite-vec`
+extension.
+
+Two layers, deliberately kept apart:
+
+- The main-database `embeddings` table (schema.sql, migrated) is the source
+  of truth: one row per (owner_kind, owner_id), a packed float32 vector, and
+  the `content_hash` of the text it was computed from.
+- The sidecar is a `vec0` virtual-table index over the same vectors. A `vec0`
+  table produces about ten shadow tables in `sqlite_master`, which would
+  pollute this store's structural-fingerprint / table-shape detection if it
+  lived in the main database -- see `migrations.py`. So it lives in a
+  separate attached file instead, is never part of a migration, and is
+  always rebuildable from the main table without calling the embedding API
+  again.
+
+Every entry point here degrades silently to a pure-Python dot-product scan
+when the `sqlite-vec` extension cannot be loaded or the sidecar cannot be
+opened -- never raises to the caller, never fails startup. Both paths return
+the same shape: `[(owner_id, score), ...]` ordered best-match first, where
+`score` is the cosine similarity between the (already L2-normalized) query
+vector and the stored vector -- computed directly as a dot product in the
+Python path, and converted from `vec0`'s default L2 distance in the sidecar
+path (`cos = 1 - distance**2 / 2`, exact for unit vectors).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import sqlite3
+import struct
+from collections.abc import Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+from ._base import _BaseStore
+from .policy import now_iso
+
+logger = logging.getLogger(__name__)
+
+try:
+    import sqlite_vec
+except ImportError:  # pragma: no cover - sqlite-vec is a declared dependency
+    sqlite_vec = None  # type: ignore[assignment]
+
+# The four polymorphic owner kinds an embedding row can point at, and where
+# each one's indexed text and lifecycle status column live. Deliberately
+# excludes messages, people, relationships, and continuities -- those are
+# projections that get rewritten wholesale, which would churn vectors
+# endlessly; see the design brief for the full rationale.
+OWNER_KINDS: tuple[str, ...] = ("memory", "learning_goal", "hypothesis", "coverage_entry")
+
+_OWNER_TEXT_SOURCES: dict[str, tuple[str, str, str]] = {
+    "memory": ("memories", "content", "status"),
+    "learning_goal": ("learning_goals", "rationale", "status"),
+    "hypothesis": ("hypotheses", "content", "status"),
+    "coverage_entry": ("coverage_entries", "content", "status"),
+}
+
+
+def content_hash(text: str) -> str:
+    """The single hash algorithm used to detect stale embeddings. Centralized
+    here so nothing else in the codebase reimplements it differently."""
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def pack_vector(values: Sequence[float]) -> bytes:
+    """Float32, little-endian, tightly packed -- the format both the main
+    table's BLOB column and the `sqlite-vec` extension expect."""
+
+    return struct.pack(f"<{len(values)}f", *values)
+
+
+def unpack_vector(blob: bytes, dim: int) -> list[float]:
+    return list(struct.unpack(f"<{dim}f", blob))
+
+
+def _dot(a: Sequence[float], b: Sequence[float]) -> float:
+    return sum(x * y for x, y in zip(a, b, strict=True))
+
+
+def _l2_distance_to_cosine(distance: float) -> float:
+    """`vec0`'s default metric is L2. For unit vectors, L2**2 = 2 - 2*cos,
+    so this is exact (up to float error), not an approximation."""
+
+    return 1.0 - (distance * distance) / 2.0
+
+
+def _sidecar_path(main_path: Path) -> Path:
+    return main_path.with_name(main_path.stem + ".vec.db")
+
+
+@dataclass(frozen=True)
+class PendingEmbedding:
+    """One (owner_kind, owner_id) whose text has no matching embedding row
+    yet -- new, hash-stale, or computed under a different model/dim."""
+
+    space_id: str
+    owner_kind: str
+    owner_id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class EmbeddingUpsert:
+    """One vector ready to be written, alongside the text it was computed
+    from (to re-derive `content_hash`) and the owner's current lifecycle
+    status (cached into the sidecar index for status-filtered search)."""
+
+    owner_kind: str
+    owner_id: str
+    text: str
+    vector: Sequence[float]
+    status: str
+
+
+class _VectorsMixin(_BaseStore):
+    """Store/retrieve/search embedding vectors. No RRF, no FTS fusion, no
+    recall policy -- that belongs to the hybrid-retrieval slice built on top
+    of `search_vectors`."""
+
+    # -- extension / sidecar plumbing -----------------------------------
+
+    def _load_vec_extension(self, connection: sqlite3.Connection) -> bool:
+        if sqlite_vec is None:
+            logger.warning(
+                "sqlite-vec package is not importable; vector search falls "
+                "back to a Python dot-product scan"
+            )
+            return False
+        try:
+            connection.enable_load_extension(True)
+            try:
+                sqlite_vec.load(connection)
+            finally:
+                connection.enable_load_extension(False)
+        except sqlite3.Error as error:
+            logger.warning(
+                "sqlite-vec extension failed to load; vector search falls "
+                "back to a Python dot-product scan: %s", error,
+            )
+            return False
+        return True
+
+    def _attach_sidecar(self, connection: sqlite3.Connection) -> bool:
+        sidecar = _sidecar_path(self.path)
+        try:
+            sidecar.parent.mkdir(parents=True, exist_ok=True)
+            connection.execute("ATTACH DATABASE ? AS vec", (str(sidecar),))
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS vec.embedding_index_meta("
+                "model TEXT NOT NULL, dim INTEGER NOT NULL, built_at TEXT NOT NULL)"
+            )
+        except (sqlite3.Error, OSError) as error:
+            logger.warning(
+                "failed to attach vector sidecar database %s; vector search "
+                "falls back to a Python dot-product scan: %s", sidecar, error,
+            )
+            return False
+        return True
+
+    def _enable_vectors(self, connection: sqlite3.Connection) -> bool:
+        """Load the extension and attach the sidecar on `connection`.
+        Returns whether both succeeded -- callers must treat False as
+        "fall back to Python", never as an error."""
+
+        return self._load_vec_extension(connection) and self._attach_sidecar(connection)
+
+    def ensure_vector_index(self, model: str, dim: int) -> None:
+        """Idempotent maintenance entry point: call at startup (after
+        induction/backfill scheduling) and whenever the active embedding
+        model/dim might have changed. Rebuilds the sidecar's `vec0` table
+        from the main `embeddings` BLOBs -- never calling the embedding API
+        -- exactly when its recorded (model, dim) meta disagrees with the
+        one passed in. A no-op, quietly, if vectors are unavailable."""
+
+        with self._connect() as connection:
+            if not self._enable_vectors(connection):
+                return
+            meta = connection.execute(
+                "SELECT model, dim FROM vec.embedding_index_meta LIMIT 1"
+            ).fetchone()
+            if meta is not None and meta["model"] == model and meta["dim"] == dim:
+                return
+            self._rebuild_sidecar(connection, model, dim)
+
+    def _rebuild_sidecar(self, connection: sqlite3.Connection, model: str, dim: int) -> None:
+        connection.execute("DROP TABLE IF EXISTS vec.embeddings")
+        connection.execute("DELETE FROM vec.embedding_index_meta")
+        connection.execute(
+            f"CREATE VIRTUAL TABLE vec.embeddings USING vec0("
+            f"owner_id TEXT PRIMARY KEY, embedding float[{dim}], "
+            f"space_id TEXT partition key, owner_kind TEXT, status TEXT, "
+            f"+content_hash TEXT)"
+        )
+        for kind, (table, _text_col, status_col) in _OWNER_TEXT_SOURCES.items():
+            rows = connection.execute(
+                f"""
+                SELECT e.space_id AS space_id, e.owner_id AS owner_id, e.vector AS vector,
+                       o.{status_col} AS status, e.content_hash AS content_hash
+                FROM embeddings e JOIN {table} o ON o.id = e.owner_id
+                WHERE e.owner_kind = ? AND e.model = ? AND e.dim = ?
+                """,
+                (kind, model, dim),
+            ).fetchall()
+            connection.executemany(
+                "INSERT INTO vec.embeddings"
+                "(owner_id, embedding, space_id, owner_kind, status, content_hash) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (row["owner_id"], row["vector"], row["space_id"], kind,
+                     row["status"], row["content_hash"])
+                    for row in rows
+                ],
+            )
+        connection.execute(
+            "INSERT INTO vec.embedding_index_meta(model, dim, built_at) VALUES (?, ?, ?)",
+            (model, dim, now_iso()),
+        )
+
+    # -- writes ------------------------------------------------------------
+
+    def upsert_embeddings(
+        self, space_id: str, model: str, dim: int, items: Sequence[EmbeddingUpsert],
+    ) -> None:
+        """Batch upsert into the main `embeddings` table (always durable)
+        and, best-effort, into the sidecar index if it is currently
+        reachable and already built for this exact (model, dim). If the
+        sidecar is unavailable or its meta does not match, the write is
+        skipped there -- `ensure_vector_index` reconciles it later from the
+        main table, without ever calling the embedding API again."""
+
+        if not items:
+            return
+        now = now_iso()
+        with self._connect() as connection:
+            for item in items:
+                connection.execute(
+                    """
+                    INSERT INTO embeddings(
+                        space_id, owner_kind, owner_id, model, dim, vector, content_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(owner_kind, owner_id) DO UPDATE SET
+                        space_id = excluded.space_id,
+                        model = excluded.model,
+                        dim = excluded.dim,
+                        vector = excluded.vector,
+                        content_hash = excluded.content_hash,
+                        created_at = excluded.created_at
+                    """,
+                    (
+                        space_id, item.owner_kind, item.owner_id, model, dim,
+                        pack_vector(item.vector), content_hash(item.text), now,
+                    ),
+                )
+
+            if not self._enable_vectors(connection):
+                return
+            meta = connection.execute(
+                "SELECT model, dim FROM vec.embedding_index_meta LIMIT 1"
+            ).fetchone()
+            if meta is None or meta["model"] != model or meta["dim"] != dim:
+                # Sidecar is unbuilt or stale for this (model, dim); leave it
+                # alone here -- ensure_vector_index() does a full rebuild that
+                # will pick up the rows just written above.
+                return
+            for item in items:
+                blob = pack_vector(item.vector)
+                h = content_hash(item.text)
+                cursor = connection.execute(
+                    "UPDATE vec.embeddings SET embedding = ?, space_id = ?, "
+                    "owner_kind = ?, status = ?, content_hash = ? WHERE owner_id = ?",
+                    (blob, space_id, item.owner_kind, item.status, h, item.owner_id),
+                )
+                if cursor.rowcount == 0:
+                    connection.execute(
+                        "INSERT INTO vec.embeddings"
+                        "(owner_id, embedding, space_id, owner_kind, status, content_hash) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (item.owner_id, blob, space_id, item.owner_kind, item.status, h),
+                    )
+
+    # -- pending / maintenance ----------------------------------------------
+
+    def pending_embeddings(
+        self, *, model: str, dim: int, owner_kinds: Sequence[str] | None = None,
+    ) -> list[PendingEmbedding]:
+        """Owners with no embedding row, a stale `content_hash` (their text
+        was rewritten in place), or a row computed under a different
+        model/dim. Also sweeps up orphaned embedding rows (owner deleted)
+        along the way -- see `_cleanup_orphan_embeddings`."""
+
+        kinds = tuple(owner_kinds) if owner_kinds else OWNER_KINDS
+        pending: list[PendingEmbedding] = []
+        with self._connect() as connection:
+            self._cleanup_orphan_embeddings(connection, kinds)
+            for kind in kinds:
+                table, text_col, _status_col = _OWNER_TEXT_SOURCES[kind]
+                rows = connection.execute(
+                    f"""
+                    SELECT o.space_id AS space_id, o.id AS owner_id, o.{text_col} AS text,
+                           e.content_hash AS existing_hash, e.model AS existing_model,
+                           e.dim AS existing_dim
+                    FROM {table} o
+                    LEFT JOIN embeddings e ON e.owner_kind = ? AND e.owner_id = o.id
+                    """,
+                    (kind,),
+                ).fetchall()
+                for row in rows:
+                    text = row["text"] or ""
+                    if (
+                        row["existing_hash"] is None
+                        or row["existing_hash"] != content_hash(text)
+                        or row["existing_model"] != model
+                        or row["existing_dim"] != dim
+                    ):
+                        pending.append(
+                            PendingEmbedding(row["space_id"], kind, row["owner_id"], text)
+                        )
+        return pending
+
+    def pending_embedding_count(self, *, model: str, dim: int) -> int:
+        """Cheap count for `health()` -- does not materialize owner text."""
+
+        with self._connect() as connection:
+            self._cleanup_orphan_embeddings(connection, OWNER_KINDS)
+            total = 0
+            for kind in OWNER_KINDS:
+                table, text_col, _status_col = _OWNER_TEXT_SOURCES[kind]
+                rows = connection.execute(
+                    f"""
+                    SELECT o.{text_col} AS text, e.content_hash AS existing_hash,
+                           e.model AS existing_model, e.dim AS existing_dim
+                    FROM {table} o
+                    LEFT JOIN embeddings e ON e.owner_kind = ? AND e.owner_id = o.id
+                    """,
+                    (kind,),
+                ).fetchall()
+                for row in rows:
+                    text = row["text"] or ""
+                    if (
+                        row["existing_hash"] is None
+                        or row["existing_hash"] != content_hash(text)
+                        or row["existing_model"] != model
+                        or row["existing_dim"] != dim
+                    ):
+                        total += 1
+        return total
+
+    def _cleanup_orphan_embeddings(
+        self, connection: sqlite3.Connection, kinds: Sequence[str],
+    ) -> None:
+        for kind in kinds:
+            table, _text_col, _status_col = _OWNER_TEXT_SOURCES[kind]
+            connection.execute(
+                f"DELETE FROM embeddings WHERE owner_kind = ? "
+                f"AND owner_id NOT IN (SELECT id FROM {table})",
+                (kind,),
+            )
+
+    # -- search --------------------------------------------------------
+
+    def search_vectors(
+        self,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+        *,
+        statuses: Sequence[str] | None = None,
+    ) -> list[tuple[str, float]]:
+        """Top-`k` nearest owners by cosine similarity, best match first.
+        No RRF, no FTS fusion -- a single ranked list for one owner_kind."""
+
+        with self._connect() as connection:
+            if self._enable_vectors(connection):
+                try:
+                    return self._search_sidecar(
+                        connection, space_id, owner_kind, query_vector, k, statuses,
+                    )
+                except sqlite3.Error as error:
+                    logger.warning(
+                        "vector sidecar search failed; falling back to a "
+                        "Python dot-product scan: %s", error,
+                    )
+            return self._search_python(connection, space_id, owner_kind, query_vector, k, statuses)
+
+    def _search_sidecar(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+        statuses: Sequence[str] | None,
+    ) -> list[tuple[str, float]]:
+        sql = (
+            "SELECT e.owner_id AS owner_id, e.distance AS distance "
+            "FROM vec.embeddings e WHERE e.embedding MATCH ? AND k = ? "
+            "AND e.space_id = ? AND e.owner_kind = ?"
+        )
+        params: list[object] = [pack_vector(query_vector), k, space_id, owner_kind]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" AND e.status IN ({placeholders})"
+            params.extend(statuses)
+        sql += " ORDER BY e.distance"
+        rows = connection.execute(sql, params).fetchall()
+        return [(row["owner_id"], _l2_distance_to_cosine(row["distance"])) for row in rows]
+
+    def _search_python(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+        statuses: Sequence[str] | None,
+    ) -> list[tuple[str, float]]:
+        table, _text_col, status_col = _OWNER_TEXT_SOURCES[owner_kind]
+        sql = (
+            f"SELECT e.owner_id AS owner_id, e.vector AS vector, e.dim AS dim "
+            f"FROM embeddings e JOIN {table} o ON o.id = e.owner_id "
+            f"WHERE e.space_id = ? AND e.owner_kind = ?"
+        )
+        params: list[object] = [space_id, owner_kind]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" AND o.{status_col} IN ({placeholders})"
+            params.extend(statuses)
+        rows = connection.execute(sql, params).fetchall()
+        scored = [
+            (row["owner_id"], _dot(unpack_vector(row["vector"], row["dim"]), query_vector))
+            for row in rows
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return scored[:k]
+
+
+__all__ = [
+    "EmbeddingUpsert",
+    "OWNER_KINDS",
+    "PendingEmbedding",
+    "_VectorsMixin",
+    "content_hash",
+    "pack_vector",
+    "unpack_vector",
+]

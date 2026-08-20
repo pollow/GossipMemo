@@ -199,6 +199,40 @@ def _upgrade_v1_to_v2(connection: sqlite3.Connection) -> None:
     )
 
 
+def _upgrade_v2_to_v3(connection: sqlite3.Connection) -> None:
+    """Add the `embeddings` table (durable embedding facts for memories,
+    learning_goals, hypotheses, and coverage_entries) and its index.
+
+    Purely additive: no existing table, column, or row is touched. The
+    companion vector-search sidecar (`<db>.vec.db`) is deliberately NOT
+    created here -- it is a rebuildable cache keyed off this table's rows,
+    never part of schema migrations, and never backed up.
+    """
+
+    connection.execute(
+        """
+        CREATE TABLE embeddings (
+            space_id TEXT NOT NULL,
+            owner_kind TEXT NOT NULL
+                CHECK(owner_kind IN ('memory', 'learning_goal', 'hypothesis', 'coverage_entry')),
+            owner_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            vector BLOB NOT NULL,
+            content_hash TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY(owner_kind, owner_id)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX embeddings_by_space
+        ON embeddings(space_id, owner_kind)
+        """
+    )
+
+
 MIGRATIONS: dict[int, Migration] = {
     2: Migration(
         version=2,
@@ -207,6 +241,11 @@ MIGRATIONS: dict[int, Migration] = {
             "learning_goals.criteria_refs/boundary_ids -> entry_ids"
         ),
         upgrade=_upgrade_v1_to_v2,
+    ),
+    3: Migration(
+        version=3,
+        description="add embeddings table for the vector-search sidecar",
+        upgrade=_upgrade_v2_to_v3,
     ),
 }
 

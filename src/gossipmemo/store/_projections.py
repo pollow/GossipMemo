@@ -15,14 +15,14 @@ from ..models import (
     PersonView,
     RelationshipView,
 )
-from ._base import _BaseStore
+from ._vectors import _VectorsMixin
 from .policy import (
     is_profile_stale,
     load_json,
 )
 
 
-class _ProjectionsMixin(_BaseStore):
+class _ProjectionsMixin(_VectorsMixin):
     """Maps SQLite rows onto view models and reads projection watermarks."""
 
     def _memory_view(

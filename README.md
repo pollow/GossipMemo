@@ -423,6 +423,13 @@ a database it does not trust. Concretely, on every startup:
    to start — this program build cannot safely serve it. Never downgrade a
    database by rolling the image back onto a newer schema.
 
+The main database (`<dbfile>`) is a complete, self-sufficient backup of
+every durable fact, including embedding vectors. The vector-search sidecar
+(`<dbfile-stem>.vec.db`, e.g. `gossipmemo.vec.db` next to `gossipmemo.db`)
+is a regenerable index only — it is never migrated and never needs to be
+backed up, and it is safe to delete at any time; it is rebuilt from the main
+database's `embeddings` table the next time it is needed.
+
 **Restore path**: stop the container, replace the live `gossipmemo.db` /
 `gossipmemo.db-wal` / `gossipmemo.db-shm` (or your configured
 `GOSSIPMEMO_DATABASE_PATH`) with the `.bak` snapshot (a plain SQLite file —

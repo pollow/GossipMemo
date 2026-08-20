@@ -255,3 +255,27 @@ CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE OF content ON memo
     VALUES ('delete', old.rowid, old.content);
     INSERT INTO memory_fts(rowid, content) VALUES (new.rowid, new.content);
 END;
+
+-- Durable embedding facts, one row per (owner_kind, owner_id). Deliberately
+-- polymorphic with no FOREIGN KEY -- owner_id can point at memories,
+-- learning_goals, hypotheses, or coverage_entries, and orphaned rows (owner
+-- deleted) are swept up by the store's anti-join maintenance query rather
+-- than enforced structurally. `vector` is a float32, little-endian, tightly
+-- packed BLOB (`struct.pack(f"<{dim}f", *values)`), already L2-normalized.
+-- This table is the source of truth for the embedding sidecar index
+-- (`<db>.vec.db`, never migrated, never backed up): the sidecar is always
+-- rebuildable from this table without calling the embedding API again.
+CREATE TABLE IF NOT EXISTS embeddings (
+    space_id TEXT NOT NULL,
+    owner_kind TEXT NOT NULL CHECK(owner_kind IN ('memory', 'learning_goal', 'hypothesis', 'coverage_entry')),
+    owner_id TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dim INTEGER NOT NULL,
+    vector BLOB NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(owner_kind, owner_id)
+);
+
+CREATE INDEX IF NOT EXISTS embeddings_by_space
+ON embeddings(space_id, owner_kind);

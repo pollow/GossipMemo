@@ -368,7 +368,7 @@ def test_migrate_stamps_version_and_preserves_rows(tmp_path):
         history = connection.execute(
             "SELECT version, checksum FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row[0] for row in history] == [1, 2]
+        assert [row[0] for row in history] == [1, 2, 3]
         assert history[-1][0] == CURRENT_VERSION
 
         spaces = {row[0] for row in connection.execute("SELECT id FROM spaces")}
@@ -456,6 +456,25 @@ def test_memory_fts_works_after_migration(tmp_path):
         connection.close()
 
 
+def test_embeddings_table_created_empty_by_v2_to_v3_migration(tmp_path):
+    path = tmp_path / "world.db"
+    _build_v1_database(path)
+
+    migrate_database(path)
+
+    connection = sqlite3.connect(path)
+    try:
+        assert "embeddings" in _table_names(connection)
+        assert connection.execute("SELECT count(*) FROM embeddings").fetchone()[0] == 0
+        columns = {c[1] for c in connection.execute("PRAGMA table_info(embeddings)").fetchall()}
+        assert columns == {
+            "space_id", "owner_kind", "owner_id", "model", "dim",
+            "vector", "content_hash", "created_at",
+        }
+    finally:
+        connection.close()
+
+
 def test_structural_equivalence_with_fresh_database(tmp_path):
     migrated_path = tmp_path / "migrated.db"
     _build_v1_database(migrated_path)
@@ -490,7 +509,7 @@ def test_migration_is_idempotent_on_restart(tmp_path):
         history = connection.execute(
             "SELECT version FROM schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row[0] for row in history] == [1, 2]
+        assert [row[0] for row in history] == [1, 2, 3]
     finally:
         connection.close()
 
