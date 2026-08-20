@@ -100,6 +100,43 @@ so on), and the estimated token count. The trace holds full message bodies by
 design, so it is a local debugging tool rather than something to leave on: it is
 off unless the variable is set, and a write failure never interrupts reasoning.
 
+### Embeddings (optional)
+
+GossipMemo can supplement its trigram FTS recall with semantic vector
+search, backed by an OpenAI-compatible `/embeddings` endpoint (the
+llama.cpp server is the tested target). This is entirely optional:
+leaving `GOSSIPMEMO_EMBEDDING_MODEL` unset is a legitimate, permanent
+configuration -- the system falls back to plain FTS, and nothing else
+about startup, `/health`, or recall behavior changes. This also covers
+every runtime degradation: an embedding server that is unreachable at
+startup, that fails its dimension probe, or that goes down later all
+leave the rest of GossipMemo running normally.
+
+Set `GOSSIPMEMO_EMBEDDING_MODEL` to enable it. `GOSSIPMEMO_EMBEDDING_BASE_URL`
+and `GOSSIPMEMO_EMBEDDING_API_KEY` default to the corresponding `GOSSIPMEMO_LLM_*`
+values when left empty, so a single self-hosted OpenAI-compatible server can
+back both chat and embeddings with no extra configuration.
+`GOSSIPMEMO_EMBEDDING_BASE_URL` follows the same convention as
+`GOSSIPMEMO_LLM_BASE_URL`: it is the API root and already includes `/v1`
+(e.g. `GOSSIPMEMO_EMBEDDING_BASE_URL=http://192.168.1.113:8002/v1`).
+
+The embedding dimension is probed from `GET {base_url}/models` (a llama.cpp
+server extension, `data[].meta.n_embd`) at startup. Set
+`GOSSIPMEMO_EMBEDDING_DIM` as a manual fallback for servers that don't expose
+that field; if both are present and disagree, startup logs the conflict and
+disables the embedding subsystem rather than silently picking one.
+
+Vectors are computed by a background worker, never on a request path:
+newly-written memories, hypotheses, learning goals, and coverage entries pick
+up an embedding shortly after the reasoner that wrote them finishes, and a
+full backfill runs once at startup for anything still missing one. `GET
+/health` exposes `embedding_enabled` and `embedding_pending` (the number of
+rows still waiting on an embedding) so this is observable without querying
+the database directly; a persistently non-zero, non-shrinking
+`embedding_pending` usually means the embedding server is unreachable, which
+the worker logs and retries with backoff -- it never fails a turn or an
+import because of it.
+
 ## Import existing chats
 
 The CLI imports a JSON array, a `{ "messages": [...] }` export, or JSONL. Run

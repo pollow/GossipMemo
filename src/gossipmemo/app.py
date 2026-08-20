@@ -47,6 +47,11 @@ def build_world(settings: Settings) -> SocialMemoryWorld:
                 else PromptLibrary()
             ),
         ),
+        # The embedding client itself is resolved inside `world.start()`,
+        # not here: building it needs an async network probe (dimension
+        # discovery) and must run after `store.initialize()` has applied
+        # any pending migration, neither of which this sync factory can do.
+        settings=settings,
     )
 
 

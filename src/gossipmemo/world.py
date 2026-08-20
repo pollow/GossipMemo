@@ -6,6 +6,8 @@ from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from .config import Settings
+from .embedding import EmbeddingClient, create_embedding_client
 from .models import (
     HealthResponse,
     ManualMemoryRequest,
@@ -32,12 +34,22 @@ from .reasoners import (
 )
 from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
 from .store import SqliteWorldStore, TurnView
+from .store._vectors import EmbeddingUpsert
 from .transport import LlmTransport
 
 logger = logging.getLogger(__name__)
 
 # Module-level singleton so the default is shared rather than rebuilt per call.
 DEFAULT_REASONING = ReasoningSettings()
+
+# One request carries this many (owner_kind, owner_id) texts to the
+# embedding provider -- within the brief's 32-64 band. `pending_embeddings()`
+# already anti-joins across every space, so a single global worker task
+# processes all spaces per run; per-space scoping would be pointless extra
+# bookkeeping for a store call that has no space_id parameter.
+_EMBEDDING_BATCH_SIZE = 48
+_EMBEDDING_RETRY_BASE_SECONDS = 5.0
+_EMBEDDING_RETRY_MAX_SECONDS = 120.0
 
 
 class SocialMemoryWorld:
@@ -59,6 +71,8 @@ class SocialMemoryWorld:
         induction_time: str = "00:00",
         continuity_threshold: int = 20,
         reasoning: ReasoningSettings = DEFAULT_REASONING,
+        settings: Settings | None = None,
+        embedding_client: EmbeddingClient | None = None,
     ) -> None:
         self.store = store
         self.model = model
@@ -68,6 +82,14 @@ class SocialMemoryWorld:
         self.induction_time = induction_time
         self.continuity_threshold = continuity_threshold
         self.reasoning = reasoning
+        # `settings` drives async, network-probing client construction in
+        # `start()` (dimension discovery talks to the provider) -- it cannot
+        # happen here, in a sync constructor. Tests that don't care about
+        # that probe pass a ready-made `embedding_client` directly instead,
+        # which `start()` then leaves alone. Neither set means the embedding
+        # subsystem is off and every path below falls back to plain FTS.
+        self._settings = settings
+        self._embedding_client: EmbeddingClient | None = embedding_client
         reasoners: dict[str, Reasoner] = {
             "person": build_person_reasoner(self.store, self.model, reasoning),
             "relationship": build_relationship_reasoner(self.store, self.model, reasoning),
@@ -95,6 +117,7 @@ class SocialMemoryWorld:
         started = asyncio.get_running_loop().time()
         self._stopping = False
         self.store.initialize()
+        await self._start_embedding_subsystem()
         unbatched_spaces: set[str] = set()
         for pending in self.store.pending_extractions():
             if pending.batch_id:
@@ -118,6 +141,33 @@ class SocialMemoryWorld:
                 ),
             },
         )
+
+    async def _start_embedding_subsystem(self) -> None:
+        """Resolve the embedding client (if not already injected) and kick
+        off a full backfill. Must run after `store.initialize()` so any
+        pending migration has already applied -- `ensure_vector_index()`
+        reads/rebuilds the sidecar against the current main-table schema.
+
+        Every failure mode here -- unconfigured, provider unreachable,
+        dimension probe/conflict -- degrades to "embedding subsystem off"
+        rather than failing startup. This is the one hard requirement from
+        the design brief: an operator who never sets
+        `GOSSIPMEMO_EMBEDDING_MODEL`, or whose embedding server is briefly
+        down, still gets a working GossipMemo on plain FTS.
+        """
+
+        if self._embedding_client is None and self._settings is not None:
+            if self._settings.embedding_enabled:
+                try:
+                    self._embedding_client = await create_embedding_client(self._settings)
+                except Exception:
+                    logger.exception("embedding_client_init_failed")
+                    self._embedding_client = None
+        if self._embedding_client is not None:
+            self.store.ensure_vector_index(
+                self._embedding_client.model, self._embedding_client.dim
+            )
+            self._schedule_embedding()
 
     async def stop(self) -> None:
         started = asyncio.get_running_loop().time()
@@ -200,6 +250,11 @@ class SocialMemoryWorld:
             await self.reasoning_pipeline.run_until_caught_up(space_id)
         if self.store.pending_continuities(self.continuity_threshold, space_id):
             await self._catch_up(self._continuity_reasoner, space_id)
+        # Best-effort: an import must not fail because the embedding
+        # provider is unavailable, and world.stop() below still waits for
+        # this task, so a healthy provider leaves the import fully embedded
+        # by the time the CLI prints its summary.
+        self._schedule_embedding()
         return {
             "messages": len(message_ids),
             "extracted": len(message_ids),
@@ -324,8 +379,21 @@ class SocialMemoryWorld:
         logger.info("extraction_scheduled", extra={"space_id": space_id})
         self._spawn(
             ("extraction", space_id, space_id),
-            self._catch_up(self._extraction_reasoner, space_id),
+            self._run_and_embed(self._catch_up(self._extraction_reasoner, space_id)),
         )
+
+    async def _run_and_embed(self, operation: Coroutine[Any, Any, None]) -> None:
+        """Run a reasoner catch-up, then trigger the embedding worker.
+
+        Extraction writes `Memory` rows and the reasoning pipeline writes
+        `hypothesis`/`learning_goal`/`coverage_entry` rows -- the four
+        owner kinds `pending_embeddings()` tracks. Hooking the trigger here,
+        after the write actually lands, means the worker never has to guess
+        which reasoner produced what; it just re-checks the anti-join.
+        """
+
+        await operation
+        self._schedule_embedding()
 
     def _next_induction_delay(self) -> float:
         if self.induction_interval_seconds is not None:
@@ -348,7 +416,7 @@ class SocialMemoryWorld:
     def _schedule_reasoning_pipeline(self, space_id: str) -> None:
         self._spawn(
             ("reasoning-pipeline", space_id, space_id),
-            self.reasoning_pipeline.run_until_caught_up(space_id),
+            self._run_and_embed(self.reasoning_pipeline.run_until_caught_up(space_id)),
         )
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
@@ -398,6 +466,85 @@ class SocialMemoryWorld:
         for space_id in self._stale_spaces():
             self._schedule_reasoning_pipeline(space_id)
 
+    # -- embedding worker ----------------------------------------------
+    #
+    # A single global background task, deduplicated through `_spawn` like
+    # every other worker here. It is deliberately *not* per-space: unlike
+    # extraction/continuity, `store.pending_embeddings()` has no space_id
+    # parameter (it anti-joins across every space at once), so per-space
+    # scheduling would just be extra bookkeeping around one shared query.
+    # It is also deliberately outside `ProviderGate`: that gate exists to
+    # serialize and prioritize load on the one shared remote chat provider,
+    # and embedding here talks to an independent (usually local) provider.
+    # Structural concurrency cap: `_spawn`'s key dedup means at most one
+    # embedding-worker task is ever in flight, and within it batches are
+    # requested one at a time -- that is the "small concurrency limit" the
+    # design brief asks for, without a separate semaphore to maintain.
+
+    def _schedule_embedding(self) -> None:
+        if self._embedding_client is None or self._stopping:
+            return
+        self._spawn(("embedding", "*", "*"), self._embedding_loop())
+
+    async def _embedding_loop(self) -> None:
+        """Drain `pending_embeddings()` in batches until caught up.
+
+        A batch failure (provider down, transport error, bad response) is
+        logged and backed off -- never raised past this loop. The pending
+        rows are untouched by a failed attempt, so the next trigger (the
+        next turn, the next reasoner completion, or nothing at all if the
+        provider stays down) simply retries them; no state is lost.
+        """
+
+        delay = _EMBEDDING_RETRY_BASE_SECONDS
+        while not self._stopping:
+            try:
+                did_work = await self._process_embedding_batch()
+            except Exception:
+                logger.exception("embedding_batch_failed")
+                await self._sleep_or_stop(delay)
+                delay = min(delay * 2, _EMBEDDING_RETRY_MAX_SECONDS)
+                continue
+            delay = _EMBEDDING_RETRY_BASE_SECONDS
+            if not did_work:
+                break
+
+    async def _process_embedding_batch(self) -> bool:
+        """Embed and store one batch. Returns whether there was work to do."""
+
+        client = self._embedding_client
+        if client is None:
+            return False
+        pending = self.store.pending_embeddings(model=client.model, dim=client.dim)
+        if not pending:
+            return False
+        batch = pending[:_EMBEDDING_BATCH_SIZE]
+        # Storage-side discipline: never pass `instruction=` here. Query-side
+        # asymmetric prefixing belongs to the hybrid-retrieval slice.
+        vectors = await client.embed([item.text for item in batch])
+        by_space: dict[str, list[EmbeddingUpsert]] = {}
+        for item, vector in zip(batch, vectors, strict=True):
+            by_space.setdefault(item.space_id, []).append(
+                EmbeddingUpsert(
+                    owner_kind=item.owner_kind, owner_id=item.owner_id,
+                    text=item.text, vector=vector,
+                )
+            )
+        for space_id, items in by_space.items():
+            self.store.upsert_embeddings(space_id, client.model, client.dim, items)
+        logger.info("embedding_batch_completed", extra={"count": len(batch)})
+        return True
+
+    async def _sleep_or_stop(self, seconds: float) -> None:
+        """Sleep in short slices so `stop()` isn't kept waiting on a long
+        backoff -- `stop()` awaits this task rather than cancelling it."""
+
+        remaining = seconds
+        while remaining > 0 and not self._stopping:
+            chunk = min(1.0, remaining)
+            await asyncio.sleep(chunk)
+            remaining -= chunk
+
     def health(self) -> HealthResponse:
         gate = self.model.gate
         queue_status = QueueStatus(
@@ -405,7 +552,17 @@ class SocialMemoryWorld:
             running=gate.in_flight,
             current_label=gate.current_label,
         )
+        embedding_enabled = self._embedding_client is not None
+        embedding_pending = (
+            self.store.pending_embedding_count(
+                model=self._embedding_client.model, dim=self._embedding_client.dim
+            )
+            if self._embedding_client is not None
+            else 0
+        )
         return HealthResponse(
             llm_configured=self.model.configured,
             queue=queue_status,
+            embedding_enabled=embedding_enabled,
+            embedding_pending=embedding_pending,
         )

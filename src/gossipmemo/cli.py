@@ -48,6 +48,7 @@ async def _run_import(args: argparse.Namespace) -> None:
             create_llm(settings),
             extraction_batch_size=settings.extraction_batch_size,
             extraction_batch_timeout_seconds=settings.extraction_batch_timeout_seconds,
+            settings=settings,
         )
         await world.start()
         try:

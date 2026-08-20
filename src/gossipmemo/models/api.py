@@ -118,3 +118,5 @@ class HealthResponse(BaseModel):
     status: Literal["ok"] = "ok"
     llm_configured: bool
     queue: QueueStatus
+    embedding_enabled: bool = False
+    embedding_pending: int = 0
