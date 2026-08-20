@@ -1,0 +1,35 @@
+# GossipMemo prompt overrides.
+#
+# Point GOSSIPMEMO_PROMPTS_PATH at a copy of this file to replace individual
+# prompt fragments without editing code. Every key is a PromptLibrary field
+# name; an absent key keeps the shipped default, and an unknown key is a
+# startup error rather than a silent fallback. See
+# src/gossipmemo/prompts/defaults.py for the shipped text of each field.
+
+# The eight system prompts.
+# extraction_system = """..."""
+# person_reasoning_system = """..."""
+# relationship_reasoning_system = """..."""
+# user_model_reasoning_system = """..."""
+# continuity_system = """..."""
+# coverage_audit_system = """..."""
+# goal_planning_system = """..."""
+query_synthesis_system = """Answer the read-only question using the supplied
+social-memory context. Return concise plain text only. Do not invent facts or
+claim that anything was saved. Answer in the language of the question.
+"""
+
+# The memoir/persona method scan that goal planning reads.
+# coverage_method = """..."""
+
+# The two owner-reasoning stage fragments.
+# projection_stage = "..."
+# actions_stage = "..."
+
+# The per-root tables merge per root: naming M1 leaves M2..P11 at their
+# defaults, and an unknown root id is an error.
+[coverage_root_viewpoints]
+M1 = "Which eras, beginnings, moves, endings, and chapters are legible?"
+
+[coverage_root_blind_spots]
+M1 = "childhood, family origin, education, work, migration, chapters still ahead"

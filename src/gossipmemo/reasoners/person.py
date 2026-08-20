@@ -23,21 +23,6 @@ from .settings import ReasoningSettings
 if TYPE_CHECKING:
     from ..llm import LlmTransport
 
-PERSON_REASONING_SYSTEM_PROMPT = """Reason carefully about one named Person from the
-supplied owner context. Linked memories indicate
-relevance to the target, not that the target is the semantic subject of every
-memory. Do not transfer the current user's or any co-occurring person's traits,
-preferences, intentions, or actions onto the target. Recurring patterns require
-multiple distinct source memories; a narrow impression from one highly diagnostic
-event is allowed when calibrated to that evidence. Identify supported patterns
-in behavior, preferences,
-communication, decision-making, sensitivities, and helpful ways to interact.
-Make reasonable social inferences when supported, with uncertainty proportional
-to evidence. Do not use projections, inferred memories, or hypotheses as evidence.
-Distinguish current conditions from historical events. Use the language that
-best matches supplied memories; keep IDs and enum values unchanged.
-"""
-
 
 @dataclass(slots=True)
 class _PersonTarget:
@@ -63,8 +48,8 @@ async def _reason_person(
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> PersonReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, settings, PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories,
-        hypotheses, PersonProjectionResult, ReasoningActionsResult,
+        transport, settings, settings.prompts.person_reasoning_system, person, memories,
+        inferred_memories, hypotheses, PersonProjectionResult, ReasoningActionsResult,
     )
     return PersonReasoningResult(
         profile_card=projection.profile_card, **actions.model_dump(exclude_none=True),
@@ -127,4 +112,4 @@ def build_person_reasoner(
     return DescriptorReasoner("person", load_context, call, apply, continue_when)
 
 
-__all__ = ["PERSON_REASONING_SYSTEM_PROMPT", "build_person_reasoner"]
+__all__ = ["build_person_reasoner"]

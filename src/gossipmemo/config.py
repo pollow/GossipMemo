@@ -47,6 +47,7 @@ class Settings:
     llm_output_reserve_tokens: int = 8192
     llm_context_safety_tokens: int = 4096
     llm_trace_path: Path | None = None
+    prompts_path: Path | None = None
     induction_time: str = "00:00"
 
     def __post_init__(self) -> None:
@@ -97,6 +98,8 @@ class Settings:
             raise ConfigurationError(
                 "logging_level must be one of CRITICAL, ERROR, WARNING, INFO, DEBUG"
             )
+        if self.prompts_path is not None and not self.prompts_path.is_file():
+            raise ConfigurationError(f"prompts file does not exist: {self.prompts_path}")
         if not _INDUCTION_TIME_PATTERN.fullmatch(self.induction_time):
             raise ConfigurationError(
                 "induction_time must be a 24-hour HH:MM value between 00:00 and 23:59"
@@ -151,6 +154,7 @@ class Settings:
             llm_output_reserve_tokens=int(_env("GOSSIPMEMO_LLM_OUTPUT_RESERVE_TOKENS", "8192")),
             llm_context_safety_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_SAFETY_TOKENS", "4096")),
             llm_trace_path=(Path(value) if (value := _env("GOSSIPMEMO_LLM_TRACE_PATH")) else None),
+            prompts_path=(Path(value) if (value := _env("GOSSIPMEMO_PROMPTS_PATH")) else None),
             induction_time=_env("GOSSIPMEMO_INDUCTION_TIME", "00:00"),
         )
 

@@ -21,22 +21,17 @@ from functools import partial
 from ..chunking import greedy_chunks
 from ..models import COVERAGE_CRITERIA, CoverageEntryView, ExtractedCoverageAudit, MemoryView
 from ..priority import current_call_label, current_call_tier
-from ..prompts import COVERAGE_ROOT_VIEWPOINTS, _evidence_lines, schema_instruction
+from ..prompts import PromptLibrary, schema_instruction
+from ..prompts.render import _evidence_lines
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
 from .settings import ReasoningSettings
 
-COVERAGE_AUDIT_SYSTEM_PROMPT = """Summarize what is known about one area of a person's
-life and persona. Return only the supplied JSON schema. An entry is a
-summary over many memories -- roughly dozens of memories into a short paragraph -- not a
-retelling of them and not memoir prose. Write only what is known; never write what is
-missing, unclear, or worth asking about. Do not invent facts, evidence, or private
-details, and do not diagnose. Keep entries concise and in the language of the evidence."""
-
 
 def coverage_audit_prompt(
     root: str, entries: Sequence[CoverageEntryView], memories: Sequence[MemoryView],
+    *, prompts: PromptLibrary,
 ) -> str:
     """One root's current entries plus one bounded chunk of its new evidence."""
     entry_lines = "\n".join(
@@ -44,7 +39,7 @@ def coverage_audit_prompt(
     ) or "- (none)"
     return (
         f"<coverage-root id={root!r} facet={COVERAGE_CRITERIA.get(root, '')!r}>\n"
-        + COVERAGE_ROOT_VIEWPOINTS.get(root, "") + "\n</coverage-root>\n"
+        + prompts.coverage_root_viewpoints.get(root, "") + "\n</coverage-root>\n"
         "<current-entries>\n" + entry_lines + "\n</current-entries>\n"
         "<new-evidence>\n" + _evidence_lines(list(memories)) + "\n</new-evidence>\n"
         "Fold this evidence into the entries for this root. Add an entry for a topic that "
@@ -75,8 +70,8 @@ def _structured_request(
 
 
 async def _audit_coverage(
-    transport: LlmTransport, root: str, entries: Sequence[CoverageEntryView],
-    memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, root: str,
+    entries: Sequence[CoverageEntryView], memories: Sequence[MemoryView],
 ) -> tuple[ExtractedCoverageAudit, list[MemoryView]]:
     """Audit the largest prefix of `memories` that fits one request.
 
@@ -89,8 +84,9 @@ async def _audit_coverage(
 
     def request_for(chunk: Sequence[MemoryView]) -> ChatCompletionRequest:
         return _structured_request(
-            transport, COVERAGE_AUDIT_SYSTEM_PROMPT,
-            coverage_audit_prompt(root, entries, chunk), ExtractedCoverageAudit,
+            transport, settings.prompts.coverage_audit_system,
+            coverage_audit_prompt(root, entries, chunk, prompts=settings.prompts),
+            ExtractedCoverageAudit,
         )
 
     def fits(chunk: Sequence[MemoryView]) -> bool:
@@ -113,7 +109,7 @@ def build_coverage_reasoner(
 ) -> DescriptorReasoner:
     """Audit one root's next evidence chunk per attempt, until none is behind."""
 
-    audit_coverage = partial(_audit_coverage, model)
+    audit_coverage = partial(_audit_coverage, model, settings)
 
     def load_context(space_id: str):
         return store.coverage_context(space_id)
@@ -138,4 +134,4 @@ def build_coverage_reasoner(
     return DescriptorReasoner("coverage", load_context, call, apply, continue_when)
 
 
-__all__ = ["COVERAGE_AUDIT_SYSTEM_PROMPT", "build_coverage_reasoner", "coverage_audit_prompt"]
+__all__ = ["build_coverage_reasoner", "coverage_audit_prompt"]

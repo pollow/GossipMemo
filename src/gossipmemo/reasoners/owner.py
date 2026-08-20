@@ -82,7 +82,7 @@ async def owner_reasoning(
         transport, settings, system_prompt, target, memories, bounded_inferred,
         bounded_hypotheses, projection_type,
     )
-    if not _stage2_fits(transport, first_messages, actions_type):
+    if not _stage2_fits(transport, settings, first_messages, actions_type):
         digest = await _digest_evidence(
             transport, settings, target, memories, bounded_inferred, bounded_hypotheses,
             system_prompt, projection_type, actions_type,
@@ -91,7 +91,7 @@ async def owner_reasoning(
             transport, settings, system_prompt, target, digest, bounded_inferred,
             bounded_hypotheses, projection_type,
         )
-        if not _stage2_fits(transport, first_messages, actions_type):
+        if not _stage2_fits(transport, settings, first_messages, actions_type):
             raise ValueError("owner evidence digest did not fit context budget")
 
     first, projection = await structured(
@@ -104,7 +104,8 @@ async def owner_reasoning(
             ChatMessage(role="assistant", content=first),
             ChatMessage(
                 role="user",
-                content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+                content=actions_stage_prompt(settings.prompts) + "\n"
+                + schema_instruction(actions_type),
             ),
         ],
         actions_type,
@@ -127,20 +128,23 @@ def _first_messages(
         ChatMessage(role="user", content=prefix),
         ChatMessage(
             role="user",
-            content=projection_stage_prompt() + "\n" + schema_instruction(projection_type),
+            content=projection_stage_prompt(settings.prompts) + "\n"
+            + schema_instruction(projection_type),
         ),
     ]
 
 
 def _stage2_estimate(
-    transport: LlmTransport, first_messages: list[ChatMessage], actions_type: type[BaseModel],
+    transport: LlmTransport, settings: ReasoningSettings, first_messages: list[ChatMessage],
+    actions_type: type[BaseModel],
 ) -> int:
     request = transport.prepare(
         first_messages + [
             ChatMessage(role="assistant", content=""),
             ChatMessage(
                 role="user",
-                content=actions_stage_prompt() + "\n" + schema_instruction(actions_type),
+                content=actions_stage_prompt(settings.prompts) + "\n"
+                + schema_instruction(actions_type),
             ),
         ],
         structured=True,
@@ -155,10 +159,11 @@ def _stage2_estimate(
 
 
 def _stage2_fits(
-    transport: LlmTransport, first_messages: list[ChatMessage], actions_type: type[BaseModel],
+    transport: LlmTransport, settings: ReasoningSettings, first_messages: list[ChatMessage],
+    actions_type: type[BaseModel],
 ) -> bool:
     return transport.context_budget.report(
-        _stage2_estimate(transport, first_messages, actions_type)
+        _stage2_estimate(transport, settings, first_messages, actions_type)
     ).fits
 
 
@@ -177,7 +182,7 @@ def _bounded_comparisons(
     context_budget = transport.context_budget
     empty_first = _first_messages(
         transport, settings, system_prompt, target, [], [], [], projection_type)
-    base = _stage2_estimate(transport, empty_first, actions_type)
+    base = _stage2_estimate(transport, settings, empty_first, actions_type)
     ceiling = min(
         context_budget.usable_input_tokens,
         base + context_budget.usable_input_tokens // 3,
@@ -196,7 +201,7 @@ def _bounded_comparisons(
             transport, settings, system_prompt, target, [], candidate_inferred,
             candidate_hypotheses, projection_type,
         )
-        return _stage2_estimate(transport, first, actions_type) <= ceiling
+        return _stage2_estimate(transport, settings, first, actions_type) <= ceiling
 
     # Preserve actionable IDs first with empty prose, in the stable store
     # order (newest first). Then spend remaining budget on bounded prose.
@@ -383,7 +388,7 @@ async def _digest_evidence(
         )
 
     def target_fits(output: list[MemoryView | OwnerEvidenceDigestView]) -> bool:
-        return _stage2_fits(transport, final_first_messages(output), actions_type)
+        return _stage2_fits(transport, settings, final_first_messages(output), actions_type)
 
     def progress_size(output: list[MemoryView | OwnerEvidenceDigestView]) -> int:
         return context_budget.estimate_text(

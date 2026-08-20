@@ -26,6 +26,7 @@ from .models import (
     TurnRequest,
     TurnResponse,
 )
+from .prompts import PromptLibrary
 from .reasoners import ReasoningSettings
 from .store import AmbiguousPersonError, PersonMergeError, SqliteWorldStore
 from .world import SocialMemoryWorld
@@ -38,7 +39,14 @@ def build_world(settings: Settings) -> SocialMemoryWorld:
         extraction_batch_size=settings.extraction_batch_size,
         extraction_batch_timeout_seconds=settings.extraction_batch_timeout_seconds,
         induction_time=settings.induction_time,
-        reasoning=ReasoningSettings(user_name=settings.user_name),
+        reasoning=ReasoningSettings(
+            user_name=settings.user_name,
+            prompts=(
+                PromptLibrary.from_file(settings.prompts_path)
+                if settings.prompts_path
+                else PromptLibrary()
+            ),
+        ),
     )
 
 

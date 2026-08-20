@@ -23,10 +23,13 @@ from gossipmemo.models import (
     MemoryView,
     ModelMessage,
 )
+from gossipmemo.reasoners import ReasoningSettings
 from gossipmemo.reasoners.continuity import _reason_continuity
 from gossipmemo.reasoners.coverage import _audit_coverage
 from gossipmemo.reasoners.learning_goals import _plan_learning_goals
 from gossipmemo.transport import ChatCompletionRequest
+
+REASONING = ReasoningSettings()
 
 
 def _memory(identifier: str, content: str) -> MemoryView:
@@ -58,10 +61,10 @@ def test_small_paths_send_original_single_requests() -> None:
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
-            await _audit_coverage(adapter, "M1", [_entry("c", "prior understanding")],
+            await _audit_coverage(adapter, REASONING, "M1", [_entry("c", "prior understanding")],
                                   [_memory("e", "raw evidence")])
             await _reason_continuity(
-                adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
+                adapter, REASONING, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
     assert "prior understanding" in str(calls[0]) and "raw evidence" in str(calls[0])
@@ -83,7 +86,7 @@ def test_coverage_cjk_backlog_audits_one_budget_sized_chunk() -> None:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
             memories = [_memory(f"m{i}", "证据" * 2500) for i in range(3)]
-            _, audited = await _audit_coverage(adapter, "M1", [], memories)
+            _, audited = await _audit_coverage(adapter, REASONING, "M1", [], memories)
             # One request per attempt; the caller only commits the evidence
             # this request actually read, so the rest stays in the backlog.
             assert 0 < len(audited) < len(memories)
@@ -122,7 +125,7 @@ def test_goal_planning_fans_out_per_root_and_reconciles_once() -> None:
                 *(_entry(f"m1-{i}", "证据" * 2500, path=f"阶段{i}") for i in range(3)),
                 _entry("m2-overview", "日常生活的轮廓已知。", root="M2"),
             ]
-            await _plan_learning_goals(adapter, entries, [], [])
+            await _plan_learning_goals(adapter, REASONING, entries, [], [])
     asyncio.run(run())
     prompts = [" ".join(message["content"] for message in item["messages"]) for item in calls]
     first_root = [item for item in prompts if "id='M1'" in item]
@@ -150,7 +153,7 @@ def test_continuity_oversized_cjk_streams_and_preserves_last_id() -> None:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
             result = await _reason_continuity(
-                adapter, ContinuityView(),
+                adapter, REASONING, ContinuityView(),
                 [_message("m0", "消息" * 9000), _message("m1", "消息" * 9000)])
             assert result.through_message_id == "m1"
     asyncio.run(run())

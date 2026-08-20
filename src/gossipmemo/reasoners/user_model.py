@@ -22,23 +22,13 @@ from .settings import ReasoningSettings
 if TYPE_CHECKING:
     from ..llm import LlmTransport
 
-USER_MODEL_REASONING_SYSTEM_PROMPT = """Reason carefully about the fixed current user from
-active memories marked about_user. Capture preferences, communication preferences, goals, current
-situations, and practical interaction guidance. Generalize recurring patterns
-when supported, but do not turn a one-off event into a stable trait or include
-another person's identity. Use valid_from and valid_to to separate current
-conditions from historical events. Do not use projections, inferred memories, or
-hypotheses as evidence. Use the language that best matches supplied memories;
-keep IDs and enum values unchanged.
-"""
-
 
 async def _reason_user_model(
     transport: LlmTransport, settings: ReasoningSettings, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, settings, USER_MODEL_REASONING_SYSTEM_PROMPT,
+        transport, settings, settings.prompts.user_model_reasoning_system,
         UserModelView(space_id="current"),
         memories, inferred_memories, hypotheses, PersonProjectionResult,
         UserReasoningActionsResult,
@@ -80,7 +70,4 @@ def build_user_model_reasoner(
     return DescriptorReasoner("user_model", load_context, call, apply)
 
 
-__all__ = [
-    "USER_MODEL_REASONING_SYSTEM_PROMPT",
-    "build_user_model_reasoner",
-]
+__all__ = ["build_user_model_reasoner"]

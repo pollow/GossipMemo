@@ -1,18 +1,23 @@
 from gossipmemo.models import GoalClosureRecommendation, MemoryView, ModelMessage
-from gossipmemo.query import QUERY_SYNTHESIS_SYSTEM_PROMPT
-from gossipmemo.reasoners import (
+from gossipmemo.prompts import PromptLibrary
+from gossipmemo.prompts.defaults import (
     CONTINUITY_SYSTEM_PROMPT,
     COVERAGE_AUDIT_SYSTEM_PROMPT,
     EXTRACTION_SYSTEM_PROMPT,
     GOAL_PLANNING_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
+    QUERY_SYNTHESIS_SYSTEM_PROMPT,
     RELATIONSHIP_REASONING_SYSTEM_PROMPT,
     USER_MODEL_REASONING_SYSTEM_PROMPT,
+)
+from gossipmemo.reasoners import (
     coverage_audit_prompt,
     extraction_prompt,
     goal_candidate_prompt,
     goal_reconciliation_prompt,
 )
+
+PROMPTS = PromptLibrary()
 
 
 def message(
@@ -161,7 +166,7 @@ def test_all_prompt_contracts_keep_i18n_rule_compact():
 
 
 def test_coverage_audit_prompt_summarizes_one_root_without_hunting_gaps():
-    prompt = coverage_audit_prompt("M4", [], [])
+    prompt = coverage_audit_prompt("M4", [], [], prompts=PROMPTS)
     # The audited root arrives through the call structure, with its own
     # viewpoint line; naming what is missing belongs to goal planning, so the
     # rubric's blind-spot cues stay out of this prompt.
@@ -174,7 +179,7 @@ def test_coverage_audit_prompt_summarizes_one_root_without_hunting_gaps():
 
 
 def test_goal_candidate_prompt_carries_one_root_and_four_expansions():
-    prompt = goal_candidate_prompt("M4", [], [])
+    prompt = goal_candidate_prompt("M4", [], [], prompts=PROMPTS)
     assert "M4" in prompt and "people_and_relationship_arcs" in prompt
     # The rubric's blind-spot cues moved here from the audit: they are what
     # a sideways expansion needs, and the auditor no longer hunts gaps.
@@ -190,7 +195,7 @@ def test_goal_candidate_prompt_votes_closure_without_mutating():
     but the prompt must still say a recommendation is a vote, not a
     transition, since reconciliation remains the only mutating pass.
     """
-    prompt = " ".join(goal_candidate_prompt("M4", [], []).split())
+    prompt = " ".join(goal_candidate_prompt("M4", [], [], prompts=PROMPTS).split())
     assert "closure recommendation" in prompt
     assert "vote for a later pass to weigh, not a transition" in prompt
     assert "do not remove or alter the goal here" in prompt
@@ -217,7 +222,7 @@ def test_goal_planning_leaves_asking_now_to_the_consuming_agent():
 
 
 def test_goal_reconciliation_is_the_only_lifecycle_pass_and_keeps_breadth():
-    candidates = goal_candidate_prompt("M1", [], [])
+    candidates = goal_candidate_prompt("M1", [], [], prompts=PROMPTS)
     final = goal_reconciliation_prompt([], [], [])
     assert "do not transition, retire, defer, update" in candidates
     assert "only pass that may transition a goal's lifecycle" in final

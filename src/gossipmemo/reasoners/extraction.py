@@ -19,7 +19,8 @@ from typing import Any
 
 from ..models import ExtractionResult, MemoryView, ModelMessage
 from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier, llm_call_tier
-from ..prompts import _json, schema_instruction
+from ..prompts import schema_instruction
+from ..prompts.render import _json
 from ..store import PendingExtraction, WorldStore
 from ..transport import ChatMessage, LlmTransport, structured
 from .base import AttemptLoop, Reasoner
@@ -48,20 +49,6 @@ def _is_exhausted(pending: PendingExtraction) -> bool:
     return (
         pending.state == "failed" and pending.attempts >= MAX_EXTRACTION_ATTEMPTS
     )
-
-
-EXTRACTION_SYSTEM_PROMPT = """Extract useful, provenance-aware memories from the messages.
-Return only the supplied JSON schema. Keep the original meaning, speaker, and
-uncertainty. Extract explicit facts, events, preferences, plans, and situations;
-do not make broad personality inferences from one conversation. Leave recurring
-patterns to reasoning passes. Use stated, observed, or reported basis; never use
-an inferred basis for extraction. Resolve relative dates using each message's
-occurred_at. A reported claim must remain attributed. The user is not a Person;
-two people appearing
-together do not by themselves establish a relationship. Use the language that
-best matches the dominant language of current user evidence for every generated
-natural-language field, including new display names; keep IDs and enum values unchanged.
-"""
 
 
 def extraction_prompt(
@@ -152,7 +139,8 @@ async def _extract(
         [
             ChatMessage(
                 role="system",
-                content=EXTRACTION_SYSTEM_PROMPT + "\n\n" + schema_instruction(ExtractionResult),
+                content=settings.prompts.extraction_system + "\n\n"
+                + schema_instruction(ExtractionResult),
             ),
             ChatMessage(
                 role="user",
@@ -241,4 +229,4 @@ def build_extraction_reasoner(
     return _ExtractionReasoner(store, model, settings)
 
 
-__all__ = ["EXTRACTION_SYSTEM_PROMPT", "build_extraction_reasoner", "extraction_prompt"]
+__all__ = ["build_extraction_reasoner", "extraction_prompt"]

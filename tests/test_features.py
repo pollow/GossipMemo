@@ -821,7 +821,8 @@ def test_openai_compatible_adapter_retries_transient_statuses(monkeypatch):
                 retry_base_seconds=2,
                 retry_max_seconds=10,
             )
-            assert await synthesize(adapter, "Question", QueryContext()) == "Recovered"
+            answer = await synthesize(adapter, "Question", QueryContext(), REASONING.prompts)
+            assert answer == "Recovered"
 
     asyncio.run(scenario())
     assert requests == 3
@@ -849,7 +850,7 @@ def test_openai_compatible_adapter_does_not_retry_permanent_status(monkeypatch):
                 "http://llm.test/v1", "key", "test-model", client=client
             )
             with pytest.raises(LLMRequestError, match="HTTP 401: bad key"):
-                await synthesize(adapter, "Question", QueryContext())
+                await synthesize(adapter, "Question", QueryContext(), REASONING.prompts)
 
     asyncio.run(scenario())
     assert requests == 1
@@ -890,7 +891,8 @@ def test_openai_compatible_adapter_retries_transport_errors(monkeypatch):
                 retry_base_seconds=3,
                 retry_max_seconds=10,
             )
-            assert await synthesize(adapter, "Question", QueryContext()) == "Recovered"
+            answer = await synthesize(adapter, "Question", QueryContext(), REASONING.prompts)
+            assert answer == "Recovered"
 
     asyncio.run(scenario())
     assert requests == 2

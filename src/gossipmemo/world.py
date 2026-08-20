@@ -396,7 +396,8 @@ class SocialMemoryWorld:
         context = self.store.read(space_id, request)
         # `synthesize` is the only synchronous, HTTP-response-blocking call;
         # it sets the foreground gate tier itself in query.py.
-        answer = await synthesize(self.model, request.question, context)
+        answer = await synthesize(
+            self.model, request.question, context, self.reasoning.prompts)
         return QueryResponse(answer=answer, **context.model_dump())
 
     def add_memory(self, space_id: str, request: ManualMemoryRequest) -> str:

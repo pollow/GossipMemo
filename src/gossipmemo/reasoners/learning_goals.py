@@ -40,31 +40,13 @@ from ..models import (
     LearningGoalView,
 )
 from ..priority import current_call_label, current_call_tier
-from ..prompts import (
-    COVERAGE_METHOD,
-    COVERAGE_ROOT_BLIND_SPOTS,
-    COVERAGE_ROOT_VIEWPOINTS,
-    _json,
-)
+from ..prompts import PromptLibrary
+from ..prompts.render import _json
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, LlmTransport, structured
 from .base import DescriptorReasoner
 from .coverage import _structured_request
 from .settings import ReasoningSettings
-
-GOAL_PLANNING_SYSTEM_PROMPT = """Plan optional directions in which this user's memoir
-and persona could be understood better, reading summaries of what is already
-understood. Return only the supplied JSON schema. A direction is natural language: what
-it is, why it is worth understanding, and one suggested wording. Private, intimate,
-painful, and stigmatized areas are not off limits -- an unlit part of a life is still
-part of it, and recording a direction is not asking about it. Whether to raise one now,
-how to word it, and how to keep that exchange safe is the consuming agent's decision in
-the moment, not this planner's. A direction may be about a friend, but it belongs to the
-user's own life, relationships, or memoir: never a standalone information-gathering task
-about a third party, and never a suggestion that the user test, probe, or secretly
-verify anyone. Do not diagnose, and do not assume that reconciliation, disclosure, or
-repair is the right ending of any thread. Omission is no-op: only explicitly transition
-an existing supplied goal when its lifecycle changes."""
 
 
 def _entry_lines(entries: Sequence[CoverageEntryView]) -> str:
@@ -82,13 +64,15 @@ def _goal_lines(goals: Sequence[LearningGoalView]) -> str:
 
 def goal_candidate_prompt(
     root: str, entries: Sequence[CoverageEntryView], open_goals: Sequence[LearningGoalView],
+    *, prompts: PromptLibrary,
 ) -> str:
     """One root's entries and the four directions a candidate may expand in."""
     return (
         f"<coverage-root id={root!r} facet={COVERAGE_CRITERIA.get(root, '')!r}>\n"
-        + COVERAGE_ROOT_VIEWPOINTS.get(root, "") + "\nAreas that stay unsaid under this "
-        "root unless something invites them: " + COVERAGE_ROOT_BLIND_SPOTS.get(root, "")
-        + "\n</coverage-root>\n<method>\n" + COVERAGE_METHOD + "\n</method>\n"
+        + prompts.coverage_root_viewpoints.get(root, "") + "\nAreas that stay unsaid under "
+        "this root unless something invites them: "
+        + prompts.coverage_root_blind_spots.get(root, "")
+        + "\n</coverage-root>\n<method>\n" + prompts.coverage_method + "\n</method>\n"
         "<entries>\n" + _entry_lines(entries) + "\n</entries>\n"
         "<open-goals comparison-only=\"true\">\n" + _goal_lines(open_goals) + "\n</open-goals>\n"
         "These entries are everything that is understood about this root; the entry with "
@@ -156,8 +140,8 @@ def goal_candidate_reduction_prompt(candidates: Sequence[LearningGoalCandidate])
 
 
 async def _root_candidates(
-    transport: LlmTransport, root: str, entries: Sequence[CoverageEntryView],
-    open_goals: Sequence[LearningGoalView],
+    transport: LlmTransport, settings: ReasoningSettings, root: str,
+    entries: Sequence[CoverageEntryView], open_goals: Sequence[LearningGoalView],
 ) -> tuple[list[LearningGoalCandidate], list[GoalClosureRecommendation]]:
     """Plan one root, splitting its child entries when they outgrow a request.
 
@@ -173,8 +157,9 @@ async def _root_candidates(
 
     def request_for(chunk: Sequence[CoverageEntryView]) -> ChatCompletionRequest:
         return _structured_request(
-            transport, GOAL_PLANNING_SYSTEM_PROMPT,
-            goal_candidate_prompt(root, [*overview, *chunk], open_goals),
+            transport, settings.prompts.goal_planning_system,
+            goal_candidate_prompt(
+                root, [*overview, *chunk], open_goals, prompts=settings.prompts),
             GoalPlanningCandidates,
         )
 
@@ -199,7 +184,7 @@ async def _root_candidates(
 
 
 async def _plan_learning_goals(
-    transport: LlmTransport, entries: Sequence[CoverageEntryView],
+    transport: LlmTransport, settings: ReasoningSettings, entries: Sequence[CoverageEntryView],
     open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
 ) -> GoalPlanningResult:
     context_budget = transport.context_budget
@@ -215,7 +200,7 @@ async def _plan_learning_goals(
         root_entries = [item for item in entries if item.root == root]
         if root_entries:
             root_candidates, root_recommendations = await _root_candidates(
-                transport, root, root_entries, open_goals)
+                transport, settings, root, root_entries, open_goals)
             candidates.extend(root_candidates)
             recommendations.extend(root_recommendations)
     if not candidates and not open_goals:
@@ -223,7 +208,7 @@ async def _plan_learning_goals(
 
     def reconciliation_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
         return _structured_request(
-            transport, GOAL_PLANNING_SYSTEM_PROMPT,
+            transport, settings.prompts.goal_planning_system,
             goal_reconciliation_prompt(items, open_goals, recent_closed_goals, recommendations),
             GoalPlanningResult,
         )
@@ -233,7 +218,7 @@ async def _plan_learning_goals(
 
         def reduction_request(items: Sequence[LearningGoalCandidate]) -> ChatCompletionRequest:
             return _structured_request(
-                transport, GOAL_PLANNING_SYSTEM_PROMPT,
+                transport, settings.prompts.goal_planning_system,
                 goal_candidate_reduction_prompt(items), GoalPlanningCandidates,
             )
 
@@ -283,7 +268,7 @@ def build_learning_goals_reasoner(
 ) -> DescriptorReasoner:
     """Single pass, no retry loop."""
 
-    plan_learning_goals = partial(_plan_learning_goals, model)
+    plan_learning_goals = partial(_plan_learning_goals, model, settings)
 
     def load_context(space_id: str):
         return store.learning_goal_context(space_id)
@@ -307,7 +292,6 @@ def build_learning_goals_reasoner(
 
 
 __all__ = [
-    "GOAL_PLANNING_SYSTEM_PROMPT",
     "build_learning_goals_reasoner",
     "goal_candidate_prompt",
     "goal_candidate_reduction_prompt",

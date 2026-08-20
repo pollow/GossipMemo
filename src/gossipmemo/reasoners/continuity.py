@@ -25,21 +25,14 @@ from typing import Any
 from ..chunking import greedy_chunks
 from ..models import ContinuityReasoningResult, ContinuityView, ModelMessage
 from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier
-from ..prompts import _json, schema_instruction
+from ..prompts import schema_instruction
+from ..prompts.render import _json
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
 from .settings import ReasoningSettings
 
 logger = logging.getLogger(__name__)
-
-CONTINUITY_SYSTEM_PROMPT = """Rebuild compact cross-session continuity.
-Return only the supplied JSON schema. Keep ongoing threads, recent decisions,
-pending actions, and context useful for the next conversation. Do not make
-long-term personality inferences or copy person/user profiles; the current user
-is not a Person. Use the language that best matches supplied messages and prior
-continuity; keep IDs and enum values unchanged.
-"""
 
 
 def continuity_prompt(
@@ -55,13 +48,14 @@ def continuity_prompt(
 
 
 def _continuity_request(
-    transport: LlmTransport, prior: ContinuityView | None, chunk: list[ModelMessage],
+    transport: LlmTransport, settings: ReasoningSettings,
+    prior: ContinuityView | None, chunk: list[ModelMessage],
 ) -> ChatCompletionRequest:
     return transport.prepare(
         [
             ChatMessage(
                 role="system",
-                content=CONTINUITY_SYSTEM_PROMPT + "\n\n" +
+                content=settings.prompts.continuity_system + "\n\n" +
                 schema_instruction(ContinuityReasoningResult),
             ),
             ChatMessage(role="user", content=continuity_prompt(prior, chunk)),
@@ -96,7 +90,8 @@ def _fit_continuity_prior(
 
 
 async def _reason_continuity(
-    transport: LlmTransport, continuity: ContinuityView | None, messages: Sequence[ModelMessage],
+    transport: LlmTransport, settings: ReasoningSettings,
+    continuity: ContinuityView | None, messages: Sequence[ModelMessage],
 ) -> ContinuityReasoningResult:
     source = list(messages)
     if not source:
@@ -106,7 +101,7 @@ async def _reason_continuity(
     def request_for(
         prior: ContinuityView | None, chunk: list[ModelMessage]
     ) -> ChatCompletionRequest:
-        return _continuity_request(transport, prior, chunk)
+        return _continuity_request(transport, settings, prior, chunk)
 
     result: ContinuityReasoningResult | None = None
     normal = request_for(continuity, source)
@@ -159,7 +154,7 @@ async def _reason_continuity(
 def build_continuity_reasoner(
     store: WorldStore, model: LlmTransport, settings: ReasoningSettings
 ) -> DescriptorReasoner:
-    reason_continuity = partial(_reason_continuity, model)
+    reason_continuity = partial(_reason_continuity, model, settings)
 
     def load_context(space_id: str):
         context = store.continuity_context(space_id)
@@ -191,4 +186,4 @@ def build_continuity_reasoner(
     )
 
 
-__all__ = ["CONTINUITY_SYSTEM_PROMPT", "build_continuity_reasoner", "continuity_prompt"]
+__all__ = ["build_continuity_reasoner", "continuity_prompt"]

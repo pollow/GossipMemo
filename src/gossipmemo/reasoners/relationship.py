@@ -23,20 +23,6 @@ from .settings import ReasoningSettings
 if TYPE_CHECKING:
     from ..llm import LlmTransport
 
-RELATIONSHIP_REASONING_SYSTEM_PROMPT = """Reason carefully about the relationship between
-the two endpoint People in the supplied owner context. Linked memories indicate relevance to the
-endpoints, not relationship evidence by themselves. Do not transfer the current
-user's or either endpoint's standalone traits, preferences, intentions, or actions
-into a relationship claim. Mere co-occurrence is not relationship evidence. Look
-for recurring interaction patterns, cooperation, friction, trust, initiative, and
-meaningful changes in closeness, tone, or status. Recurring patterns require
-multiple distinct source memories; a narrow inference from one highly diagnostic
-interaction is allowed when calibrated to that evidence. Do not use projections,
-inferred memories, or hypotheses as evidence. Distinguish current from historical
-conditions. Use the language that best matches supplied memories; keep IDs and
-enum values unchanged.
-"""
-
 
 @dataclass(slots=True)
 class _RelationshipTarget:
@@ -62,7 +48,7 @@ async def _reason_relationship(
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> RelationshipReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, settings, RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories,
+        transport, settings, settings.prompts.relationship_reasoning_system, relationship, memories,
         inferred_memories, hypotheses, RelationshipProjectionResult, ReasoningActionsResult,
     )
     return RelationshipReasoningResult(
@@ -125,7 +111,4 @@ def build_relationship_reasoner(
     return DescriptorReasoner("relationship", load_context, call, apply, continue_when)
 
 
-__all__ = [
-    "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
-    "build_relationship_reasoner",
-]
+__all__ = ["build_relationship_reasoner"]

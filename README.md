@@ -79,6 +79,13 @@ preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
 counts, status, and durations—not message bodies, bearer tokens, or LLM API
 keys.
 
+The static prompt text ships in `src/gossipmemo/prompts/defaults.py`. To change
+any of it without editing code, set `GOSSIPMEMO_PROMPTS_PATH` to a TOML file of
+`field = "text"` overrides; `prompts.example.toml` lists every field name. Keys
+left out keep the shipped wording, the two per-root coverage tables merge one
+root at a time, and an unknown key, an unknown root id, or a missing file is a
+startup error rather than a silent fall back to the default.
+
 To audit prompt construction, set `GOSSIPMEMO_LLM_TRACE_PATH` to a JSONL file.
 Every provider request is then appended verbatim together with its completion,
 the reasoner label that issued it (`audit-coverage`, `plan-learning-goals`, and
