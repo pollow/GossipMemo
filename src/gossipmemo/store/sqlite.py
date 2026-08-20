@@ -1,23 +1,19 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
-import random
 import re
 import sqlite3
 import unicodedata
-import uuid
 from collections import Counter
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from .migrations import migrate_database
-from .models import (
+from ..migrations import migrate_database
+from ..models import (
     COVERAGE_ROOTS,
     ContextBundle,
     ContinuityReasoningResult,
@@ -49,79 +45,23 @@ from .models import (
     SupersedeRequest,
     UserModelReasoningResult,
     UserModelView,
-    utc_now,
+)
+from .policy import (
+    dump_json,
+    fts_query,
+    is_profile_stale,
+    load_json,
+    new_id,
+    normalized,
+    now_iso,
+    rank_guidance,
+    sample_learning_goals,
+    similar_memory_content,
 )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_EXTRACTION_COMPARISON_LIMIT = 12
-
-
-def _id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex}"
-
-
-def _now() -> str:
-    return utc_now().isoformat()
-
-
-def _normalized(value: str) -> str:
-    return " ".join(value.casefold().split())
-
-
-def _similar_memory_content(left: str, right: str) -> bool:
-    """Conservatively match near-identical Memory wording."""
-
-    def canonical(value: str) -> str:
-        value = unicodedata.normalize("NFKC", value).casefold()
-        value = re.sub(r"[^\w\u4e00-\u9fff]+", " ", value, flags=re.UNICODE)
-        return " ".join(value.split())
-
-    left, right = canonical(left), canonical(right)
-    if left == right:
-        return True
-    # Preserve polarity and numeric/date changes even when wording is close.
-    if re.findall(r"\d+(?:\.\d+)?", left) != re.findall(r"\d+(?:\.\d+)?", right):
-        return False
-
-    def has_negation(value: str) -> bool:
-        english = re.search(r"\b(?:not|never|no)\b", value) is not None
-        return english or any(token in value for token in ("不", "没", "未"))
-
-    if has_negation(left) != has_negation(right):
-        return False
-    return SequenceMatcher(None, left, right).ratio() >= 0.97
-
-
-def _json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def _loads(value: str | None, default: Any) -> Any:
-    if not value:
-        return default
-    try:
-        return json.loads(value)
-    except json.JSONDecodeError:
-        return default
-
-
-def _fts_query(question: str, excluded: Iterable[str] = ()) -> str | None:
-    """Build a conservative FTS5 OR query from natural-language input."""
-
-    if question.casefold().strip() in {"dossier", "reason"}:
-        return None
-    excluded_terms = {_normalized(value) for value in excluded}
-    terms: list[str] = []
-    for token in re.findall(r"[^\W_]+", question.casefold(), flags=re.UNICODE):
-        if len(token) < 3 or _normalized(token) in excluded_terms:
-            continue
-        if any("\u4e00" <= char <= "\u9fff" for char in token) and len(token) > 3:
-            terms.extend(token[index: index + 3] for index in range(len(token) - 2))
-        else:
-            terms.append(token)
-    unique = list(dict.fromkeys(terms))[:16]
-    return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in unique) or None
 
 
 @dataclass
@@ -309,10 +249,11 @@ class SqliteWorldStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         migrate_database(self.path)
         self._enable_wal()
-        schema = Path(__file__).with_name("schema.sql").read_text(encoding="utf-8")
+        schema_path = Path(__file__).resolve().parent.parent / "schema.sql"
+        schema = schema_path.read_text(encoding="utf-8")
         with self._connect() as connection:
             connection.executescript(schema)
-            now = _now()
+            now = now_iso()
             connection.executemany(
                 "INSERT OR IGNORE INTO coverage_roots(space_id, root, updated_at) "
                 "SELECT id, ?, ? FROM spaces",
@@ -349,7 +290,7 @@ class SqliteWorldStore:
 
     def ensure_space(self, space_id: str, name: str | None = None) -> str:
         with self._connect() as connection:
-            now = _now()
+            now = now_iso()
             connection.execute(
                 "INSERT OR IGNORE INTO spaces(id, name, created_at, updated_at) "
                 "VALUES (?, ?, ?, ?)",
@@ -377,7 +318,7 @@ class SqliteWorldStore:
         ).fetchone()
         if row:
             return row
-        normalized = _normalized(reference)
+        normalized_reference = normalized(reference)
         alias_rows = connection.execute(
             """
             SELECT p.* FROM people p
@@ -385,7 +326,7 @@ class SqliteWorldStore:
             WHERE p.space_id = ? AND a.normalized_value = ? AND p.status = 'active'
             LIMIT 2
             """,
-            (space_id, normalized),
+            (space_id, normalized_reference),
         ).fetchall()
         if len(alias_rows) == 1:
             return alias_rows[0]
@@ -405,8 +346,8 @@ class SqliteWorldStore:
             existing = self._find_person(connection, space_id, display_name)
             if existing:
                 return existing["id"]
-        person_id = _id("person")
-        now = _now()
+        person_id = new_id("person")
+        now = now_iso()
         connection.execute(
             """
             INSERT INTO people(
@@ -421,7 +362,7 @@ class SqliteWorldStore:
                 id, space_id, person_id, value, normalized_value
             ) VALUES (?, ?, ?, ?, ?)
             """,
-            (_id("alias"), space_id, person_id, display_name, _normalized(display_name)),
+            (new_id("alias"), space_id, person_id, display_name, normalized(display_name)),
         )
         return person_id
 
@@ -459,7 +400,7 @@ class SqliteWorldStore:
                     message_ids.append(duplicate["id"])
                     continue
 
-                message_id = _id("message")
+                message_id = new_id("message")
                 try:
                     connection.execute(
                         """
@@ -476,11 +417,11 @@ class SqliteWorldStore:
                             message.author,
                             message.content,
                             message.occurred_at.isoformat(),
-                            _now(),
+                            now_iso(),
                             message.source.provider,
                             message.source.conversation_key,
                             message.source.item_id,
-                            _json(message.source.metadata),
+                            dump_json(message.source.metadata),
                             message.idempotency_key,
                         ),
                     )
@@ -533,10 +474,10 @@ class SqliteWorldStore:
             pending_ids = [row["id"] for row in rows]
             if not pending_ids:
                 return None
-            batch_id = _id("batch")
+            batch_id = new_id("batch")
             connection.execute(
                 "INSERT INTO extraction_batches(id, space_id, created_at) VALUES (?, ?, ?)",
-                (batch_id, space_id, _now()),
+                (batch_id, space_id, now_iso()),
             )
             pending_placeholders = ",".join("?" for _ in pending_ids)
             connection.execute(
@@ -576,7 +517,7 @@ class SqliteWorldStore:
                     source_provider=row["source_provider"],
                     source_conversation_key=row["source_conversation_key"],
                     source_item_id=row["source_item_id"],
-                    source_metadata=_loads(row["source_metadata"], {}),
+                    source_metadata=load_json(row["source_metadata"], {}),
                 )
                 for row in rows
             ]
@@ -642,7 +583,7 @@ class SqliteWorldStore:
                     source_provider=row["source_provider"],
                     source_conversation_key=row["source_conversation_key"],
                     source_item_id=row["source_item_id"],
-                    source_metadata=_loads(row["source_metadata"], {}),
+                    source_metadata=load_json(row["source_metadata"], {}),
                 )
                 for row in selected
             ]
@@ -699,7 +640,7 @@ class SqliteWorldStore:
             )]
             candidates: dict[str, sqlite3.Row] = {}
             for text in texts:
-                fts = _fts_query(text)
+                fts = fts_query(text)
                 if not fts:
                     continue
                 for row in connection.execute(
@@ -770,11 +711,11 @@ class SqliteWorldStore:
             if facets:
                 connection.execute(
                     "UPDATE relationships SET facets = ?, updated_at = ? WHERE id = ?",
-                    (_json(facets), _now(), row["id"]),
+                    (dump_json(facets), now_iso(), row["id"]),
                 )
             return row["id"]
-        relationship_id = _id("relationship")
-        now = _now()
+        relationship_id = new_id("relationship")
+        now = now_iso()
         connection.execute(
             """
             INSERT INTO relationships(
@@ -786,7 +727,7 @@ class SqliteWorldStore:
                 space_id,
                 person_a_id,
                 person_b_id,
-                _json(facets),
+                dump_json(facets),
                 now,
                 now,
             ),
@@ -817,14 +758,14 @@ class SqliteWorldStore:
 
             people_by_ref: dict[str, str] = {}
             extracted_name_counts = Counter(
-                _normalized(person.display_name) for person in result.people
+                normalized(person.display_name) for person in result.people
             )
             for person in result.people:
                 try:
                     person_id = self._create_person(
                         connection, space_id, person.display_name,
                         reuse_unique_name=(
-                            extracted_name_counts[_normalized(person.display_name)] == 1),
+                            extracted_name_counts[normalized(person.display_name)] == 1),
                     )
                 except AmbiguousPersonError:
                     # Do not abort the batch or create another guessed same-name
@@ -839,11 +780,11 @@ class SqliteWorldStore:
                         ) VALUES (?, ?, ?, ?, ?)
                         """,
                         (
-                            _id("alias"),
+                            new_id("alias"),
                             space_id,
                             person_id,
                             alias,
-                            _normalized(alias),
+                            normalized(alias),
                         ),
                     )
 
@@ -858,7 +799,7 @@ class SqliteWorldStore:
                     return None
                 return found["id"] if found else None
 
-            now = _now()
+            now = now_iso()
             comparison_rows: dict[str, sqlite3.Row] = {}
             comparison_people: dict[str, set[str]] = {}
             comparison_relationships: dict[str, set[str]] = {}
@@ -928,7 +869,7 @@ class SqliteWorldStore:
 
                 if comparison is None and any(
                     same_shape(row)
-                    and _similar_memory_content(row["content"], candidate.content)
+                    and similar_memory_content(row["content"], candidate.content)
                     for row in comparison_rows.values()
                 ):
                     continue
@@ -938,11 +879,11 @@ class SqliteWorldStore:
                     and item.valid_from == candidate.valid_from
                     and item.valid_to == candidate.valid_to
                     and prior_people == people_ids and prior_relationships == relationship_ids
-                    and _similar_memory_content(item.content, candidate.content)
+                    and similar_memory_content(item.content, candidate.content)
                     for item, prior_people, prior_relationships in inserted_signatures
                 ):
                     continue
-                memory_id = _id("memory")
+                memory_id = new_id("memory")
                 connection.execute(
                     """
                     INSERT INTO memories(
@@ -1170,10 +1111,10 @@ class SqliteWorldStore:
         return PersonView(
             id=row["id"],
             display_name=row["display_name"],
-            profile_card=_loads(row["profile_card"], {}),
+            profile_card=load_json(row["profile_card"], {}),
             profile_source_updated_at=row["profile_source_updated_at"],
             profile_updated_at=row["profile_updated_at"],
-            stale=watermark is not None and row["profile_source_updated_at"] != watermark,
+            stale=is_profile_stale(row["profile_source_updated_at"], watermark),
         )
 
     def _relationship_view(
@@ -1184,14 +1125,14 @@ class SqliteWorldStore:
             id=row["id"],
             person_a_id=row["person_a_id"],
             person_b_id=row["person_b_id"],
-            facets=_loads(row["facets"], []),
+            facets=load_json(row["facets"], []),
             closeness=row["closeness"],
             tone=row["tone"],
             status=row["status"],
             summary=row["summary"],
             profile_source_updated_at=row["profile_source_updated_at"],
             profile_updated_at=row["profile_updated_at"],
-            stale=watermark is not None and row["profile_source_updated_at"] != watermark,
+            stale=is_profile_stale(row["profile_source_updated_at"], watermark),
         )
 
     def read(self, space_id: str, request: QueryRequest) -> QueryContext:
@@ -1277,8 +1218,8 @@ class SqliteWorldStore:
                     (space_id,),
                 ).fetchall()
 
-            fts_query = _fts_query(request.question, request.people)
-            if fts_query and memory_rows:
+            query = fts_query(request.question, request.people)
+            if query and memory_rows:
                 memory_ids = [row["id"] for row in memory_rows]
                 placeholders = ",".join("?" for _ in memory_ids)
                 matched = connection.execute(
@@ -1288,7 +1229,7 @@ class SqliteWorldStore:
                     WHERE memory_fts MATCH ? AND m.id IN ({placeholders})
                     ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?
                     """,
-                    [fts_query, *memory_ids, request.limit],
+                    [query, *memory_ids, request.limit],
                 ).fetchall()
                 # Natural-language wording can have no lexical overlap. In
                 # that case the latest structurally scoped memories remain a
@@ -1431,7 +1372,7 @@ class SqliteWorldStore:
         for item in inferred:
             existing = next((row for row in existing_rows
                              if row["kind"] == item.kind
-                             and _similar_memory_content(row["content"], item.content)), None)
+                             and similar_memory_content(row["content"], item.content)), None)
             valid_sources = [
                 row["id"]
                 for row in connection.execute(
@@ -1461,8 +1402,8 @@ class SqliteWorldStore:
                     [(existing["id"], source_id) for source_id in valid_sources],
                 )
                 continue
-            memory_id = _id("memory")
-            now = _now()
+            memory_id = new_id("memory")
+            now = now_iso()
             connection.execute(
                 """
                 INSERT INTO memories(
@@ -1531,7 +1472,7 @@ class SqliteWorldStore:
             ).fetchone()
             if not row:
                 continue
-            now = _now()
+            now = now_iso()
             connection.execute(
                 """UPDATE memories SET status = 'retracted', invalidated_at = ?,
                        invalidation_reason = ?, updated_at = ? WHERE id = ?""",
@@ -1580,7 +1521,7 @@ class SqliteWorldStore:
                          AND status = 'open' AND kind = ? AND content = ?""",
                     (space_id, owner_kind, owner_id, item.kind, item.content),
                 ).fetchone()
-            now = _now()
+            now = now_iso()
             if existing:
                 hypothesis_id = existing["id"]
                 connection.execute(
@@ -1589,7 +1530,7 @@ class SqliteWorldStore:
                     (item.content, item.kind, item.confidence, now, hypothesis_id),
                 )
             else:
-                hypothesis_id = hypothesis_id or _id("hypothesis")
+                hypothesis_id = hypothesis_id or new_id("hypothesis")
                 connection.execute(
                     """INSERT INTO hypotheses(
                         id, space_id, owner_kind, owner_id, content, kind, confidence,
@@ -1637,7 +1578,7 @@ class SqliteWorldStore:
                 ).fetchone()
                 if not memory:
                     continue
-            now = _now()
+            now = now_iso()
             connection.execute(
                 """UPDATE hypotheses SET status = ?, status_reason = ?, promoted_memory_id = ?,
                    updated_at = ? WHERE id = ?""",
@@ -1698,8 +1639,8 @@ class SqliteWorldStore:
                               AND m.basis <> 'inferred')
                   AND (profile_source_updated_at IS NULL OR profile_source_updated_at < ?)""",
                 (
-                    _json(result.profile_card),
-                    expected_watermark, _now(), _now(),
+                    dump_json(result.profile_card),
+                    expected_watermark, now_iso(), now_iso(),
                     space_id,
                     person_id,
                     expected_watermark, space_id, person_id, expected_watermark,
@@ -1724,8 +1665,8 @@ class SqliteWorldStore:
                 """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
                     profile_updated_at = ?, updated_at = ? WHERE id = ?""",
                 (
-                    _json(result.profile_card),
-                    final_watermark, _now(), _now(),
+                    dump_json(result.profile_card),
+                    final_watermark, now_iso(), now_iso(),
                     person_id,
                 ),
             )
@@ -1750,12 +1691,12 @@ class SqliteWorldStore:
                     profile_updated_at = ?, updated_at = ?
                 WHERE space_id = ? AND id = ?""",
                 (
-                    _json(result.facets),
+                    dump_json(result.facets),
                     result.closeness,
                     result.tone,
                     result.status,
                     result.summary,
-                    expected_watermark, _now(), _now(),
+                    expected_watermark, now_iso(), now_iso(),
                     space_id,
                     relationship_id,
                 ),
@@ -1777,13 +1718,13 @@ class SqliteWorldStore:
                         connection, space_id, relationship_id),
                     context_hypothesis_ids or set(), result.hypothesis_actions)
             final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
-            now = _now()
+            now = now_iso()
             connection.execute(
                 """UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
                     status = ?, summary = ?, profile_source_updated_at = ?,
                     profile_updated_at = ?, updated_at = ? WHERE id = ?""",
                 (
-                    _json(result.facets),
+                    dump_json(result.facets),
                     result.closeness,
                     result.tone,
                     result.status,
@@ -1813,10 +1754,10 @@ class SqliteWorldStore:
             watermark = self._user_model_watermark(connection, space_id)
             view = UserModelView(
                 space_id=space_id,
-                profile_card=_loads(row["profile_card"], {}),
+                profile_card=load_json(row["profile_card"], {}),
                 profile_source_updated_at=row["profile_source_updated_at"],
                 profile_updated_at=row["profile_updated_at"],
-                stale=watermark is not None and row["profile_source_updated_at"] != watermark,
+                stale=is_profile_stale(row["profile_source_updated_at"], watermark),
             )
             return view, [self._memory_view(connection, item, True) for item in memories], watermark
 
@@ -1917,7 +1858,7 @@ class SqliteWorldStore:
                     or row["source_cursor_id"] != expected_cursor_id):
                 return False
             chunk_ids = [item.id for item in chunk]
-            now = _now()
+            now = now_iso()
             entries = {item.id: item for item in self._coverage_entries(
                 connection, space_id, root)}
             for edit in audit.modifications:
@@ -1942,7 +1883,7 @@ class SqliteWorldStore:
                     "INSERT INTO coverage_entries"
                     "(id, space_id, root, path, content, created_at, updated_at) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (_id("entry"), space_id, root, addition.path, addition.content, now, now),
+                    (new_id("entry"), space_id, root, addition.path, addition.content, now, now),
                 )
             placeholders = ",".join("?" for _ in chunk_ids)
             cursor_row = connection.execute(
@@ -1961,7 +1902,7 @@ class SqliteWorldStore:
     def _learning_goal_view(self, row: sqlite3.Row) -> LearningGoalView:
         return LearningGoalView(
             id=row["id"], space_id=row["space_id"], prompt=row["prompt"],
-            rationale=row["rationale"], entry_ids=_loads(row["entry_ids"], []),
+            rationale=row["rationale"], entry_ids=load_json(row["entry_ids"], []),
             focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"],
             status_reason=row["status_reason"], created_at=row["created_at"],
             updated_at=row["updated_at"])
@@ -2035,10 +1976,10 @@ class SqliteWorldStore:
         with self._connect() as connection:
             if self._coverage_revision(connection, space_id) != expected_revision:
                 return False
-            now = _now()
+            now = now_iso()
             known_entry_ids = {item.id for item in self._coverage_entries(connection, space_id)}
             for item in result.upserts:
-                entry_ids = _json(
+                entry_ids = dump_json(
                     [ref for ref in dict.fromkeys(item.entry_ids) if ref in known_entry_ids])
                 focus_kind, focus_id = self._goal_focus(
                     connection, space_id, item.prompt + "\n" + item.rationale)
@@ -2059,7 +2000,7 @@ class SqliteWorldStore:
                             "INSERT INTO learning_goals(id, space_id, prompt, rationale, "
                             "entry_ids, focus_kind, focus_id, created_at, updated_at) "
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                            (_id("goal"), space_id, item.prompt, item.rationale, entry_ids,
+                            (new_id("goal"), space_id, item.prompt, item.rationale, entry_ids,
                              focus_kind, focus_id, now, now))
             for transition in result.transitions:
                 if transition.goal_id in context_goal_ids:
@@ -2080,7 +2021,7 @@ class SqliteWorldStore:
                 return None
             continuity = ContinuityView(
                 text=row["text"],
-                related_person_ids=_loads(row["related_person_ids"], []),
+                related_person_ids=load_json(row["related_person_ids"], []),
                 through_message_id=row["through_message_id"],
             )
             if row["through_message_rowid"] is None:
@@ -2098,7 +2039,7 @@ class SqliteWorldStore:
                     source_provider=item["source_provider"],
                     source_conversation_key=item["source_conversation_key"],
                     source_item_id=item["source_item_id"],
-                    source_metadata=_loads(item["source_metadata"], {}),
+                    source_metadata=load_json(item["source_metadata"], {}),
                 )
                 for item in rows
             ]
@@ -2144,8 +2085,8 @@ class SqliteWorldStore:
                 "UPDATE continuities SET text = ?, related_person_ids = ?, "
                 "through_message_id = ?, through_message_rowid = ?, updated_at = ? "
                 "WHERE space_id = ?",
-                (result.text, _json(people), result.through_message_id,
-                 message["rowid"], _now(), space_id),
+                (result.text, dump_json(people), result.through_message_id,
+                 message["rowid"], now_iso(), space_id),
             )
             return True
 
@@ -2212,12 +2153,8 @@ class SqliteWorldStore:
         (it fans out per coverage root).
 
         The sample is a deterministic function of the context bundle
-        `version` and the candidate pool: a local RNG is seeded from a hash
-        of the two, so identical version + identical pool always produce the
-        identical selection. This keeps the sample stable across repeated
-        reads (KV-cache-friendly for the agent-side prompt prefix) while
-        still rotating whenever the durable context or the pool actually
-        changes.
+        `version` and the candidate pool; see
+        `policy.sample_learning_goals`.
         """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
         rows = self._open_hypothesis_rows(connection, space_id, person_ids)
@@ -2230,24 +2167,9 @@ class SqliteWorldStore:
         learning_goals = [GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
                                        owner_kind=row['focus_kind'], owner_id=row['focus_id'],
                                        status=row['status']) for row in goals]
-        # Lexical relevance is only a tie-breaker over recency. Character
-        # bigrams keep short/non-space-separated text useful (including CJK).
-        folded = query.casefold()
-        grams = {folded[i:i + 2] for i in range(max(0, len(folded) - 1))}
-
-        def rank(item: GuidanceItem) -> tuple[int, str, str]:
-            text = item.content.casefold()
-            relevance = (1000 if folded and folded in text else 0) + \
-                sum(text.count(g) for g in grams)
-            return (relevance, updated[item.id], item.id)
-        selected = sorted(hypotheses, key=rank, reverse=True)[:1]
-        pool_ids = sorted(item.id for item in learning_goals)
-        seed = int(hashlib.sha256(
-            f"{version}|{','.join(pool_ids)}".encode()).hexdigest()[:16], 16)
-        goal_rng = random.Random(seed)
-        sample_size = min(len(learning_goals),
-                          goal_rng.randint(self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
-        selected.extend(goal_rng.sample(learning_goals, sample_size))
+        selected = rank_guidance(hypotheses, updated, query)[:1]
+        selected.extend(sample_learning_goals(
+            learning_goals, version, self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
         selected.sort(key=lambda item: (item.kind, item.id))
         return GuidanceBundle(items=selected)
 
@@ -2264,11 +2186,12 @@ class SqliteWorldStore:
             "SELECT * FROM user_models WHERE space_id = ?", (space_id,)).fetchone()
         cont = connection.execute(
             "SELECT * FROM continuities WHERE space_id = ?", (space_id,)).fetchone()
-        user_view = UserModelView(space_id=space_id, profile_card=_loads(user["profile_card"], {}),
-                                  profile_source_updated_at=user["profile_source_updated_at"],
-                                  profile_updated_at=user["profile_updated_at"]) if user else None
+        user_view = UserModelView(
+            space_id=space_id, profile_card=load_json(user["profile_card"], {}),
+            profile_source_updated_at=user["profile_source_updated_at"],
+            profile_updated_at=user["profile_updated_at"]) if user else None
         continuity = ContinuityView(
-            text=cont["text"], related_person_ids=_loads(cont["related_person_ids"], []),
+            text=cont["text"], related_person_ids=load_json(cont["related_person_ids"], []),
             through_message_id=cont["through_message_id"]) if cont else None
         ids = continuity.related_person_ids if continuity else []
         people = []
@@ -2279,7 +2202,7 @@ class SqliteWorldStore:
             if row:
                 people.append(PersonView(
                     id=row["id"], display_name=row["display_name"],
-                    profile_card=_loads(row["profile_card"], {}),
+                    profile_card=load_json(row["profile_card"], {}),
                     profile_source_updated_at=row["profile_source_updated_at"],
                     profile_updated_at=row["profile_updated_at"]))
         # Guidance is deliberately outside this payload: the learning-goal
@@ -2290,7 +2213,7 @@ class SqliteWorldStore:
         payload = {"user_model": user_view.model_dump(mode="json") if user_view else None,
                    "continuity": continuity.model_dump(mode="json") if continuity else None,
                    "people": [item.model_dump(mode="json") for item in people]}
-        version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
+        version = hashlib.sha256(dump_json(payload).encode()).hexdigest()[:16]
         return user_view, continuity, people, version
 
     def guidance_bundle(
@@ -2553,7 +2476,7 @@ class SqliteWorldStore:
             if source["status"] != "active" or target["status"] != "active":
                 raise PersonMergeError("source and target persons must be active", conflict=True)
 
-            now = _now()
+            now = now_iso()
             aliases = connection.execute(
                 "SELECT value, normalized_value FROM person_aliases WHERE person_id = ?",
                 (source_person_id,),
@@ -2564,7 +2487,7 @@ class SqliteWorldStore:
                     "id, space_id, person_id, value, normalized_value"
                     ") VALUES (?, ?, ?, ?, ?)",
                     (
-                        _id("alias"),
+                        new_id("alias"),
                         space_id,
                         target_person_id,
                         alias["value"],
@@ -2653,7 +2576,7 @@ class SqliteWorldStore:
                 "SELECT related_person_ids FROM continuities WHERE space_id = ?", (space_id,)
             ).fetchone()
             if continuity:
-                ids = _loads(continuity["related_person_ids"], [])
+                ids = load_json(continuity["related_person_ids"], [])
                 rewritten = list(
                     dict.fromkeys(
                         target_person_id if item == source_person_id else item
@@ -2663,7 +2586,7 @@ class SqliteWorldStore:
                 connection.execute(
                     "UPDATE continuities SET related_person_ids = ?, updated_at = ? "
                     "WHERE space_id = ?",
-                    (_json(rewritten), now, space_id),
+                    (dump_json(rewritten), now, space_id),
                 )
             connection.execute(
                 "UPDATE people SET status = 'merged', merged_into_person_id = ?, "
@@ -2701,7 +2624,7 @@ class SqliteWorldStore:
         limit: int = 5,
     ) -> list[MemoryView]:
         """FTS recall on a caller's connection, so `turn_view` can share it."""
-        query = _fts_query(text)
+        query = fts_query(text)
         if not query:
             return []
         clauses = ["memory_fts MATCH ?", "m.space_id = ?", "m.status = 'active'"]
@@ -2741,12 +2664,12 @@ class SqliteWorldStore:
         with self._connect() as connection:
             if self._user_model_watermark(connection, space_id) != expected_watermark:
                 return False
-            now = _now()
+            now = now_iso()
             updated = connection.execute(
                 """UPDATE user_models SET profile_card = ?, profile_source_updated_at = ?,
                    profile_updated_at = ? WHERE space_id = ?
                    AND (profile_source_updated_at IS NULL OR profile_source_updated_at < ?)""",
-                (_json(result.profile_card), expected_watermark, now, space_id,
+                (dump_json(result.profile_card), expected_watermark, now, space_id,
                  expected_watermark),
             )
             if updated.rowcount != 1:
@@ -2769,7 +2692,7 @@ class SqliteWorldStore:
                 """UPDATE user_models SET profile_card = ?,
                    profile_source_updated_at = ?, profile_updated_at = ?
                    WHERE space_id = ?""",
-                (_json(profile_card), watermark, _now(), space_id),
+                (dump_json(profile_card), watermark, now_iso(), space_id),
             )
 
     def stale_entities(self) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]:
@@ -2793,12 +2716,12 @@ class SqliteWorldStore:
             relationships = []
             for row in connection.execute("SELECT * FROM relationships").fetchall():
                 watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
-                if watermark is not None and row["profile_source_updated_at"] != watermark:
+                if is_profile_stale(row["profile_source_updated_at"], watermark):
                     relationships.append((row["space_id"], row["id"]))
             user_models = []
             for row in connection.execute("SELECT * FROM user_models").fetchall():
                 watermark = self._user_model_watermark(connection, row["space_id"])
-                if watermark is not None and row["profile_source_updated_at"] != watermark:
+                if is_profile_stale(row["profile_source_updated_at"], watermark):
                     user_models.append(row["space_id"])
             return people, relationships, user_models
 
@@ -2822,8 +2745,8 @@ class SqliteWorldStore:
     ) -> str:
         self.ensure_space(space_id)
         with self._connect() as connection:
-            memory_id = _id("memory")
-            now = _now()
+            memory_id = new_id("memory")
+            now = now_iso()
             connection.execute(
                 """
                 INSERT INTO memories(
@@ -2870,8 +2793,8 @@ class SqliteWorldStore:
             ).fetchone()
             if not original:
                 return None
-            now = _now()
-            replacement_id = _id("memory")
+            now = now_iso()
+            replacement_id = new_id("memory")
             connection.execute(
                 """
                 INSERT INTO memories(
@@ -2930,7 +2853,7 @@ class SqliteWorldStore:
                 return False
             if row["status"] == "retracted":
                 return True
-            now = _now()
+            now = now_iso()
             connection.execute(
                 """
                 UPDATE memories SET status = 'retracted', invalidated_at = ?,

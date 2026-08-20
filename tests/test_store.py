@@ -2127,7 +2127,7 @@ def test_initialize_enables_wal_and_a_short_busy_timeout(store):
 def test_initialize_fails_loudly_when_wal_is_refused(tmp_path, monkeypatch):
     """A filesystem that cannot do WAL reports a mode instead of raising."""
 
-    import gossipmemo.store as store_module
+    import gossipmemo.store.sqlite as store_module
 
     real_connect = store_module.sqlite3.connect
 
