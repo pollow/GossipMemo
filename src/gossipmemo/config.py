@@ -49,6 +49,10 @@ class Settings:
     llm_trace_path: Path | None = None
     prompts_path: Path | None = None
     induction_time: str = "00:00"
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
+    embedding_model: str = ""
+    embedding_dim: int | None = None
 
     def __post_init__(self) -> None:
         missing = [
@@ -117,12 +121,28 @@ class Settings:
                 "LLM output reserve and context safety tokens must not be negative")
         if self.llm_max_tokens is not None and self.llm_output_reserve_tokens < self.llm_max_tokens:
             raise ConfigurationError("llm_output_reserve_tokens must be at least llm_max_tokens")
+        if self.embedding_dim is not None and self.embedding_dim <= 0:
+            raise ConfigurationError("embedding_dim must be greater than zero")
+
+    @property
+    def embedding_enabled(self) -> bool:
+        """Whether the embedding subsystem is configured at all.
+
+        An empty `embedding_model` is a legitimate off state, not a
+        configuration error -- the system falls back to plain FTS recall.
+        """
+
+        return bool(self.embedding_model.strip())
 
     @classmethod
     def from_env(cls) -> Settings:
+        llm_base_url = _required_env("GOSSIPMEMO_LLM_BASE_URL").rstrip("/")
+        llm_api_key = _required_env("GOSSIPMEMO_LLM_API_KEY")
+        embedding_base_url = _env("GOSSIPMEMO_EMBEDDING_BASE_URL")
+        embedding_api_key = _env("GOSSIPMEMO_EMBEDDING_API_KEY")
         return cls(
-            llm_base_url=_required_env("GOSSIPMEMO_LLM_BASE_URL").rstrip("/"),
-            llm_api_key=_required_env("GOSSIPMEMO_LLM_API_KEY"),
+            llm_base_url=llm_base_url,
+            llm_api_key=llm_api_key,
             llm_model=_required_env("GOSSIPMEMO_LLM_MODEL"),
             user_name=_env("GOSSIPMEMO_USER_NAME", "CurrentUser"),
             database_path=Path(
@@ -156,6 +176,12 @@ class Settings:
             llm_trace_path=(Path(value) if (value := _env("GOSSIPMEMO_LLM_TRACE_PATH")) else None),
             prompts_path=(Path(value) if (value := _env("GOSSIPMEMO_PROMPTS_PATH")) else None),
             induction_time=_env("GOSSIPMEMO_INDUCTION_TIME", "00:00"),
+            embedding_base_url=(
+                embedding_base_url.rstrip("/") if embedding_base_url else llm_base_url
+            ),
+            embedding_api_key=(embedding_api_key if embedding_api_key else llm_api_key),
+            embedding_model=_env("GOSSIPMEMO_EMBEDDING_MODEL"),
+            embedding_dim=(int(value) if (value := _env("GOSSIPMEMO_EMBEDDING_DIM")) else None),
         )
 
 

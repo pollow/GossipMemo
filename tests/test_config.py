@@ -137,3 +137,82 @@ def test_settings_reject_malformed_induction_time(value):
             llm_model="model-a",
             induction_time=value,
         )
+
+
+def test_embedding_settings_default_off_and_do_not_raise(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_API_KEY", raising=False)
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_DIM", raising=False)
+
+    settings = get_settings()
+
+    assert settings.embedding_model == ""
+    assert settings.embedding_enabled is False
+    assert settings.embedding_dim is None
+    # base_url/api_key still inherit even when the feature is off, so a
+    # later slice can probe/validate without needing separate env vars.
+    assert settings.embedding_base_url == "http://model.test/v1"
+    assert settings.embedding_api_key == "secret"
+
+
+def test_embedding_settings_inherit_llm_base_url_and_api_key(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1/")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "llm-secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_MODEL", "qwen3-embedding-0.6b")
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_BASE_URL", raising=False)
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_API_KEY", raising=False)
+
+    settings = get_settings()
+
+    assert settings.embedding_base_url == "http://model.test/v1"
+    assert settings.embedding_api_key == "llm-secret"
+    assert settings.embedding_model == "qwen3-embedding-0.6b"
+    assert settings.embedding_enabled is True
+
+
+def test_embedding_settings_override_base_url_and_api_key(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "llm-secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_BASE_URL", "http://192.168.1.113:8002/")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_API_KEY", "")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_MODEL", "qwen3-embedding-0.6b")
+
+    settings = get_settings()
+
+    assert settings.embedding_base_url == "http://192.168.1.113:8002"
+    # Explicitly empty api_key stays empty rather than inheriting llm_api_key.
+    assert settings.embedding_api_key == "llm-secret"
+
+
+def test_embedding_dim_is_loaded_from_environment(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_DIM", "1024")
+
+    assert get_settings().embedding_dim == 1024
+
+
+def test_settings_reject_non_positive_embedding_dim():
+    with pytest.raises(ConfigurationError, match="embedding_dim"):
+        Settings(
+            llm_base_url="http://model.test/v1",
+            llm_api_key="secret",
+            llm_model="model-a",
+            embedding_dim=0,
+        )
+
+
+def test_settings_do_not_require_embedding_model():
+    # embedding_model empty must not raise -- it is the documented off state.
+    Settings(
+        llm_base_url="http://model.test/v1",
+        llm_api_key="secret",
+        llm_model="model-a",
+    )
