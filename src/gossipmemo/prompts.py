@@ -36,11 +36,9 @@ def schema_instruction(result_type: type[BaseModel]) -> str:
 def _plain(value: Any) -> Any:
     """Turn nested Pydantic models into JSON-serializable data.
 
-    A bare model was already handled, but a *list* of models was not: it
-    fell through to `json.dumps(default=str)`, which stringified each one
-    with `repr`. Prompts that pass a list -- recent context messages,
-    evidence memories -- were embedding `id='m1' space_id='s' ...` as a
-    single opaque string per item rather than a JSON object.
+    Recursion matters for containers: a list or dict of models must become a
+    list or dict of JSON objects, not `repr` strings from
+    `json.dumps(default=str)`.
     """
 
     if isinstance(value, BaseModel):
@@ -56,22 +54,30 @@ def _json(value: Any) -> str:
     return json.dumps(_plain(value), ensure_ascii=False, indent=2, default=str)
 
 
-def _evidence_lines(memories: list[MemoryView] | tuple[MemoryView, ...] | list[Any] | tuple[Any, ...]) -> str:
+def _evidence_lines(
+    memories: list[MemoryView] | tuple[MemoryView, ...] | list[Any] | tuple[Any, ...],
+) -> str:
     """Compact, injection-resistant enough-for-reading evidence representation."""
     lines = []
     for m in memories:
         if hasattr(m, "source_memory_ids"):
-            lines.append("- digest=" + json.dumps(m.model_dump(mode="json"), ensure_ascii=False,
-                         separators=(",", ":")) + " (compressed evidence; IDs refer to original Memories)")
+            lines.append(
+                "- digest=" + json.dumps(m.model_dump(mode="json"), ensure_ascii=False,
+                                         separators=(",", ":"))
+                + " (compressed evidence; IDs refer to original Memories)")
         else:
             lines.append(
-                f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} text={json.dumps(m.content, ensure_ascii=False)}")
+                f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} "
+                f"derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} "
+                f"text={json.dumps(m.content, ensure_ascii=False)}")
     return "\n".join(lines) or "- (none)"
 
 
 def _hypothesis_lines(hypotheses: list[HypothesisView] | tuple[HypothesisView, ...]) -> str:
     return "\n".join(
-        f"- id={h.id!r} confidence={h.confidence!r} evidence={[e.memory_id for e in h.evidence]!r} text={json.dumps(h.content, ensure_ascii=False)}"
+        f"- id={h.id!r} confidence={h.confidence!r} "
+        f"evidence={[e.memory_id for e in h.evidence]!r} "
+        f"text={json.dumps(h.content, ensure_ascii=False)}"
         for h in hypotheses
     ) or "- (none)"
 
@@ -91,7 +97,9 @@ def owner_reasoning_prefix(
         + "<current-inferred-memories comparison-only=\"true\">\n"
         + _evidence_lines(inferred_memories) + "\n</current-inferred-memories>\n"
         + "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
-        + "\n</open-hypotheses>\nOnly evidence-memories are evidence. Current inferred memories and open hypotheses may be reviewed for duplication or explicit lifecycle actions, never used as support."
+        + "\n</open-hypotheses>\nOnly evidence-memories are evidence. Current inferred "
+        "memories and open hypotheses may be reviewed for duplication or explicit "
+        "lifecycle actions, never used as support."
     )
 
 
@@ -106,19 +114,20 @@ def owner_evidence_digest_prompt(memories: list[Any], user_name: str = "CurrentU
 
 
 def projection_stage_prompt() -> str:
-    return "<stage>Return only the requested projection/card. Do not output inferred-memory or hypothesis actions.</stage>"
+    return ("<stage>Return only the requested projection/card. "
+            "Do not output inferred-memory or hypothesis actions.</stage>")
 
 
 def actions_stage_prompt() -> str:
-    return "<stage>Review the projection above. Return only explicit inferred-memory and hypothesis actions. Omission is always no-op. IDs must be from supplied context.</stage>"
+    return ("<stage>Review the projection above. Return only explicit inferred-memory and "
+            "hypothesis actions. Omission is always no-op. "
+            "IDs must be from supplied context.</stage>")
 
 
-# The old single-string `COVERAGE_RUBRIC` bundled two different jobs into one
-# blob every prompt got in full: "what is this root about" and "what tends to go
-# unsaid under it". Both reasoners now fan out over one root at a time, so each
-# is a per-root dict and each side gets only its own half -- the auditor gets the
-# viewpoint (it summarizes what the evidence supports), the planner gets the
-# viewpoint plus the blind-spot cues (naming what is missing is its work).
+# The rubric is split per root and per job because both reasoners fan out over
+# one root at a time: the auditor gets only the viewpoint (it summarizes what the
+# evidence supports), the planner gets the viewpoint plus the blind-spot cues
+# (naming what is missing is its work).
 
 # One short viewpoint line per coverage root, shared by the per-root audit and
 # planning requests.
@@ -127,8 +136,10 @@ COVERAGE_ROOT_VIEWPOINTS: dict[str, str] = {
     "M2": "What do ordinary life, routine, home, work, care, money, and security look like?",
     "M3": "Which choices, accidents, losses, recoveries, and reversals changed the story?",
     "M4": "Which attachments, ruptures, loyalties, intimacies, and family or friend arcs matter?",
-    "M5": "Which places, communities, cultures, institutions, and historical contexts shape meaning?",
-    "M6": "Which concrete scenes, sensory memories, conversations, and small moments carry the story?",
+    "M5": "Which places, communities, cultures, institutions, and historical contexts "
+          "shape meaning?",
+    "M6": "Which concrete scenes, sensory memories, conversations, and small moments "
+          "carry the story?",
     "M7": "How are feelings, needs, fear, desire, grief, and self-protection described?",
     "M8": "Which recurring themes, tensions, growth, and contradictions span time?",
     "M9": "Which questions, conflicts, decisions, losses, or hopes are still running?",

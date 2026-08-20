@@ -191,11 +191,15 @@ class WorldStore(Protocol):
         self, space_id: str,
     ) -> tuple[CoverageRootView, list[CoverageEntryView], list[MemoryView]] | None: ...
 
-    def apply_coverage_audit(self, space_id: str, root: str, expected_watermark: str | None, expected_cursor_id: str | None,
-                             audit: ExtractedCoverageAudit, chunk: list[MemoryView], context_entry_ids: set[str]) -> bool: ...
+    def apply_coverage_audit(
+        self, space_id: str, root: str, expected_watermark: str | None,
+        expected_cursor_id: str | None, audit: ExtractedCoverageAudit,
+        chunk: list[MemoryView], context_entry_ids: set[str],
+    ) -> bool: ...
 
-    def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView],
-                                                            list[LearningGoalView], list[LearningGoalView]] | None: ...
+    def learning_goal_context(self, space_id: str) -> tuple[
+        int, list[CoverageEntryView], list[LearningGoalView], list[LearningGoalView],
+    ] | None: ...
 
     def apply_goal_planning(self, space_id: str, expected_revision: int,
                             result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
@@ -715,7 +719,8 @@ class SqliteWorldStore:
             if person_ids:
                 placeholders = ",".join("?" for _ in person_ids)
                 for row in connection.execute(
-                    f"""SELECT DISTINCT m.* FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                    f"""SELECT DISTINCT m.* FROM memories m
+                       JOIN memory_people mp ON mp.memory_id = m.id
                        WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred'
                          AND mp.person_id IN ({placeholders}) ORDER BY m.updated_at DESC LIMIT ?""",
                     (space_id, *person_ids, limit),
@@ -931,7 +936,8 @@ class SqliteWorldStore:
                 if any(
                     item.kind == candidate.kind and item.basis == candidate.basis
                     and item.about_user == candidate.about_user
-                    and item.valid_from == candidate.valid_from and item.valid_to == candidate.valid_to
+                    and item.valid_from == candidate.valid_from
+                    and item.valid_to == candidate.valid_to
                     and prior_people == people_ids and prior_relationships == relationship_ids
                     and _similar_memory_content(item.content, candidate.content)
                     for item, prior_people, prior_relationships in inserted_signatures
@@ -1009,7 +1015,8 @@ class SqliteWorldStore:
                         affected_relationships.add(row["relationship_id"])
                     connection.execute(
                         """UPDATE memories SET status = 'superseded',
-                           invalidated_at = ?, invalidation_reason = ?, updated_at = ? WHERE id = ?""",
+                           invalidated_at = ?, invalidation_reason = ?, updated_at = ?
+                           WHERE id = ?""",
                         (now, "superseded by extraction update", now, comparison["id"]),
                     )
 
@@ -1031,9 +1038,9 @@ class SqliteWorldStore:
     def pending_extractions(self) -> list[PendingExtraction]:
         """Every batch still awaiting extraction, neediest first.
 
-        Carries each batch's attempt count and state, because the drain has
-        to decide per batch whether to keep trying it: fetching that
-        separately meant one query per pending batch on every pass.
+        Carries each batch's attempt count and state so the drain can decide
+        per batch whether to keep trying it without a follow-up query per
+        pending batch.
         """
         with self._connect() as connection:
             rows = connection.execute(
@@ -1133,7 +1140,9 @@ class SqliteWorldStore:
             valid_to=row["valid_to"],
         )
 
-    def _person_watermark(self, connection: sqlite3.Connection, space_id: str, person_id: str) -> str | None:
+    def _person_watermark(
+        self, connection: sqlite3.Connection, space_id: str, person_id: str,
+    ) -> str | None:
         row = connection.execute(
             """SELECT MAX(m.updated_at) AS watermark FROM memories m
                JOIN memory_people mp ON mp.memory_id = m.id
@@ -1142,13 +1151,16 @@ class SqliteWorldStore:
         ).fetchone()
         return row["watermark"] if row else None
 
-    def _relationship_watermark(self, connection: sqlite3.Connection, space_id: str, relationship_id: str) -> str | None:
+    def _relationship_watermark(
+        self, connection: sqlite3.Connection, space_id: str, relationship_id: str,
+    ) -> str | None:
         row = connection.execute(
             """SELECT MAX(m.updated_at) AS watermark FROM memories m
                JOIN relationships r ON r.id = ? AND r.space_id = m.space_id
                WHERE m.space_id = ? AND m.basis <> 'inferred' AND (
                  m.id IN (SELECT memory_id FROM memory_relationships WHERE relationship_id = r.id)
-                 OR m.id IN (SELECT a.memory_id FROM memory_people a JOIN memory_people b ON b.memory_id = a.memory_id
+                 OR m.id IN (SELECT a.memory_id FROM memory_people a
+                             JOIN memory_people b ON b.memory_id = a.memory_id
                              WHERE a.person_id = r.person_a_id AND b.person_id = r.person_b_id))""",
             (relationship_id, space_id),
         ).fetchone()
@@ -1165,7 +1177,9 @@ class SqliteWorldStore:
             stale=watermark is not None and row["profile_source_updated_at"] != watermark,
         )
 
-    def _relationship_view(self, connection: sqlite3.Connection, row: sqlite3.Row) -> RelationshipView:
+    def _relationship_view(
+        self, connection: sqlite3.Connection, row: sqlite3.Row,
+    ) -> RelationshipView:
         watermark = self._relationship_watermark(connection, row["space_id"], row["id"])
         return RelationshipView(
             id=row["id"],
@@ -1298,32 +1312,57 @@ class SqliteWorldStore:
     ) -> tuple[PersonView, list[MemoryView], str | None] | None:
         with self._connect() as connection:
             person = connection.execute(
-                "SELECT * FROM people WHERE space_id = ? AND id = ?", (space_id, person_id)).fetchone()
+                "SELECT * FROM people WHERE space_id = ? AND id = ?",
+                (space_id, person_id)).fetchone()
             if not person:
                 return None
-            rows = connection.execute("""SELECT DISTINCT m.* FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
-                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND mp.person_id = ?
+            rows = connection.execute(
+                """SELECT DISTINCT m.* FROM memories m
+                JOIN memory_people mp ON mp.memory_id = m.id
+                WHERE m.space_id = ? AND m.status = 'active'
+                  AND m.basis <> 'inferred' AND mp.person_id = ?
                 ORDER BY m.created_at DESC, m.id DESC""", (space_id, person_id)).fetchall()
             watermark = self._person_watermark(connection, space_id, person_id)
             view = self._person_view(connection, person)
             return view, [self._memory_view(connection, row, True) for row in rows], watermark
 
-    def owner_review_context(self, space_id: str, owner_kind: str, owner_id: str | None) -> tuple[list[MemoryView], list[HypothesisView]]:
+    def owner_review_context(
+        self, space_id: str, owner_kind: str, owner_id: str | None,
+    ) -> tuple[list[MemoryView], list[HypothesisView]]:
         """Comparison-only state captured with an owner reasoning snapshot."""
         with self._connect() as connection:
             if owner_kind == "person":
-                clause, params = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)", [
-                    owner_id]
+                clause, params = (
+                    "EXISTS (SELECT 1 FROM memory_people mp "
+                    "WHERE mp.memory_id = m.id AND mp.person_id = ?)", [owner_id])
             elif owner_kind == "relationship":
-                clause, params = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)", [
-                    owner_id]
+                clause, params = (
+                    "EXISTS (SELECT 1 FROM memory_relationships mr "
+                    "WHERE mr.memory_id = m.id AND mr.relationship_id = ?)", [owner_id])
             else:
                 clause, params = "m.about_user = 1", []
             inferred = connection.execute(
-                f"SELECT m.* FROM memories m WHERE m.space_id = ? AND m.status = 'active' AND m.basis = 'inferred' AND {clause} ORDER BY m.created_at DESC LIMIT 100", [space_id, *params]).fetchall()
+                f"SELECT m.* FROM memories m WHERE m.space_id = ? AND m.status = 'active' "
+                f"AND m.basis = 'inferred' AND {clause} ORDER BY m.created_at DESC LIMIT 100",
+                [space_id, *params]).fetchall()
             hypotheses = connection.execute(
-                "SELECT * FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ? AND status = 'open' ORDER BY created_at DESC LIMIT 100", (space_id, owner_kind, owner_id)).fetchall()
-            return ([self._memory_view(connection, row, True) for row in inferred], [HypothesisView(id=row['id'], space_id=row['space_id'], owner_kind=row['owner_kind'], owner_id=row['owner_id'], content=row['content'], kind=row['kind'], confidence=row['confidence'], status=row['status'], promoted_memory_id=row['promoted_memory_id'], evidence=[HypothesisEvidence(memory_id=e['memory_id'], role=e['role']) for e in connection.execute('SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?', (row['id'],)).fetchall()], created_at=row['created_at'], updated_at=row['updated_at']) for row in hypotheses])
+                "SELECT * FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ? "
+                "AND status = 'open' ORDER BY created_at DESC LIMIT 100",
+                (space_id, owner_kind, owner_id)).fetchall()
+            return (
+                [self._memory_view(connection, row, True) for row in inferred],
+                [HypothesisView(
+                    id=row['id'], space_id=row['space_id'], owner_kind=row['owner_kind'],
+                    owner_id=row['owner_id'], content=row['content'], kind=row['kind'],
+                    confidence=row['confidence'], status=row['status'],
+                    promoted_memory_id=row['promoted_memory_id'],
+                    evidence=[
+                        HypothesisEvidence(memory_id=e['memory_id'], role=e['role'])
+                        for e in connection.execute(
+                            'SELECT memory_id, role FROM hypothesis_evidence '
+                            'WHERE hypothesis_id = ?', (row['id'],)).fetchall()],
+                    created_at=row['created_at'], updated_at=row['updated_at'])
+                 for row in hypotheses])
 
     def relationship_context(
         self, space_id: str, relationship_id: str
@@ -1377,7 +1416,8 @@ class SqliteWorldStore:
             target_join = "JOIN memory_people mt ON mt.memory_id = m.id AND mt.person_id = ?"
             target_params: list[Any] = [person_id]
         elif relationship_id:
-            target_join = "JOIN memory_relationships mt ON mt.memory_id = m.id AND mt.relationship_id = ?"
+            target_join = ("JOIN memory_relationships mt "
+                           "ON mt.memory_id = m.id AND mt.relationship_id = ?")
             target_params = [relationship_id]
         else:
             target_join = ""
@@ -1428,7 +1468,8 @@ class SqliteWorldStore:
             connection.execute(
                 """
                 INSERT INTO memories(
-                    id, space_id, content, kind, basis, about_user, created_by, created_at, updated_at
+                    id, space_id, content, kind, basis, about_user, created_by,
+                    created_at, updated_at
                 ) VALUES (?, ?, ?, ?, 'inferred', ?, 'reasoner', ?, ?)
                 """,
                 (memory_id, space_id, item.content, item.kind, int(owner_kind == "user"), now, now),
@@ -1475,10 +1516,12 @@ class SqliteWorldStore:
             if retraction.memory_id not in context_inferred_memory_ids:
                 continue
             if owner_kind == "person":
-                owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
+                owner_clause = ("EXISTS (SELECT 1 FROM memory_people mp "
+                                "WHERE mp.memory_id = m.id AND mp.person_id = ?)")
                 owner_params: list[Any] = [owner_id]
             elif owner_kind == "relationship":
-                owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
+                owner_clause = ("EXISTS (SELECT 1 FROM memory_relationships mr "
+                                "WHERE mr.memory_id = m.id AND mr.relationship_id = ?)")
                 owner_params = [owner_id]
             else:
                 owner_clause = "m.about_user = 1"
@@ -1512,7 +1555,8 @@ class SqliteWorldStore:
             evidence = [
                 row for row in connection.execute(
                     f"""SELECT m.id FROM memories m WHERE m.space_id = ? AND m.status = 'active'
-                        AND m.basis <> 'inferred' AND m.id IN ({','.join('?' for _ in item.evidence)})""",
+                        AND m.basis <> 'inferred'
+                        AND m.id IN ({','.join('?' for _ in item.evidence)})""",
                     [space_id, *(e.memory_id for e in item.evidence)],
                 ).fetchall()
                 if row["id"] in source_memory_ids
@@ -1533,15 +1577,17 @@ class SqliteWorldStore:
                     continue
             else:
                 existing = connection.execute(
-                    """SELECT id FROM hypotheses WHERE space_id = ? AND owner_kind = ? AND owner_id IS ?
-                       AND status = 'open' AND kind = ? AND content = ?""",
+                    """SELECT id FROM hypotheses
+                       WHERE space_id = ? AND owner_kind = ? AND owner_id IS ?
+                         AND status = 'open' AND kind = ? AND content = ?""",
                     (space_id, owner_kind, owner_id, item.kind, item.content),
                 ).fetchone()
             now = _now()
             if existing:
                 hypothesis_id = existing["id"]
                 connection.execute(
-                    "UPDATE hypotheses SET content = ?, kind = ?, confidence = ?, updated_at = ? WHERE id = ?",
+                    "UPDATE hypotheses SET content = ?, kind = ?, confidence = ?, updated_at = ? "
+                    "WHERE id = ?",
                     (item.content, item.kind, item.confidence, now, hypothesis_id),
                 )
             else:
@@ -1555,7 +1601,8 @@ class SqliteWorldStore:
                      item.confidence, now, now),
                 )
             connection.executemany(
-                "INSERT OR IGNORE INTO hypothesis_evidence(hypothesis_id, memory_id, role) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO hypothesis_evidence(hypothesis_id, memory_id, role) "
+                "VALUES (?, ?, ?)",
                 [(hypothesis_id, evidence.memory_id, evidence.role)
                  for evidence in item.evidence if evidence.memory_id in evidence_ids],
             )
@@ -1575,16 +1622,19 @@ class SqliteWorldStore:
                 continue
             if transition.promoted_memory_id:
                 if owner_kind == "person":
-                    owner_clause = "EXISTS (SELECT 1 FROM memory_people mp WHERE mp.memory_id = m.id AND mp.person_id = ?)"
+                    owner_clause = ("EXISTS (SELECT 1 FROM memory_people mp "
+                                    "WHERE mp.memory_id = m.id AND mp.person_id = ?)")
                     owner_params: list[Any] = [owner_id]
                 elif owner_kind == "relationship":
-                    owner_clause = "EXISTS (SELECT 1 FROM memory_relationships mr WHERE mr.memory_id = m.id AND mr.relationship_id = ?)"
+                    owner_clause = ("EXISTS (SELECT 1 FROM memory_relationships mr "
+                                    "WHERE mr.memory_id = m.id AND mr.relationship_id = ?)")
                     owner_params = [owner_id]
                 else:
                     owner_clause = "m.about_user = 1"
                     owner_params = []
                 memory = connection.execute(
-                    f"SELECT m.id FROM memories m WHERE m.id = ? AND m.space_id = ? AND m.status = 'active' AND {owner_clause}",
+                    "SELECT m.id FROM memories m WHERE m.id = ? AND m.space_id = ? "
+                    f"AND m.status = 'active' AND {owner_clause}",
                     [transition.promoted_memory_id, space_id, *owner_params],
                 ).fetchone()
                 if not memory:
@@ -1667,8 +1717,10 @@ class SqliteWorldStore:
                     connection, space_id, person_id), context_inferred_memory_ids or set(), actions,
             )
             if result.hypothesis_actions:
-                self._apply_hypothesis_actions(connection, space_id, "person", person_id, self._person_reasoning_source_ids(
-                    connection, space_id, person_id), context_hypothesis_ids or set(), result.hypothesis_actions)
+                self._apply_hypothesis_actions(
+                    connection, space_id, "person", person_id,
+                    self._person_reasoning_source_ids(connection, space_id, person_id),
+                    context_hypothesis_ids or set(), result.hypothesis_actions)
             final_watermark = self._person_watermark(connection, space_id, person_id)
             connection.execute(
                 """UPDATE people SET profile_card = ?, profile_source_updated_at = ?,
@@ -1691,7 +1743,8 @@ class SqliteWorldStore:
         context_hypothesis_ids: set[str] | None = None,
     ) -> bool:
         with self._connect() as connection:
-            if self._relationship_watermark(connection, space_id, relationship_id) != expected_watermark:
+            current = self._relationship_watermark(connection, space_id, relationship_id)
+            if current != expected_watermark:
                 return False
             claimed = connection.execute(
                 """UPDATE relationships SET facets = ?, closeness = ?, tone = ?,
@@ -1716,11 +1769,15 @@ class SqliteWorldStore:
             self._apply_inferred_memory_actions(
                 connection, space_id, "relationship", relationship_id,
                 self._relationship_reasoning_source_ids(
-                    connection, space_id, relationship_id), context_inferred_memory_ids or set(), actions,
+                    connection, space_id, relationship_id),
+                context_inferred_memory_ids or set(), actions,
             )
             if result.hypothesis_actions:
-                self._apply_hypothesis_actions(connection, space_id, "relationship", relationship_id, self._relationship_reasoning_source_ids(
-                    connection, space_id, relationship_id), context_hypothesis_ids or set(), result.hypothesis_actions)
+                self._apply_hypothesis_actions(
+                    connection, space_id, "relationship", relationship_id,
+                    self._relationship_reasoning_source_ids(
+                        connection, space_id, relationship_id),
+                    context_hypothesis_ids or set(), result.hypothesis_actions)
             final_watermark = self._relationship_watermark(connection, space_id, relationship_id)
             now = _now()
             connection.execute(
@@ -1795,9 +1852,18 @@ class SqliteWorldStore:
         evidence = connection.execute(
             "SELECT memory_id, role FROM hypothesis_evidence WHERE hypothesis_id = ?", (row["id"],)
         ).fetchall()
-        return HypothesisView(id=row["id"], space_id=row["space_id"], owner_kind=row["owner_kind"], owner_id=row["owner_id"], content=row["content"], kind=row["kind"], confidence=row["confidence"], status=row["status"], promoted_memory_id=row["promoted_memory_id"], evidence=[HypothesisEvidence(memory_id=item["memory_id"], role=item["role"]) for item in evidence], created_at=row["created_at"], updated_at=row["updated_at"])
+        return HypothesisView(
+            id=row["id"], space_id=row["space_id"], owner_kind=row["owner_kind"],
+            owner_id=row["owner_id"], content=row["content"], kind=row["kind"],
+            confidence=row["confidence"], status=row["status"],
+            promoted_memory_id=row["promoted_memory_id"],
+            evidence=[HypothesisEvidence(memory_id=item["memory_id"], role=item["role"])
+                      for item in evidence],
+            created_at=row["created_at"], updated_at=row["updated_at"])
 
-    def coverage_context(self, space_id: str, limit: int | None = 400) -> tuple[CoverageRootView, list[CoverageEntryView], list[MemoryView]] | None:
+    def coverage_context(
+        self, space_id: str, limit: int | None = 400,
+    ) -> tuple[CoverageRootView, list[CoverageEntryView], list[MemoryView]] | None:
         """Return one root that is behind, its active entries, and its backlog.
 
         Roots are audited one at a time, in their declared order, because
@@ -1834,7 +1900,11 @@ class SqliteWorldStore:
                 )
             return None
 
-    def apply_coverage_audit(self, space_id: str, root: str, expected_watermark: str | None, expected_cursor_id: str | None, audit: ExtractedCoverageAudit, chunk: list[MemoryView], context_entry_ids: set[str]) -> bool:
+    def apply_coverage_audit(
+        self, space_id: str, root: str, expected_watermark: str | None,
+        expected_cursor_id: str | None, audit: ExtractedCoverageAudit,
+        chunk: list[MemoryView], context_entry_ids: set[str],
+    ) -> bool:
         """Commit one root's audit and advance that root's cursor alone.
 
         `chunk` is the evidence the audit actually read; the cursor advances
@@ -1843,8 +1913,10 @@ class SqliteWorldStore:
         """
         with self._connect() as connection:
             row = connection.execute(
-                "SELECT * FROM coverage_roots WHERE space_id = ? AND root = ?", (space_id, root)).fetchone()
-            if not row or row["source_watermark"] != expected_watermark or row["source_cursor_id"] != expected_cursor_id:
+                "SELECT * FROM coverage_roots WHERE space_id = ? AND root = ?",
+                (space_id, root)).fetchone()
+            if (not row or row["source_watermark"] != expected_watermark
+                    or row["source_cursor_id"] != expected_cursor_id):
                 return False
             chunk_ids = [item.id for item in chunk]
             now = _now()
@@ -1855,7 +1927,8 @@ class SqliteWorldStore:
                 if edit.entry_id not in context_entry_ids or entry is None:
                     continue
                 connection.execute(
-                    "UPDATE coverage_entries SET path = ?, content = ?, status = ?, updated_at = ? WHERE id = ? AND space_id = ?",
+                    "UPDATE coverage_entries SET path = ?, content = ?, status = ?, updated_at = ? "
+                    "WHERE id = ? AND space_id = ?",
                     (entry.path if edit.path is None else edit.path, edit.content, edit.status,
                      now, edit.entry_id, space_id),
                 )
@@ -1868,22 +1941,31 @@ class SqliteWorldStore:
                     continue
                 existing.add((addition.path, addition.content))
                 connection.execute(
-                    "INSERT INTO coverage_entries(id, space_id, root, path, content, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO coverage_entries"
+                    "(id, space_id, root, path, content, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (_id("entry"), space_id, root, addition.path, addition.content, now, now),
                 )
             cursor_row = connection.execute(
-                "SELECT updated_at, id FROM memories WHERE id IN (%s) ORDER BY updated_at DESC, id DESC LIMIT 1"
+                "SELECT updated_at, id FROM memories WHERE id IN (%s) "
+                "ORDER BY updated_at DESC, id DESC LIMIT 1"
                 % ",".join("?" for _ in chunk_ids), chunk_ids).fetchone() if chunk_ids else None
             next_watermark = cursor_row["updated_at"] if cursor_row else expected_watermark
             next_cursor_id = cursor_row["id"] if cursor_row else expected_cursor_id
             connection.execute(
-                "UPDATE coverage_roots SET revision = revision + 1, source_watermark = ?, source_cursor_id = ?, updated_at = ? WHERE space_id = ? AND root = ?",
+                "UPDATE coverage_roots SET revision = revision + 1, source_watermark = ?, "
+                "source_cursor_id = ?, updated_at = ? WHERE space_id = ? AND root = ?",
                 (next_watermark, next_cursor_id, now, space_id, root),
             )
             return True
 
     def _learning_goal_view(self, row: sqlite3.Row) -> LearningGoalView:
-        return LearningGoalView(id=row["id"], space_id=row["space_id"], prompt=row["prompt"], rationale=row["rationale"], entry_ids=_loads(row["entry_ids"], []), focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"], status_reason=row["status_reason"], created_at=row["created_at"], updated_at=row["updated_at"])
+        return LearningGoalView(
+            id=row["id"], space_id=row["space_id"], prompt=row["prompt"],
+            rationale=row["rationale"], entry_ids=_loads(row["entry_ids"], []),
+            focus_kind=row["focus_kind"], focus_id=row["focus_id"], status=row["status"],
+            status_reason=row["status_reason"], created_at=row["created_at"],
+            updated_at=row["updated_at"])
 
     def _coverage_revision(self, connection: sqlite3.Connection, space_id: str) -> int | None:
         """Sum every root revision as one space-level planning CAS token.
@@ -1893,12 +1975,15 @@ class SqliteWorldStore:
         old entries is stale.
         """
         row = connection.execute(
-            "SELECT COUNT(*) AS roots, COALESCE(SUM(revision), 0) AS revision FROM coverage_roots WHERE space_id = ?",
+            "SELECT COUNT(*) AS roots, COALESCE(SUM(revision), 0) AS revision "
+            "FROM coverage_roots WHERE space_id = ?",
             (space_id,),
         ).fetchone()
         return int(row["revision"]) if row and row["roots"] else None
 
-    def learning_goal_context(self, space_id: str) -> tuple[int, list[CoverageEntryView], list[LearningGoalView], list[LearningGoalView]] | None:
+    def learning_goal_context(self, space_id: str) -> tuple[
+        int, list[CoverageEntryView], list[LearningGoalView], list[LearningGoalView],
+    ] | None:
         """Coverage entries and goal lifecycles -- the planner's whole world.
 
         Memories are the auditor's input, entries are the planner's: a
@@ -1910,30 +1995,38 @@ class SqliteWorldStore:
             if revision is None:
                 return None
             goals = connection.execute(
-                "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC", (space_id,)).fetchall()
+                "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC",
+                (space_id,)).fetchall()
             # `partial` is still served to the agent by guidance_bundle
             # (status IN ('open', 'partial')), so it belongs with the open
             # bucket here too -- otherwise the planner treats a goal the
             # agent is still actively pursuing as settled history.
             open_statuses = {"open", "partial"}
-            return revision, self._coverage_entries(connection, space_id), [self._learning_goal_view(item) for item in goals if item["status"] in open_statuses], [self._learning_goal_view(item) for item in goals if item["status"] not in open_statuses][:20]
+            return (
+                revision,
+                self._coverage_entries(connection, space_id),
+                [self._learning_goal_view(item) for item in goals
+                 if item["status"] in open_statuses],
+                [self._learning_goal_view(item) for item in goals
+                 if item["status"] not in open_statuses][:20])
 
     def _goal_focus(
         self, connection: sqlite3.Connection, space_id: str, text: str
     ) -> tuple[str, str | None]:
         """Derive a goal's focus from its own words, never from the model.
 
-        A person-focused goal used to require the planner to produce a valid
-        person ID, which it was never given and so could never do. The
-        anchor is the person the goal already names: deterministic alias
-        matching resolves exactly-one-person text to that person, and
-        anything else -- nobody named, or several people -- stays a
-        user-focused goal.
+        The planner is never given person IDs, so the anchor is the person
+        the goal already names: deterministic alias matching resolves
+        exactly-one-person text to that person, and anything else -- nobody
+        named, or several people -- stays a user-focused goal.
         """
         people = self._match_people(connection, space_id, text)
         return ("person", people[0].id) if len(people) == 1 else ("user", None)
 
-    def apply_goal_planning(self, space_id: str, expected_revision: int, result: GoalPlanningResult, context_goal_ids: set[str]) -> bool:
+    def apply_goal_planning(
+        self, space_id: str, expected_revision: int, result: GoalPlanningResult,
+        context_goal_ids: set[str],
+    ) -> bool:
         """Commit one planning pass; a goal that files nowhere is still kept.
 
         `entry_ids` is best effort: an ID that does not name an active entry
@@ -1951,19 +2044,30 @@ class SqliteWorldStore:
                 focus_kind, focus_id = self._goal_focus(
                     connection, space_id, item.prompt + "\n" + item.rationale)
                 if item.goal_id and item.goal_id in context_goal_ids:
-                    connection.execute("UPDATE learning_goals SET prompt = ?, rationale = ?, entry_ids = ?, focus_kind = ?, focus_id = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
-                        item.prompt, item.rationale, entry_ids, focus_kind, focus_id, now, item.goal_id, space_id))
+                    connection.execute(
+                        "UPDATE learning_goals SET prompt = ?, rationale = ?, entry_ids = ?, "
+                        "focus_kind = ?, focus_id = ?, updated_at = ? "
+                        "WHERE id = ? AND space_id = ?",
+                        (item.prompt, item.rationale, entry_ids, focus_kind, focus_id, now,
+                         item.goal_id, space_id))
                 elif not item.goal_id:
                     duplicate = connection.execute(
-                        "SELECT 1 FROM learning_goals WHERE space_id = ? AND prompt = ? AND status = 'open'",
+                        "SELECT 1 FROM learning_goals "
+                        "WHERE space_id = ? AND prompt = ? AND status = 'open'",
                         (space_id, item.prompt)).fetchone()
                     if not duplicate:
-                        connection.execute("INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, focus_kind, focus_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", (_id(
-                            "goal"), space_id, item.prompt, item.rationale, entry_ids, focus_kind, focus_id, now, now))
+                        connection.execute(
+                            "INSERT INTO learning_goals(id, space_id, prompt, rationale, "
+                            "entry_ids, focus_kind, focus_id, created_at, updated_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (_id("goal"), space_id, item.prompt, item.rationale, entry_ids,
+                             focus_kind, focus_id, now, now))
             for item in result.transitions:
                 if item.goal_id in context_goal_ids:
-                    connection.execute("UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? WHERE id = ? AND space_id = ?", (
-                        item.status, item.reason, now, item.goal_id, space_id))
+                    connection.execute(
+                        "UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? "
+                        "WHERE id = ? AND space_id = ?",
+                        (item.status, item.reason, now, item.goal_id, space_id))
             return True
 
     def continuity_context(
@@ -2056,9 +2160,13 @@ class SqliteWorldStore:
         """
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
         return connection.execute(
-            f"SELECT id, owner_kind, owner_id, content, confidence, status, updated_at FROM hypotheses "
-            f"WHERE space_id = ? AND status = 'open' AND (owner_kind = 'user' OR (owner_kind = 'person' AND owner_id IN ({placeholders})) OR "
-            f"(owner_kind = 'relationship' AND owner_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "SELECT id, owner_kind, owner_id, content, confidence, status, updated_at "
+            "FROM hypotheses "
+            "WHERE space_id = ? AND status = 'open' AND (owner_kind = 'user' "
+            f"OR (owner_kind = 'person' AND owner_id IN ({placeholders})) "
+            "OR (owner_kind = 'relationship' AND owner_id IN "
+            f"(SELECT id FROM relationships WHERE space_id = ? "
+            f"AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
             "ORDER BY updated_at DESC, id",
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
@@ -2066,12 +2174,18 @@ class SqliteWorldStore:
     def _open_learning_goal_rows(
         self, connection: sqlite3.Connection, space_id: str, person_ids: tuple[str, ...],
     ) -> list[sqlite3.Row]:
-        """Open/partial learning goals reachable from `person_ids`; mirrors `_open_hypothesis_rows`."""
+        """Open/partial learning goals reachable from `person_ids`.
+
+        Mirrors `_open_hypothesis_rows`.
+        """
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
         return connection.execute(
-            f"SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
-            f"WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' OR (focus_kind = 'person' AND focus_id IN ({placeholders})) OR "
-            f"(focus_kind = 'relationship' AND focus_id IN (SELECT id FROM relationships WHERE space_id = ? AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
+            "SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
+            "WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' "
+            f"OR (focus_kind = 'person' AND focus_id IN ({placeholders})) "
+            "OR (focus_kind = 'relationship' AND focus_id IN "
+            f"(SELECT id FROM relationships WHERE space_id = ? "
+            f"AND (person_a_id IN ({placeholders}) OR person_b_id IN ({placeholders}))))) "
             "ORDER BY updated_at DESC, id",
             (space_id, *person_ids, space_id, *person_ids, *person_ids),
         ).fetchall()
@@ -2108,8 +2222,10 @@ class SqliteWorldStore:
         """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
         rows = self._open_hypothesis_rows(connection, space_id, person_ids)
-        hypotheses = [GuidanceItem(id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
-                                   owner_id=row['owner_id'], status=row['status'], confidence=row['confidence']) for row in rows]
+        hypotheses = [GuidanceItem(
+            id=row['id'], kind='hypothesis', content=row['content'],
+            owner_kind=row['owner_kind'], owner_id=row['owner_id'], status=row['status'],
+            confidence=row['confidence']) for row in rows]
         updated = {row['id']: row['updated_at'] for row in rows}
         goals = self._open_learning_goal_rows(connection, space_id, person_ids)
         learning_goals = [GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
@@ -2152,16 +2268,21 @@ class SqliteWorldStore:
         user_view = UserModelView(space_id=space_id, profile_card=_loads(user["profile_card"], {}),
                                   profile_source_updated_at=user["profile_source_updated_at"],
                                   profile_updated_at=user["profile_updated_at"]) if user else None
-        continuity = ContinuityView(text=cont["text"], related_person_ids=_loads(cont["related_person_ids"], []),
-                                    through_message_id=cont["through_message_id"]) if cont else None
+        continuity = ContinuityView(
+            text=cont["text"], related_person_ids=_loads(cont["related_person_ids"], []),
+            through_message_id=cont["through_message_id"]) if cont else None
         ids = continuity.related_person_ids if continuity else []
         people = []
         for person_id in ids:
             row = connection.execute(
-                "SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'", (person_id, space_id)).fetchone()
+                "SELECT * FROM people WHERE id = ? AND space_id = ? AND status = 'active'",
+                (person_id, space_id)).fetchone()
             if row:
-                people.append(PersonView(id=row["id"], display_name=row["display_name"], profile_card=_loads(row["profile_card"], {}),
-                                         profile_source_updated_at=row["profile_source_updated_at"], profile_updated_at=row["profile_updated_at"]))
+                people.append(PersonView(
+                    id=row["id"], display_name=row["display_name"],
+                    profile_card=_loads(row["profile_card"], {}),
+                    profile_source_updated_at=row["profile_source_updated_at"],
+                    profile_updated_at=row["profile_updated_at"]))
         # Guidance is deliberately outside this payload: the learning-goal
         # sample is *derived from* the version (see `_guidance`), so hashing
         # it here would be circular -- the version could never settle.
@@ -2173,10 +2294,13 @@ class SqliteWorldStore:
         version = hashlib.sha256(_json(payload).encode()).hexdigest()[:16]
         return user_view, continuity, people, version
 
-    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "") -> GuidanceBundle:
+    def guidance_bundle(
+        self, space_id: str, activated_person_ids: Iterable[str] = (), query: str = "",
+    ) -> GuidanceBundle:
         with self._connect() as connection:
             _, _, _, version = self._context_state(connection, space_id)
-            return self._guidance(connection, space_id, activated_person_ids, query, version=version)
+            return self._guidance(
+                connection, space_id, activated_person_ids, query, version=version)
 
     def list_guidance(
         self, space_id: str, person_ids: Iterable[str] = (),
@@ -2198,8 +2322,9 @@ class SqliteWorldStore:
             if kind in (None, 'hypothesis'):
                 rows = self._open_hypothesis_rows(connection, space_id, ids)
                 items.extend(GuidanceItem(
-                    id=row['id'], kind='hypothesis', content=row['content'], owner_kind=row['owner_kind'],
-                    owner_id=row['owner_id'], status=row['status'], confidence=row['confidence'],
+                    id=row['id'], kind='hypothesis', content=row['content'],
+                    owner_kind=row['owner_kind'], owner_id=row['owner_id'],
+                    status=row['status'], confidence=row['confidence'],
                 ) for row in rows)
             if kind in (None, 'learning_goal'):
                 rows = self._open_learning_goal_rows(connection, space_id, ids)
@@ -2213,35 +2338,30 @@ class SqliteWorldStore:
         with self._connect() as connection:
             user_view, continuity, people, version = self._context_state(connection, space_id)
             guidance = self._guidance(connection, space_id, version=version)
-            return ContextBundle(version=version, user_model=user_view, continuity=continuity, people=people, guidance=guidance)
+            return ContextBundle(
+                version=version, user_model=user_view, continuity=continuity,
+                people=people, guidance=guidance)
 
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
     ) -> tuple[list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None, str]:
         """One connection, one `_context_state` call, for the whole turn read path.
 
-        `world.turn` used to make four separate store calls -- alias
-        matching, `guidance_bundle`, `recall_user_memories`, and
-        `context_bundle` -- each opening its own connection, with
-        `guidance_bundle` and `context_bundle` *each* recomputing
-        `_context_state` (the `user_models`/`continuities`/related-people
-        read plus the version hash). This does the same reads once, on one
-        connection, and only builds the `ContextBundle` when `known_version`
-        is stale.
+        Alias matching, guidance, memory recall, and the context bundle all
+        read from one connection, and `_context_state` (the
+        `user_models`/`continuities`/related-people read plus the version
+        hash) runs exactly once. The `ContextBundle` is built only when
+        `known_version` is stale.
 
-        Degrade granularity mirrors the old per-call try/except in
-        `world.turn`: alias matching and the shared context-state-plus-
-        guidance step each independently flip `context_status` to
-        `"unavailable"` on failure (matching the old `match_people_in_text`
-        and `guidance_bundle` failures); memory recall failure is logged
-        only, same as before; building the final `ContextBundle` (once we
-        know a fresh version is needed) is its own guarded step, same as
-        the old `context_bundle` failure.
+        Failures degrade per step: alias matching and the shared
+        context-state-plus-guidance step each independently flip
+        `context_status` to `"unavailable"`; memory recall failure is logged
+        only; building the final `ContextBundle` is its own guarded step.
 
         Guidance sampling is deliberately derived from the exact same
         `version` the (possibly returned) `ContextBundle` uses -- see
-        `_guidance`'s docstring -- which now holds automatically since both
-        come from the single `_context_state` call below.
+        `_guidance`'s docstring -- which holds because both come from the
+        single `_context_state` call below.
         """
         known_people: list[PersonView] = []
         memory_recall: list[MemoryView] = []
@@ -2631,9 +2751,11 @@ class SqliteWorldStore:
                 return False
             if result.hypothesis_actions:
                 source_ids = {row["id"] for row in connection.execute(
-                    "SELECT id FROM memories WHERE space_id = ? AND status = 'active' AND about_user = 1 AND basis <> 'inferred'", (space_id,)).fetchall()}
+                    "SELECT id FROM memories WHERE space_id = ? AND status = 'active' "
+                    "AND about_user = 1 AND basis <> 'inferred'", (space_id,)).fetchall()}
                 self._apply_hypothesis_actions(
-                    connection, space_id, "user", None, source_ids, context_hypothesis_ids or set(), result.hypothesis_actions)
+                    connection, space_id, "user", None, source_ids,
+                    context_hypothesis_ids or set(), result.hypothesis_actions)
             return True
 
     def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None:
@@ -2656,10 +2778,12 @@ class SqliteWorldStore:
                     """SELECT p.space_id, p.id FROM people p
                     WHERE p.status = 'active' AND (
                       p.profile_source_updated_at IS NULL OR p.profile_source_updated_at <
-                       (SELECT MAX(m.updated_at) FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                       (SELECT MAX(m.updated_at) FROM memories m
+                        JOIN memory_people mp ON mp.memory_id = m.id
                        WHERE m.space_id = p.space_id AND mp.person_id = p.id
                          AND m.basis <> 'inferred')
-                    ) AND EXISTS (SELECT 1 FROM memories m JOIN memory_people mp ON mp.memory_id = m.id
+                    ) AND EXISTS (SELECT 1 FROM memories m
+                       JOIN memory_people mp ON mp.memory_id = m.id
                        WHERE m.space_id = p.space_id AND mp.person_id = p.id
                          AND m.basis <> 'inferred')"""
                 ).fetchall()
@@ -2760,7 +2884,8 @@ class SqliteWorldStore:
                     request.kind or original["kind"],
                     int(original["about_user"]
                         if request.about_user is None else request.about_user),
-                    request.valid_from if request.valid_from is not None else original["valid_from"],
+                    (request.valid_from if request.valid_from is not None
+                     else original["valid_from"]),
                     request.valid_to if request.valid_to is not None else original["valid_to"],
                     memory_id,
                     now,

@@ -105,14 +105,5 @@ class DescriptorReasoner(AttemptLoop):
         applied = self._apply(space_id, context, result)
         return self._continue_when(context, result, applied)
 
-    # Seams reserved for a later unification pass across reasoners. Neither
-    # is implemented or called today: each reasoner still reads its own
-    # bounded context and applies its own single result exactly as before.
-    def read_evidence_page(self, context: Any) -> Any:
-        raise NotImplementedError
-
-    def aggregate_partial_results(self, results: list[Any]) -> Any:
-        raise NotImplementedError
-
 
 __all__ = ["AttemptLoop", "DescriptorReasoner", "Reasoner"]

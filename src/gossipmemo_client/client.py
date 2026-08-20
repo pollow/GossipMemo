@@ -329,19 +329,22 @@ class GossipMemo(_ClientCommon):
         idempotency_key: str | None = None,
     ) -> Json:
         """Build a validated turns payload from one message or a list of them."""
-        if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
+        if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
+                or not 1 <= memory_limit <= 10):
             raise ValueError("memory_limit must be between 1 and 10")
         if context_version is not None and not str(context_version).strip():
             raise ValueError("context_version must be non-empty when provided")
         return {
-            "messages": _normalise_turn_messages(message, source=source, idempotency_key=idempotency_key),
+            "messages": _normalise_turn_messages(
+                message, source=source, idempotency_key=idempotency_key),
             "context_version": context_version,
             "memory_limit": memory_limit,
         }
 
     def turn(self, message: Any, **kwargs: Any) -> Any:
         """Persist one user turn and return context/recall metadata."""
-        return self._request("POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
+        return self._request(
+            "POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
 
     def ingest(
         self,
@@ -353,13 +356,13 @@ class GossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
     ) -> Any:
-        """Deprecated: persist one or more messages via the merged turns write path.
+        """Deprecated: persist one or more messages via the turns write path.
 
-        This is now a thin wrapper that POSTs to the same
-        ``/v1/spaces/{space_id}/turns`` endpoint as :meth:`turn`, with a
-        batch whose messages need not end in a user message. Prefer
-        :meth:`turn` directly; this is kept for the "single-field vs
-        messages list" normalization existing callers rely on.
+        POSTs to the same ``/v1/spaces/{space_id}/turns`` endpoint as
+        :meth:`turn`, with a batch whose messages need not end in a user
+        message. Prefer :meth:`turn` directly; this is kept for the
+        "single-field vs messages list" normalization existing callers rely
+        on.
         """
 
         if messages is not None and not isinstance(messages, str) and any(
@@ -646,18 +649,21 @@ class AsyncGossipMemo(_ClientCommon):
         idempotency_key: str | None = None,
     ) -> Json:
         """Build a validated turns payload from one message or a list of them."""
-        if not isinstance(memory_limit, int) or isinstance(memory_limit, bool) or not 1 <= memory_limit <= 10:
+        if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
+                or not 1 <= memory_limit <= 10):
             raise ValueError("memory_limit must be between 1 and 10")
         if context_version is not None and not str(context_version).strip():
             raise ValueError("context_version must be non-empty when provided")
         return {
-            "messages": _normalise_turn_messages(message, source=source, idempotency_key=idempotency_key),
+            "messages": _normalise_turn_messages(
+                message, source=source, idempotency_key=idempotency_key),
             "context_version": context_version,
             "memory_limit": memory_limit,
         }
 
     async def turn(self, message: Any, **kwargs: Any) -> Any:
-        return await self._request("POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
+        return await self._request(
+            "POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
 
     async def ingest(
         self,
@@ -669,13 +675,13 @@ class AsyncGossipMemo(_ClientCommon):
         occurred_at: datetime | date | str | None = None,
         idempotency_key: str | None = None,
     ) -> Any:
-        """Deprecated: persist one or more messages via the merged turns write path.
+        """Deprecated: persist one or more messages via the turns write path.
 
-        This is now a thin wrapper that POSTs to the same
-        ``/v1/spaces/{space_id}/turns`` endpoint as :meth:`turn`, with a
-        batch whose messages need not end in a user message. Prefer
-        :meth:`turn` directly; this is kept for the "single-field vs
-        messages list" normalization existing callers rely on.
+        POSTs to the same ``/v1/spaces/{space_id}/turns`` endpoint as
+        :meth:`turn`, with a batch whose messages need not end in a user
+        message. Prefer :meth:`turn` directly; this is kept for the
+        "single-field vs messages list" normalization existing callers rely
+        on.
         """
 
         if messages is not None and not isinstance(messages, str) and any(

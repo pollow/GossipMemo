@@ -79,10 +79,9 @@ class GuidanceBundle(BaseModel):
 class TurnRequest(BaseModel):
     """A batch of messages (durable write), plus the SDK's cached context watermark.
 
-    This is the merged write path: what used to be a separate `/ingest`
-    endpoint is just a `turns` batch whose last message happens not to be
-    from the user. See `SocialMemoryWorld.turn` for the read-enrichment
-    rule that follows from that.
+    This is the single write path: a batch whose last message is not from
+    the user is a plain durable write. See `SocialMemoryWorld.turn` for the
+    read-enrichment rule that follows from that.
     """
 
     messages: list[MessageInput] = Field(min_length=1, max_length=100)

@@ -52,8 +52,8 @@ class LLMOutputError(LLMError):
 class ProviderGate:
     """Global single-permit priority gate for outbound provider requests.
 
-    One queued job used to be a whole reasoner call; the real choke point is
-    one provider HTTP request. Callers `acquire()` immediately before the
+    The choke point is a single provider HTTP request, not a whole reasoner
+    call, so the gate is held per request. Callers `acquire()` immediately before the
     transport-retry loop and `release()` once it returns (success or final
     failure) -- holding the permit across `asyncio.sleep` backoff is
     deliberate, so a 429/5xx/transport backoff blocks every other caller,

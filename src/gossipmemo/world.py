@@ -236,15 +236,11 @@ class SocialMemoryWorld:
     async def turn(self, space_id: str, request: TurnRequest) -> TurnResponse:
         """Persist this batch first; all enrichment is best-effort and local.
 
-        This is the merged write path for both a plain message batch (the
-        old `/ingest`) and a user turn: they record messages and schedule
-        intake identically, so there is nothing left to branch on except
-        whether read-enrichment (alias matching, guidance, FTS recall,
-        context-version comparison) makes sense for this batch. That is
-        derived from the data itself -- the batch's last message is from
-        the user, or it is not -- rather than from a caller-supplied
-        `enrich` flag, because a flag here would just be `/ingest` and
-        `/turns` wearing the same skin under one route.
+        Every batch records messages and schedules intake identically. Only
+        read-enrichment (alias matching, guidance, FTS recall,
+        context-version comparison) is conditional, and the condition is
+        derived from the data itself -- the batch's last message is from the
+        user, or it is not -- never from a caller-supplied flag.
         """
         started = asyncio.get_running_loop().time()
         message_ids = self.store.record_messages(space_id, request.messages)
@@ -256,11 +252,18 @@ class SocialMemoryWorld:
         context_update = None
         context_status = "available"
         if last_message.author == "user":
-            known_people, guidance, memory_recall, context_update, context_status = self.store.turn_view(
+            (known_people, guidance, memory_recall, context_update,
+             context_status) = self.store.turn_view(
                 space_id, last_message.content, request.memory_limit, request.context_version,
             )
-        logger.info("turn_completed", extra={"space_id": space_id, "message_count": len(message_ids), "known_people": len(known_people), "recalled_memories": len(
-            memory_recall), "context_status": context_status, "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2)})
+        logger.info("turn_completed", extra={
+            "space_id": space_id,
+            "message_count": len(message_ids),
+            "known_people": len(known_people),
+            "recalled_memories": len(memory_recall),
+            "context_status": context_status,
+            "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2),
+        })
         return TurnResponse(
             message_ids=message_ids,
             known_people=known_people,
@@ -308,7 +311,10 @@ class SocialMemoryWorld:
             )
             if batch_id:
                 logger.info("extraction_batch_scheduled", extra={
-                            "space_id": space_id, "batch_id": batch_id, "message_count": self.extraction_batch_size})
+                    "space_id": space_id,
+                    "batch_id": batch_id,
+                    "message_count": self.extraction_batch_size,
+                })
                 self._schedule_extraction(space_id)
             pending = self.store.unbatched_messages(space_id)
         if pending:

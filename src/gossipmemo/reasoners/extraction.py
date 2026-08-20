@@ -6,10 +6,7 @@ driver's job. This reasoner only consumes pending batches: each `attempt`
 runs the single oldest pending batch for a space through to completion or
 failure and reports whether another batch remains.
 
-ACCEPTED INTENTIONAL CHANGE: batches used to run as one spawned task each,
-concurrently. Driven as a reasoner they now drain sequentially per space.
-Provider requests were already serialized by `ProviderGate`, so this is a
-scheduling change, not a semantic one, and it matches the intended
+Batches drain sequentially per space, which matches the intended
 "extraction drains before induction" priority (`TIER_FRESHNESS`).
 """
 
@@ -120,8 +117,9 @@ def extraction_prompt(
         "anchored individual, choose the most stable, specific, neutral canonical "
         "label supported by the evidence, in the evidence language, and keep each "
         "observed surface wording as an alias. Do not create separate identities "
-        "merely because synonymous wording was used. Never guess that differently named people are the "
-        "same person. If identity is vague, preserve any otherwise useful durable "
+        "merely because synonymous wording was used. Never guess that differently "
+        "named people are the same person. If identity is vague, preserve any "
+        "otherwise useful durable "
         "memory with the original reference in its content and leave its `people` "
         "refs empty; identity uncertainty alone is not a reason to discard that "
         "memory. Preserve reported claims as "
@@ -142,17 +140,19 @@ def extraction_prompt(
         "it in that person's `aliases` field. Omit a known person unless a new "
         "memory references them or the messages explicitly add an alias. Do not "
         "echo the known-people list.\n"
-        + "\n\nCurrent batch evidence (user-authored; the only messages allowed to produce memories):\n"
+        + "\n\nCurrent batch evidence "
+        "(user-authored; the only messages allowed to produce memories):\n"
         + _json(evidence_messages)
         + "\n\nCurrent batch context (assistant-authored; context only):\n"
         + _json(assistant_messages)
         + "\n\nComparison memories (deduplication/update reference only; never new evidence):\n"
         + _json(list(comparison_memories))
-        + "\nFor comparison memories only: omit a memory when the current user batch merely repeats it. "
-        "When current user evidence explicitly corrects, updates, or refines one, emit the new memory "
-        "and set `supersedes_memory_id` to that supplied comparison memory ID. Never copy details from a "
-        "comparison memory unless those details also appear in current user evidence. Do not use an inferred "
-        "comparison memory as evidence."
+        + "\nFor comparison memories only: omit a memory when the current user batch "
+        "merely repeats it. When current user evidence explicitly corrects, updates, or "
+        "refines one, emit the new memory and set `supersedes_memory_id` to that supplied "
+        "comparison memory ID. Never copy details from a comparison memory unless those "
+        "details also appear in current user evidence. Do not use an inferred comparison "
+        "memory as evidence."
     )
 
 
