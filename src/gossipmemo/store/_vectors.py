@@ -59,6 +59,31 @@ _OWNER_TEXT_SOURCES: dict[str, tuple[str, str, str]] = {
     "coverage_entry": ("coverage_entries", "content", "status"),
 }
 
+# Bumped whenever the sidecar's vec0/meta table *shape* changes (not the
+# embedded model/dim, which is tracked separately in embedding_index_meta).
+# A sidecar built under an older layout is treated as absent -- see
+# _read_sidecar_meta -- and rebuilt from the main table, never touching the
+# embedding API.
+_SIDECAR_LAYOUT_VERSION = 2
+
+# search_vectors() over-fetches from vec0 when a status filter is present:
+# vec0's `k` truncates the KNN search *before* the live JOIN against the
+# owner table's status column runs (status is not a vec0 metadata column --
+# deliberately, see the module docstring -- so vec0 has no way to filter on
+# it itself). Asking for more candidates than k, then filtering and cutting
+# back down to k, makes it very likely the true top-k *active* (or whatever
+# statuses were asked for) matches are among them. _SIDECAR_OVER_FETCH_MIN
+# keeps small k from over-fetching too little to matter.
+_SIDECAR_OVER_FETCH_MULTIPLIER = 5
+_SIDECAR_OVER_FETCH_MIN = 50
+# If even the over-fetched, filtered result is short of k *and* the raw
+# (unfiltered) KNN scan came back exactly at the over-fetch cap -- meaning
+# there could be more matches beyond what was fetched -- escalate once to a
+# much wider k and accept whatever that yields. Never loop: one escalation
+# is a pragmatic bound on cost, not a correctness guarantee for pathological
+# status distributions.
+_SIDECAR_OVER_FETCH_ESCALATION_MULTIPLIER = 20
+
 
 def content_hash(text: str) -> str:
     """The single hash algorithm used to detect stale embeddings. Centralized
@@ -107,14 +132,18 @@ class PendingEmbedding:
 @dataclass(frozen=True)
 class EmbeddingUpsert:
     """One vector ready to be written, alongside the text it was computed
-    from (to re-derive `content_hash`) and the owner's current lifecycle
-    status (cached into the sidecar index for status-filtered search)."""
+    from (to re-derive `content_hash`). Lifecycle status is deliberately
+    NOT carried here: it lives only on the owner row and is read live at
+    search time (via a JOIN, both in the sidecar and the Python fallback),
+    never cached alongside the vector -- a cached status column would go
+    stale the moment an owner's status changes without its text changing
+    (e.g. a memory being retracted), which is exactly the kind of
+    state-flag drift this design avoids by using content_hash instead."""
 
     owner_kind: str
     owner_id: str
     text: str
     vector: Sequence[float]
-    status: str
 
 
 class _VectorsMixin(_BaseStore):
@@ -152,7 +181,8 @@ class _VectorsMixin(_BaseStore):
             connection.execute("ATTACH DATABASE ? AS vec", (str(sidecar),))
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS vec.embedding_index_meta("
-                "model TEXT NOT NULL, dim INTEGER NOT NULL, built_at TEXT NOT NULL)"
+                "model TEXT NOT NULL, dim INTEGER NOT NULL, "
+                "layout_version INTEGER NOT NULL, built_at TEXT NOT NULL)"
             )
         except (sqlite3.Error, OSError) as error:
             logger.warning(
@@ -169,56 +199,79 @@ class _VectorsMixin(_BaseStore):
 
         return self._load_vec_extension(connection) and self._attach_sidecar(connection)
 
+    def _read_sidecar_meta(
+        self, connection: sqlite3.Connection,
+    ) -> tuple[str, int, int] | None:
+        """The sidecar's recorded (model, dim, layout_version), or None if
+        it has never been built, or was built under a shape old enough that
+        `layout_version` (or the whole meta table) doesn't exist yet --
+        both are treated identically to "needs a rebuild"."""
+
+        try:
+            row = connection.execute(
+                "SELECT model, dim, layout_version FROM vec.embedding_index_meta LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        if row is None:
+            return None
+        return (row["model"], row["dim"], row["layout_version"])
+
     def ensure_vector_index(self, model: str, dim: int) -> None:
         """Idempotent maintenance entry point: call at startup (after
         induction/backfill scheduling) and whenever the active embedding
         model/dim might have changed. Rebuilds the sidecar's `vec0` table
         from the main `embeddings` BLOBs -- never calling the embedding API
-        -- exactly when its recorded (model, dim) meta disagrees with the
-        one passed in. A no-op, quietly, if vectors are unavailable."""
+        -- exactly when its recorded (model, dim, layout_version) meta
+        disagrees with the current one. A no-op, quietly, if vectors are
+        unavailable."""
 
         with self._connect() as connection:
             if not self._enable_vectors(connection):
                 return
-            meta = connection.execute(
-                "SELECT model, dim FROM vec.embedding_index_meta LIMIT 1"
-            ).fetchone()
-            if meta is not None and meta["model"] == model and meta["dim"] == dim:
+            if self._read_sidecar_meta(connection) == (model, dim, _SIDECAR_LAYOUT_VERSION):
                 return
             self._rebuild_sidecar(connection, model, dim)
 
     def _rebuild_sidecar(self, connection: sqlite3.Connection, model: str, dim: int) -> None:
+        """Drop and recreate both the `vec0` table and its meta row from
+        scratch. Dropping (not just clearing) `embedding_index_meta` is
+        what lets this also fix up a meta table built under an older
+        layout (missing `layout_version`) -- it always ends up with the
+        current column shape. No owner-table status is read or cached here
+        -- status is never stored in the sidecar; see EmbeddingUpsert."""
+
         connection.execute("DROP TABLE IF EXISTS vec.embeddings")
-        connection.execute("DELETE FROM vec.embedding_index_meta")
+        connection.execute("DROP TABLE IF EXISTS vec.embedding_index_meta")
+        connection.execute(
+            "CREATE TABLE vec.embedding_index_meta("
+            "model TEXT NOT NULL, dim INTEGER NOT NULL, "
+            "layout_version INTEGER NOT NULL, built_at TEXT NOT NULL)"
+        )
         connection.execute(
             f"CREATE VIRTUAL TABLE vec.embeddings USING vec0("
             f"owner_id TEXT PRIMARY KEY, embedding float[{dim}], "
-            f"space_id TEXT partition key, owner_kind TEXT, status TEXT, "
+            f"space_id TEXT partition key, owner_kind TEXT, "
             f"+content_hash TEXT)"
         )
-        for kind, (table, _text_col, status_col) in _OWNER_TEXT_SOURCES.items():
-            rows = connection.execute(
-                f"""
-                SELECT e.space_id AS space_id, e.owner_id AS owner_id, e.vector AS vector,
-                       o.{status_col} AS status, e.content_hash AS content_hash
-                FROM embeddings e JOIN {table} o ON o.id = e.owner_id
-                WHERE e.owner_kind = ? AND e.model = ? AND e.dim = ?
-                """,
-                (kind, model, dim),
-            ).fetchall()
-            connection.executemany(
-                "INSERT INTO vec.embeddings"
-                "(owner_id, embedding, space_id, owner_kind, status, content_hash) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                [
-                    (row["owner_id"], row["vector"], row["space_id"], kind,
-                     row["status"], row["content_hash"])
-                    for row in rows
-                ],
-            )
+        rows = connection.execute(
+            "SELECT space_id, owner_kind, owner_id, vector, content_hash "
+            "FROM embeddings WHERE model = ? AND dim = ?",
+            (model, dim),
+        ).fetchall()
+        connection.executemany(
+            "INSERT INTO vec.embeddings(owner_id, embedding, space_id, owner_kind, content_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            [
+                (row["owner_id"], row["vector"], row["space_id"], row["owner_kind"],
+                 row["content_hash"])
+                for row in rows
+            ],
+        )
         connection.execute(
-            "INSERT INTO vec.embedding_index_meta(model, dim, built_at) VALUES (?, ?, ?)",
-            (model, dim, now_iso()),
+            "INSERT INTO vec.embedding_index_meta(model, dim, layout_version, built_at) "
+            "VALUES (?, ?, ?, ?)",
+            (model, dim, _SIDECAR_LAYOUT_VERSION, now_iso()),
         )
 
     # -- writes ------------------------------------------------------------
@@ -259,28 +312,25 @@ class _VectorsMixin(_BaseStore):
 
             if not self._enable_vectors(connection):
                 return
-            meta = connection.execute(
-                "SELECT model, dim FROM vec.embedding_index_meta LIMIT 1"
-            ).fetchone()
-            if meta is None or meta["model"] != model or meta["dim"] != dim:
-                # Sidecar is unbuilt or stale for this (model, dim); leave it
-                # alone here -- ensure_vector_index() does a full rebuild that
-                # will pick up the rows just written above.
+            if self._read_sidecar_meta(connection) != (model, dim, _SIDECAR_LAYOUT_VERSION):
+                # Sidecar is unbuilt or stale for this (model, dim, layout);
+                # leave it alone here -- ensure_vector_index() does a full
+                # rebuild that will pick up the rows just written above.
                 return
             for item in items:
                 blob = pack_vector(item.vector)
                 h = content_hash(item.text)
                 cursor = connection.execute(
                     "UPDATE vec.embeddings SET embedding = ?, space_id = ?, "
-                    "owner_kind = ?, status = ?, content_hash = ? WHERE owner_id = ?",
-                    (blob, space_id, item.owner_kind, item.status, h, item.owner_id),
+                    "owner_kind = ?, content_hash = ? WHERE owner_id = ?",
+                    (blob, space_id, item.owner_kind, h, item.owner_id),
                 )
                 if cursor.rowcount == 0:
                     connection.execute(
                         "INSERT INTO vec.embeddings"
-                        "(owner_id, embedding, space_id, owner_kind, status, content_hash) "
-                        "VALUES (?, ?, ?, ?, ?, ?)",
-                        (item.owner_id, blob, space_id, item.owner_kind, item.status, h),
+                        "(owner_id, embedding, space_id, owner_kind, content_hash) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (item.owner_id, blob, space_id, item.owner_kind, h),
                     )
 
     # -- pending / maintenance ----------------------------------------------
@@ -397,19 +447,88 @@ class _VectorsMixin(_BaseStore):
         k: int,
         statuses: Sequence[str] | None,
     ) -> list[tuple[str, float]]:
+        table, _text_col, status_col = _OWNER_TEXT_SOURCES[owner_kind]
+
+        if not statuses:
+            # No status filter: vec0's own k truncation is exactly the
+            # answer, no over-fetch needed.
+            rows = self._sidecar_knn_joined(
+                connection, table, status_col, space_id, owner_kind, query_vector, k, None,
+            )
+            return [(row["owner_id"], _l2_distance_to_cosine(row["distance"])) for row in rows[:k]]
+
+        over_fetch_k = max(k * _SIDECAR_OVER_FETCH_MULTIPLIER, _SIDECAR_OVER_FETCH_MIN)
+        rows = self._sidecar_knn_joined(
+            connection, table, status_col, space_id, owner_kind, query_vector,
+            over_fetch_k, statuses,
+        )
+        if len(rows) < k:
+            raw_count = self._sidecar_knn_raw_count(
+                connection, space_id, owner_kind, query_vector, over_fetch_k,
+            )
+            if raw_count == over_fetch_k:
+                # The unfiltered KNN scan was exactly capped at over_fetch_k,
+                # so there may be more true candidates beyond it that the
+                # live status filter would have kept. Escalate once, wide,
+                # and accept whatever comes back -- see the constant's
+                # comment for why this never loops.
+                escalated_k = max(
+                    k * _SIDECAR_OVER_FETCH_ESCALATION_MULTIPLIER, _SIDECAR_OVER_FETCH_MIN,
+                )
+                if escalated_k > over_fetch_k:
+                    rows = self._sidecar_knn_joined(
+                        connection, table, status_col, space_id, owner_kind, query_vector,
+                        escalated_k, statuses,
+                    )
+        return [(row["owner_id"], _l2_distance_to_cosine(row["distance"])) for row in rows[:k]]
+
+    def _sidecar_knn_joined(
+        self,
+        connection: sqlite3.Connection,
+        table: str,
+        status_col: str,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+        statuses: Sequence[str] | None,
+    ) -> list[sqlite3.Row]:
+        """The verified cross-database KNN query: `owner_id`/`distance` come
+        from the sidecar's `vec0` table, `status` is read live via a JOIN
+        against the owner's row in the main database -- never cached."""
+
         sql = (
             "SELECT e.owner_id AS owner_id, e.distance AS distance "
-            "FROM vec.embeddings e WHERE e.embedding MATCH ? AND k = ? "
-            "AND e.space_id = ? AND e.owner_kind = ?"
+            f"FROM vec.embeddings e JOIN main.{table} o ON o.id = e.owner_id "
+            "WHERE e.embedding MATCH ? AND k = ? AND e.space_id = ? AND e.owner_kind = ?"
         )
         params: list[object] = [pack_vector(query_vector), k, space_id, owner_kind]
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
-            sql += f" AND e.status IN ({placeholders})"
+            sql += f" AND o.{status_col} IN ({placeholders})"
             params.extend(statuses)
         sql += " ORDER BY e.distance"
-        rows = connection.execute(sql, params).fetchall()
-        return [(row["owner_id"], _l2_distance_to_cosine(row["distance"])) for row in rows]
+        return connection.execute(sql, params).fetchall()
+
+    def _sidecar_knn_raw_count(
+        self,
+        connection: sqlite3.Connection,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+    ) -> int:
+        """How many candidates vec0's own KNN returns before any live status
+        filter -- used only to tell whether a deficient, filtered result was
+        actually capped by `k` (worth escalating) or is simply everything
+        that exists (not worth escalating)."""
+
+        rows = connection.execute(
+            "SELECT e.owner_id AS owner_id FROM vec.embeddings e "
+            "WHERE e.embedding MATCH ? AND k = ? AND e.space_id = ? AND e.owner_kind = ?",
+            (pack_vector(query_vector), k, space_id, owner_kind),
+        ).fetchall()
+        return len(rows)
 
     def _search_python(
         self,
