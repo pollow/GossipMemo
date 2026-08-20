@@ -1,8 +1,8 @@
 """Embedding transport: one batch embeddings request, and nothing above it.
 
 Mirrors `transport.py`'s discipline for the chat-completions seam: this is a
-leaf module. It owns HTTP details for an OpenAI-compatible `/v1/embeddings`
-endpoint (and the llama.cpp `/v1/models` dimension probe) and nothing about
+leaf module. It owns HTTP details for an OpenAI-compatible `/embeddings`
+endpoint (and the llama.cpp `/models` dimension probe) and nothing about
 which store rows get embedded, when a backfill runs, or how vectors are
 searched -- that is a later slice's job. Nothing here imports a reasoner, a
 prompt, or a store, and this client is never routed through `ProviderGate`:
@@ -19,7 +19,6 @@ that slice ask for one without this module knowing who calls it or why.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 from collections.abc import Mapping, Sequence
@@ -104,7 +103,7 @@ def normalize(vector: Sequence[float]) -> list[float]:
 async def probe_dimension(
     client: httpx.AsyncClient, base_url: str, headers: Mapping[str, str], model: str
 ) -> int | None:
-    """Probe `GET {base_url}/v1/models` for the configured model's `n_embd`.
+    """Probe `GET {base_url}/models` for the configured model's `n_embd`.
 
     `meta.n_embd` is a llama.cpp server extension, not something the OpenAI
     protocol guarantees, so every step here is defensive: a missing field,
@@ -114,7 +113,7 @@ async def probe_dimension(
     """
 
     try:
-        response = await client.get(f"{base_url}/v1/models", headers=headers)
+        response = await client.get(f"{base_url}/models", headers=headers)
         response.raise_for_status()
         payload = response.json()
     except (httpx.HTTPError, ValueError):
@@ -140,7 +139,7 @@ async def probe_dimension(
 
 
 class OpenAICompatibleEmbeddingClient:
-    """Client for servers exposing an OpenAI-compatible `/v1/embeddings`.
+    """Client for servers exposing an OpenAI-compatible `/embeddings`.
 
     One HTTP request per `embed()` call carries the whole batch, matching
     the deployed llama.cpp server's support for multiple `input` strings.
@@ -189,7 +188,7 @@ class OpenAICompatibleEmbeddingClient:
     def endpoint(self) -> str:
         if self.base_url.endswith("/embeddings"):
             return self.base_url
-        return self.base_url + "/v1/embeddings"
+        return self.base_url + "/embeddings"
 
     def _headers(self) -> dict[str, str]:
         headers = {"Accept": "application/json"}
@@ -298,7 +297,7 @@ async def resolve_embedding_dim(
 ) -> int:
     """Resolve the embedding dimension by probing, falling back to config.
 
-    Probe `GET {base_url}/v1/models` first. If the probe succeeds and
+    Probe `GET {base_url}/models` first. If the probe succeeds and
     `configured_dim` is also set, they must agree -- a mismatch is a
     configuration error, since a silently-wrong dimension would corrupt
     every stored vector. If the probe fails, fall back to `configured_dim`.
@@ -361,28 +360,6 @@ async def create_embedding_client(
     )
 
 
-def deterministic_unit_vector(text: str, dim: int) -> list[float]:
-    """Hash-derived, reproducible unit vector for a text -- test helper.
-
-    Not part of the production seam; kept here so both production code and
-    tests share one definition of "deterministic fake vector for this
-    text," avoiding drift between a test double and what this module
-    considers a valid normalized vector.
-    """
-
-    values: list[float] = []
-    counter = 0
-    while len(values) < dim:
-        digest = hashlib.sha256(f"{text}:{counter}".encode()).digest()
-        for offset in range(0, len(digest) - 1, 2):
-            if len(values) >= dim:
-                break
-            raw = int.from_bytes(digest[offset: offset + 2], "big")
-            values.append((raw / 65535.0) * 2.0 - 1.0)
-        counter += 1
-    return normalize(values)
-
-
 __all__ = [
     "EmbeddingClient",
     "EmbeddingDimensionError",
@@ -392,7 +369,6 @@ __all__ = [
     "MAX_EMBEDDING_INPUT_CHARS",
     "OpenAICompatibleEmbeddingClient",
     "create_embedding_client",
-    "deterministic_unit_vector",
     "normalize",
     "probe_dimension",
     "resolve_embedding_dim",

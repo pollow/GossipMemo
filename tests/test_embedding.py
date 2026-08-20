@@ -19,11 +19,10 @@ from gossipmemo.embedding import (
     EmbeddingProtocolError,
     EmbeddingRequestError,
     OpenAICompatibleEmbeddingClient,
-    deterministic_unit_vector,
     normalize,
     resolve_embedding_dim,
 )
-from tests.fakes_embedding import FakeEmbeddingClient
+from tests.fakes_embedding import FakeEmbeddingClient, deterministic_unit_vector
 
 
 def _norm(vector: list[float]) -> float:
@@ -323,3 +322,47 @@ def test_embedding_client_embed_accepts_optional_instruction_kw() -> None:
 
     asyncio.run(run())
     assert captured[0]["input"] == ["Instruct: Retrieve relevant memory\nQuery: find my keys"]
+
+
+def test_endpoint_treats_base_url_as_the_api_root() -> None:
+    """`base_url` already carries `/v1`, exactly as `llm.py` treats `llm_base_url`.
+
+    That convention is what makes inheriting `llm_base_url` for embedding
+    correct; appending `/v1/embeddings` here would double the prefix.
+    """
+
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(200, json={"data": [{"index": 0, "embedding": [1.0, 0.0]}]})
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            for base in ("http://nas:8002/v1", "http://nas:8002/v1/"):
+                client = OpenAICompatibleEmbeddingClient(
+                    base, "", "embed-model", 2, client=http_client
+                )
+                await client.embed(["a"])
+
+    asyncio.run(run())
+    assert urls == ["http://nas:8002/v1/embeddings"] * 2
+
+
+def test_dimension_probe_hits_the_models_path_under_the_api_root() -> None:
+    urls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        urls.append(str(request.url))
+        return httpx.Response(
+            200, json={"data": [{"id": "embed-model", "meta": {"n_embd": 1024}}]}
+        )
+
+    async def run() -> int:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http_client:
+            return await resolve_embedding_dim(
+                "http://nas:8002/v1", "", "embed-model", None, client=http_client
+            )
+
+    assert asyncio.run(run()) == 1024
+    assert urls == ["http://nas:8002/v1/models"]

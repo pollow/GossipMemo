@@ -10,9 +10,30 @@ concern per the design brief.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
 
-from gossipmemo.embedding import deterministic_unit_vector
+from gossipmemo.embedding import normalize
+
+
+def deterministic_unit_vector(text: str, dim: int) -> list[float]:
+    """Hash-derived, reproducible unit vector for a text.
+
+    Normalized through the production `normalize`, so a fake vector is
+    always a vector the storage layer would consider valid.
+    """
+
+    values: list[float] = []
+    counter = 0
+    while len(values) < dim:
+        digest = hashlib.sha256(f"{text}:{counter}".encode()).digest()
+        for offset in range(0, len(digest) - 1, 2):
+            if len(values) >= dim:
+                break
+            raw = int.from_bytes(digest[offset: offset + 2], "big")
+            values.append((raw / 65535.0) * 2.0 - 1.0)
+        counter += 1
+    return normalize(values)
 
 
 class FakeEmbeddingClient:
@@ -42,4 +63,4 @@ class FakeEmbeddingClient:
         return [deterministic_unit_vector(text, self._dim) for text in keyed]
 
 
-__all__ = ["FakeEmbeddingClient"]
+__all__ = ["FakeEmbeddingClient", "deterministic_unit_vector"]
