@@ -66,9 +66,8 @@ def run(args: argparse.Namespace) -> None:
             )
 
         if not args.skip_ingest:
-            result = memory.ingest(
-                content="Alice 跟我说，Bob 最近可能准备离职，但还没有最终决定。",
-                author="user",
+            result = memory.turn(
+                "Alice 跟我说，Bob 最近可能准备离职，但还没有最终决定。",
                 source={
                     "provider": "smoke-test",
                     "conversation_key": run_id,
@@ -77,7 +76,7 @@ def run(args: argparse.Namespace) -> None:
                 },
                 idempotency_key=f"{run_id}:gossip-1",
             )
-            show("ingest result", result)
+            show("turn result", result)
 
             query = memory.query(
                 "Bob 最近的工作状态怎么样？这个消息是谁告诉我的？",
@@ -89,7 +88,7 @@ def run(args: argparse.Namespace) -> None:
             show("gossip query", query)
             if not query.get("memories"):
                 raise RuntimeError(
-                    "ingest completed, but the Bob query returned no memories; "
+                    "the turn was accepted, but the Bob query returned no memories; "
                     "inspect the extraction prompt/model output"
                 )
         else:

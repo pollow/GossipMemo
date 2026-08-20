@@ -21,12 +21,15 @@ def test_sync_context_and_turn_payload_validation():
     client = GossipMemo("http://test", client=httpx.Client(transport=httpx.MockTransport(_handler)))
     assert client.context()["version"] == "v1"
     assert client.turn(" hello ", idempotency_key="stable")["message_ids"] == ["m"]
+    # A batch may carry assistant messages; any other author is rejected.
+    assistant = client.prepare_turn({"author": "assistant", "content": "reply"})
+    assert assistant["messages"][0]["author"] == "assistant"
     try:
-        client.prepare_turn({"author": "assistant", "content": "bad"})
+        client.prepare_turn({"author": "system", "content": "bad"})
     except ValueError:
         pass
     else:
-        raise AssertionError("assistant turn must be normalized/rejected")
+        raise AssertionError("only user/assistant turns are accepted")
 
 
 def _recall_handler(request: httpx.Request) -> httpx.Response:
@@ -137,6 +140,10 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
 
     class Fake:
         def turn(self, message, **kwargs):
+            if isinstance(message, list):
+                # The completed-turn write path posts a whole batch.
+                ingested.append(message)
+                return {"status": "accepted"}
             calls.append((message, kwargs.copy()))
             if len(calls) == 1:
                 started.set()
@@ -155,9 +162,6 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
             if len(calls) == 2:
                 return {"context_update": None, "known_people": [], "memory_recall": []}
             raise RuntimeError("offline")
-
-        def ingest(self, messages):
-            ingested.append(messages)
 
         def close(self): pass
 
@@ -186,7 +190,7 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
         assert calls[1][1]["context_version"] == "v1"
 
         # Preparation failures are non-fatal, but the pre-registered key is
-        # still used by the asynchronous completed-turn ingest.
+        # still used by the asynchronous completed-turn write.
         with provider._prefetch_lock:
             provider._prefetch_cache.clear()
         assert provider.prefetch("third") == ""

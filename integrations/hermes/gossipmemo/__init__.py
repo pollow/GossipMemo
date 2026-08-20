@@ -298,7 +298,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
                     return
                 client = self._client
                 if client is not None:
-                    client.ingest(batch)
+                    client.turn(batch)
             except Exception as exc:  # noqa: BLE001 - a daemon must stay alive.
                 logger.warning("GossipMemo turn sync failed: %s", exc)
             finally:

@@ -172,11 +172,11 @@ answer = memory.query("What do I know about Bob?", people=["Bob"])
 print(answer["answer"])
 ```
 
-`turn()` and `ingest()` both write to the same `POST /v1/spaces/{space_id}/turns`
-endpoint; `ingest()` is a deprecated thin wrapper kept for its "single-field vs
-messages list" normalization and for batches whose messages are not
-necessarily user-authored (e.g. importing a whole conversation). Prefer
-`turn()` for new code.
+`turn()` is the only write method: it posts to
+`POST /v1/spaces/{space_id}/turns` and accepts one message or a batch of up to
+100, each authored by `user` (the default) or `assistant`, so a whole
+conversation can be imported in one call. Only a batch ending in a user
+message gets context/recall enrichment back.
 
 Manual memories can be corrected without erasing history through
 `memory.supersede(...)` or withdrawn through `memory.retract(...)`.

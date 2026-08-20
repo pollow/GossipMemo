@@ -5,6 +5,10 @@ transport adapter: it does not try to mirror the server's pydantic models and
 returns the JSON objects supplied by the API.  Keeping the client this small
 also makes it useful from integrations which do not install the server
 package (for example, a Hermes plugin).
+
+The two clients differ only in how a request is awaited, so every request is
+built once on :class:`_ClientCommon` as a ``(method, path, payload)`` triple
+and each public method is a one-line adapter over its own ``_request``.
 """
 
 from __future__ import annotations
@@ -14,13 +18,16 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from enum import Enum
-from typing import Any, TypeVar
+from typing import Any
 from urllib.parse import quote, urlencode
 
 import httpx
 
 Json = dict[str, Any]
-_ClientT = TypeVar("_ClientT", httpx.Client, httpx.AsyncClient)
+#: A prepared request: HTTP method, path (with query string), and JSON payload.
+Call = tuple[str, str, Any]
+
+_TURN_AUTHORS = ("user", "assistant")
 
 
 def _jsonable(value: Any) -> Any:
@@ -48,37 +55,13 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
-def _normalise_messages(messages: Any) -> list[Json]:
-    """Accept a pydantic model, one mapping, or an iterable of either."""
-
-    if isinstance(messages, Mapping) or callable(getattr(messages, "model_dump", None)):
-        items: Iterable[Any] = [messages]
-    else:
-        if isinstance(messages, (str, bytes)):
-            raise TypeError("messages must be a mapping or iterable of mappings")
-        try:
-            items = iter(messages)
-        except TypeError as exc:
-            raise TypeError("messages must be a mapping or iterable of mappings") from exc
-
-    result: list[Json] = []
-    for item in items:
-        value = _jsonable(item)
-        if not isinstance(value, Mapping):
-            raise TypeError("each message must be a mapping or model with model_dump()")
-        result.append(dict(value))
-    if not result:
-        raise ValueError("messages must contain at least one message")
-    return result
-
-
 def _normalise_turn_message(
     message: Any,
     *,
     source: Any = None,
     idempotency_key: str | None = None,
 ) -> Json:
-    """Normalize the deliberately narrow single user message ``turn`` accepts."""
+    """Normalize one message of the batch ``turn`` writes."""
     if isinstance(message, str):
         value: Any = {"content": message}
     else:
@@ -86,9 +69,10 @@ def _normalise_turn_message(
     if not isinstance(value, Mapping):
         raise TypeError("message must be a string, mapping, or model")
     result = dict(value)
-    if result.get("author") not in (None, "user"):
-        raise ValueError("turn message author must be user")
-    result["author"] = "user"
+    author = result.get("author") or "user"
+    if author not in _TURN_AUTHORS:
+        raise ValueError("message author must be user or assistant")
+    result["author"] = author
     content = result.get("content")
     if not isinstance(content, str) or not content.strip():
         raise ValueError("message content is required")
@@ -112,7 +96,7 @@ def _normalise_turn_messages(
     source: Any = None,
     idempotency_key: str | None = None,
 ) -> list[Json]:
-    """Accept one user message or an iterable of them for ``prepare_turn``."""
+    """Accept one message or an iterable of them for ``prepare_turn``."""
     if isinstance(message, str) or isinstance(message, Mapping) or callable(
         getattr(message, "model_dump", None)
     ):
@@ -180,7 +164,12 @@ class GossipMemoError(RuntimeError):
 
 
 class _ClientCommon:
-    """Shared validation and URL/header behaviour for both clients."""
+    """Shared validation and request building for both clients.
+
+    Every ``_*_call`` method returns the ``(method, path, payload)`` triple a
+    public client method sends; all validation lives here so the synchronous
+    and asynchronous clients cannot drift apart.
+    """
 
     def __init__(
         self,
@@ -220,34 +209,217 @@ class _ClientCommon:
         space = quote(self.space_id, safe="")
         return f"/v1/spaces/{space}/{suffix.lstrip('/')}"
 
-    def _recall_path(
+    def _health_call(self) -> Call:
+        """The server health document."""
+
+        return "GET", "/health", None
+
+    def _context_call(self) -> Call:
+        """The latest context bundle, read without synthesizing an answer."""
+
+        return "GET", self._space_path("context"), None
+
+    def prepare_turn(
         self,
-        query: str,
+        message: Any,
         *,
-        about_user: bool | None,
-        person_ids: Sequence[str] | None,
-        limit: int,
-    ) -> str:
-        params: list[tuple[str, str]] = [("q", query), ("limit", str(limit))]
+        context_version: str | None = None,
+        memory_limit: int = 5,
+        source: Any = None,
+        idempotency_key: str | None = None,
+    ) -> Json:
+        """Build a validated turns payload from one message or a list of them.
+
+        Messages may be authored by ``user`` or ``assistant`` (the author
+        defaults to ``user``), matching the server's single write endpoint: a
+        batch whose last message is not from the user is persisted without
+        context/recall enrichment.
+        """
+        if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
+                or not 1 <= memory_limit <= 10):
+            raise ValueError("memory_limit must be between 1 and 10")
+        if context_version is not None and not str(context_version).strip():
+            raise ValueError("context_version must be non-empty when provided")
+        return {
+            "messages": _normalise_turn_messages(
+                message, source=source, idempotency_key=idempotency_key),
+            "context_version": context_version,
+            "memory_limit": memory_limit,
+        }
+
+    def _turn_call(self, message: Any, **kwargs: Any) -> Call:
+        """Persist a turn batch and read back context/recall metadata."""
+
+        return "POST", self._space_path("turns"), self.prepare_turn(message, **kwargs)
+
+    def _query_call(
+        self,
+        question: str | Mapping[str, Any],
+        *,
+        people: Sequence[str] | None = None,
+        include_relationships: bool = True,
+        expand_relationships: int = 0,
+        include_evidence: bool = True,
+        limit: int = 30,
+        **extra: Any,
+    ) -> Call:
+        """Query memories and relationship/person projections."""
+
+        if isinstance(question, Mapping):
+            payload = dict(question)
+            payload.update(extra)
+        else:
+            if not isinstance(question, str) or not question.strip():
+                raise ValueError("question is required")
+            payload = {
+                "question": question,
+                "people": list(people or []),
+                "include_relationships": include_relationships,
+                "expand_relationships": expand_relationships,
+                "include_evidence": include_evidence,
+                "limit": limit,
+                **extra,
+            }
+        return "POST", self._space_path("query"), payload
+
+    def _add_memory_call(
+        self,
+        content: str | Mapping[str, Any],
+        *,
+        kind: str = "fact",
+        people: Sequence[Mapping[str, Any] | Any] | None = None,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
+        **extra: Any,
+    ) -> Call:
+        """Create a manual memory in the configured space."""
+
+        if isinstance(content, Mapping):
+            payload = dict(content)
+            payload.update(extra)
+        else:
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("content is required")
+            payload = {
+                "content": content,
+                "kind": kind,
+                "people": list(people or []),
+                "valid_from": valid_from,
+                "valid_to": valid_to,
+                **extra,
+            }
+        return "POST", self._space_path("memories"), payload
+
+    def _retract_call(self, memory_id: str, *, reason: str | None = None) -> Call:
+        """Retract an active memory while retaining its provenance."""
+
+        if not isinstance(memory_id, str) or not memory_id.strip():
+            raise ValueError("memory_id is required")
+        payload = {"reason": reason} if reason is not None else {}
+        identifier = quote(memory_id, safe="")
+        return "POST", self._space_path(f"memories/{identifier}/retract"), payload
+
+    def _supersede_call(
+        self,
+        memory_id: str,
+        content: str,
+        *,
+        kind: str | None = None,
+        reason: str | None = None,
+        valid_from: str | None = None,
+        valid_to: str | None = None,
+    ) -> Call:
+        """Replace a memory while preserving its correction history."""
+
+        if not memory_id.strip() or not content.strip():
+            raise ValueError("memory_id and content are required")
+        payload = {
+            "content": content,
+            "kind": kind,
+            "reason": reason,
+            "valid_from": valid_from,
+            "valid_to": valid_to,
+        }
+        identifier = quote(memory_id, safe="")
+        return "POST", self._space_path(f"memories/{identifier}/supersede"), payload
+
+    def _recall_call(
+        self,
+        q: str,
+        *,
+        about_user: bool | None = None,
+        person_ids: Sequence[str] | None = None,
+        limit: int = 20,
+    ) -> Call:
+        """Cheap, LLM-free keyword search over stored memories."""
+
+        params: list[tuple[str, str]] = [("q", q), ("limit", str(limit))]
         if about_user is not None:
             params.append(("about_user", "true" if about_user else "false"))
         for person_id in person_ids or []:
             params.append(("person_id", person_id))
-        return f"{self._space_path('memories')}?{urlencode(params)}"
+        return "GET", f"{self._space_path('memories')}?{urlencode(params)}", None
 
-    def _guidance_path(
+    def _guidance_call(
         self,
         *,
-        person_ids: Sequence[str] | None,
-        kind: str | None,
-        limit: int,
-    ) -> str:
+        person_ids: Sequence[str] | None = None,
+        kind: str | None = None,
+        limit: int = 50,
+    ) -> Call:
+        """Full, unsampled list of open hypotheses and open/partial learning goals.
+
+        Unlike the small sample riding along in `context()`/`turn()`
+        (deliberately KV-cache-friendly), this returns everything matching
+        the focus filter -- for an agent that explicitly asks what it still
+        wants to find out about the user or about given people.
+        """
+
         params: list[tuple[str, str]] = [("limit", str(limit))]
         for person_id in person_ids or []:
             params.append(("person_id", person_id))
         if kind is not None:
             params.append(("kind", kind))
-        return f"{self._space_path('guidance')}?{urlencode(params)}"
+        return "GET", f"{self._space_path('guidance')}?{urlencode(params)}", None
+
+    def _list_people_call(self, q: str = "", *, limit: int = 50) -> Call:
+        """List/search known people (id, display name, aliases) -- no LLM.
+
+        This is the discovery step before `merge_person`: it is the only
+        way to see that two similar person records exist.
+        """
+
+        params = {"q": q, "limit": str(limit)}
+        return "GET", f"{self._space_path('people')}?{urlencode(params)}", None
+
+    def _person_dossier_call(self, person_id: str) -> Call:
+        """Read a person projection without synthesis."""
+
+        if not person_id:
+            raise ValueError("person_id is required")
+        return "GET", self._space_path(f"people/{quote(person_id, safe='')}"), None
+
+    def _merge_person_call(self, source_person_id: str, target_person_id: str) -> Call:
+        """Merge a confirmed source person into the canonical target person."""
+
+        if not str(source_person_id).strip() or not str(target_person_id).strip():
+            raise ValueError("source_person_id and target_person_id are required")
+        return (
+            "POST",
+            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
+            {"target_person_id": str(target_person_id)},
+        )
+
+    def _relationship_dossier_call(self, relationship_id: str) -> Call:
+        """Read a relationship projection without synthesis."""
+
+        if not relationship_id:
+            raise ValueError("relationship_id is required")
+        return (
+            "GET",
+            self._space_path(f"relationships/{quote(relationship_id, safe='')}"),
+            None,
+        )
 
 
 class GossipMemo(_ClientCommon):
@@ -257,6 +429,9 @@ class GossipMemo(_ClientCommon):
     send memories to the wrong space.  A custom ``httpx.Client`` or transport
     can be supplied for connection pooling and tests; owned clients are closed
     by :meth:`close` and custom clients are left open.
+
+    Each method below builds its request with the matching ``_*_call`` helper
+    on :class:`_ClientCommon`, which documents the request's semantics.
     """
 
     def __init__(
@@ -312,92 +487,17 @@ class GossipMemo(_ClientCommon):
     def health(self) -> Any:
         """Return the server health document."""
 
-        return self._request("GET", "/health")
+        return self._request(*self._health_call())
 
     def context(self) -> Any:
         """Read the latest context bundle without synthesizing an answer."""
-        return self._request("GET", self._space_path("context"))
 
-    def prepare_turn(
-        self,
-        message: Any,
-        *,
-        context_version: str | None = None,
-        memory_limit: int = 5,
-        source: Any = None,
-        idempotency_key: str | None = None,
-    ) -> Json:
-        """Build a validated turns payload from one message or a list of them."""
-        if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
-                or not 1 <= memory_limit <= 10):
-            raise ValueError("memory_limit must be between 1 and 10")
-        if context_version is not None and not str(context_version).strip():
-            raise ValueError("context_version must be non-empty when provided")
-        return {
-            "messages": _normalise_turn_messages(
-                message, source=source, idempotency_key=idempotency_key),
-            "context_version": context_version,
-            "memory_limit": memory_limit,
-        }
+        return self._request(*self._context_call())
 
     def turn(self, message: Any, **kwargs: Any) -> Any:
-        """Persist one user turn and return context/recall metadata."""
-        return self._request(
-            "POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
+        """Persist one turn batch and return context/recall metadata."""
 
-    def ingest(
-        self,
-        messages: Any = None,
-        *,
-        content: str | None = None,
-        author: Any = None,
-        source: Any = None,
-        occurred_at: datetime | date | str | None = None,
-        idempotency_key: str | None = None,
-    ) -> Any:
-        """Deprecated: persist one or more messages via the turns write path.
-
-        POSTs to the same ``/v1/spaces/{space_id}/turns`` endpoint as
-        :meth:`turn`, with a batch whose messages need not end in a user
-        message. Prefer :meth:`turn` directly; this is kept for the
-        "single-field vs messages list" normalization existing callers rely
-        on.
-        """
-
-        if messages is not None and not isinstance(messages, str) and any(
-            value is not None
-            for value in (
-                content,
-                author,
-                source,
-                occurred_at,
-                idempotency_key,
-            )
-        ):
-            raise ValueError("pass either messages or single-message fields, not both")
-        if messages is None:
-            if content is None:
-                raise TypeError("ingest requires messages or content")
-            if author is None:
-                raise ValueError("author is required for ingest")
-            messages = {
-                "content": content,
-                "author": author,
-                "source": source,
-                "occurred_at": occurred_at,
-                "idempotency_key": idempotency_key,
-            }
-        elif isinstance(messages, str):
-            messages = {
-                "content": messages,
-                "author": author,
-                "source": source,
-                "occurred_at": occurred_at,
-                "idempotency_key": idempotency_key,
-            }
-        return self._request(
-            "POST", self._space_path("turns"), {"messages": _normalise_messages(messages)}
-        )
+        return self._request(*self._turn_call(message, **kwargs))
 
     def query(
         self,
@@ -412,22 +512,15 @@ class GossipMemo(_ClientCommon):
     ) -> Any:
         """Query memories and relationship/person projections."""
 
-        if isinstance(question, Mapping):
-            payload = dict(question)
-            payload.update(extra)
-        else:
-            if not isinstance(question, str) or not question.strip():
-                raise ValueError("question is required")
-            payload = {
-                "question": question,
-                "people": list(people or []),
-                "include_relationships": include_relationships,
-                "expand_relationships": expand_relationships,
-                "include_evidence": include_evidence,
-                "limit": limit,
-                **extra,
-            }
-        return self._request("POST", self._space_path("query"), payload)
+        return self._request(*self._query_call(
+            question,
+            people=people,
+            include_relationships=include_relationships,
+            expand_relationships=expand_relationships,
+            include_evidence=include_evidence,
+            limit=limit,
+            **extra,
+        ))
 
     def add_memory(
         self,
@@ -441,32 +534,19 @@ class GossipMemo(_ClientCommon):
     ) -> Any:
         """Create a manual memory in the configured space."""
 
-        if isinstance(content, Mapping):
-            payload = dict(content)
-            payload.update(extra)
-        else:
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("content is required")
-            payload = {
-                "content": content,
-                "kind": kind,
-                "people": list(people or []),
-                "valid_from": valid_from,
-                "valid_to": valid_to,
-                **extra,
-            }
-        return self._request("POST", self._space_path("memories"), payload)
+        return self._request(*self._add_memory_call(
+            content,
+            kind=kind,
+            people=people,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            **extra,
+        ))
 
     def retract(self, memory_id: str, *, reason: str | None = None) -> Any:
         """Retract an active memory while retaining its provenance."""
 
-        if not isinstance(memory_id, str) or not memory_id.strip():
-            raise ValueError("memory_id is required")
-        payload = {"reason": reason} if reason is not None else {}
-        identifier = quote(memory_id, safe="")
-        return self._request(
-            "POST", self._space_path(f"memories/{identifier}/retract"), payload
-        )
+        return self._request(*self._retract_call(memory_id, reason=reason))
 
     def supersede(
         self,
@@ -480,19 +560,14 @@ class GossipMemo(_ClientCommon):
     ) -> Any:
         """Replace a memory while preserving its correction history."""
 
-        if not memory_id.strip() or not content.strip():
-            raise ValueError("memory_id and content are required")
-        payload = {
-            "content": content,
-            "kind": kind,
-            "reason": reason,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-        }
-        identifier = quote(memory_id, safe="")
-        return self._request(
-            "POST", self._space_path(f"memories/{identifier}/supersede"), payload
-        )
+        return self._request(*self._supersede_call(
+            memory_id,
+            content,
+            kind=kind,
+            reason=reason,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        ))
 
     def recall(
         self,
@@ -504,10 +579,8 @@ class GossipMemo(_ClientCommon):
     ) -> Any:
         """Cheap, LLM-free keyword search over stored memories."""
 
-        return self._request(
-            "GET",
-            self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
-        )
+        return self._request(*self._recall_call(
+            q, about_user=about_user, person_ids=person_ids, limit=limit))
 
     def guidance(
         self,
@@ -516,56 +589,31 @@ class GossipMemo(_ClientCommon):
         kind: str | None = None,
         limit: int = 50,
     ) -> Any:
-        """Full, unsampled list of open hypotheses and open/partial learning goals.
+        """Full, unsampled list of open hypotheses and open/partial learning goals."""
 
-        Unlike the small sample riding along in `context()`/`turn()`
-        (deliberately KV-cache-friendly), this returns everything matching
-        the focus filter -- for an agent that explicitly asks what it still
-        wants to find out about the user or about given people.
-        """
-
-        return self._request(
-            "GET",
-            self._guidance_path(person_ids=person_ids, kind=kind, limit=limit),
-        )
+        return self._request(*self._guidance_call(
+            person_ids=person_ids, kind=kind, limit=limit))
 
     def list_people(self, q: str = "", *, limit: int = 50) -> Any:
-        """List/search known people (id, display name, aliases) -- no LLM.
+        """List/search known people (id, display name, aliases) -- no LLM."""
 
-        This is the discovery step before `merge_person`: it is the only
-        way to see that two similar person records exist.
-        """
-
-        params = {"q": q, "limit": str(limit)}
-        return self._request("GET", f"{self._space_path('people')}?{urlencode(params)}")
+        return self._request(*self._list_people_call(q, limit=limit))
 
     def person_dossier(self, person_id: str) -> Any:
         """Read a person projection without synthesis."""
 
-        if not person_id:
-            raise ValueError("person_id is required")
-        return self._request(
-            "GET", self._space_path(f"people/{quote(person_id, safe='')}"))
+        return self._request(*self._person_dossier_call(person_id))
 
     def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
         """Merge a confirmed source person into the canonical target person."""
-        if not str(source_person_id).strip() or not str(target_person_id).strip():
-            raise ValueError("source_person_id and target_person_id are required")
-        return self._request(
-            "POST",
-            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
-            {"target_person_id": str(target_person_id)},
-        )
+
+        return self._request(*self._merge_person_call(
+            source_person_id, target_person_id))
 
     def relationship_dossier(self, relationship_id: str) -> Any:
         """Read a relationship projection without synthesis."""
 
-        if not relationship_id:
-            raise ValueError("relationship_id is required")
-        return self._request(
-            "GET",
-            self._space_path(f"relationships/{quote(relationship_id, safe='')}"),
-        )
+        return self._request(*self._relationship_dossier_call(relationship_id))
 
     def close(self) -> None:
         if self._owns_client:
@@ -579,7 +627,11 @@ class GossipMemo(_ClientCommon):
 
 
 class AsyncGossipMemo(_ClientCommon):
-    """Asynchronous counterpart to :class:`GossipMemo`."""
+    """Asynchronous counterpart to :class:`GossipMemo`.
+
+    The methods mirror the synchronous client exactly, sharing its request
+    building and validation; only awaiting differs.
+    """
 
     def __init__(
         self,
@@ -632,91 +684,19 @@ class AsyncGossipMemo(_ClientCommon):
             ) from exc
 
     async def health(self) -> Any:
-        return await self._request("GET", "/health")
+        """Return the server health document."""
+
+        return await self._request(*self._health_call())
 
     async def context(self) -> Any:
         """Read the latest context bundle without synthesizing an answer."""
-        return await self._request("GET", self._space_path("context"))
 
-    def prepare_turn(
-        self,
-        message: Any,
-        *,
-        context_version: str | None = None,
-        memory_limit: int = 5,
-        source: Any = None,
-        idempotency_key: str | None = None,
-    ) -> Json:
-        """Build a validated turns payload from one message or a list of them."""
-        if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
-                or not 1 <= memory_limit <= 10):
-            raise ValueError("memory_limit must be between 1 and 10")
-        if context_version is not None and not str(context_version).strip():
-            raise ValueError("context_version must be non-empty when provided")
-        return {
-            "messages": _normalise_turn_messages(
-                message, source=source, idempotency_key=idempotency_key),
-            "context_version": context_version,
-            "memory_limit": memory_limit,
-        }
+        return await self._request(*self._context_call())
 
     async def turn(self, message: Any, **kwargs: Any) -> Any:
-        return await self._request(
-            "POST", self._space_path("turns"), self.prepare_turn(message, **kwargs))
+        """Persist one turn batch and return context/recall metadata."""
 
-    async def ingest(
-        self,
-        messages: Any = None,
-        *,
-        content: str | None = None,
-        author: Any = None,
-        source: Any = None,
-        occurred_at: datetime | date | str | None = None,
-        idempotency_key: str | None = None,
-    ) -> Any:
-        """Deprecated: persist one or more messages via the turns write path.
-
-        POSTs to the same ``/v1/spaces/{space_id}/turns`` endpoint as
-        :meth:`turn`, with a batch whose messages need not end in a user
-        message. Prefer :meth:`turn` directly; this is kept for the
-        "single-field vs messages list" normalization existing callers rely
-        on.
-        """
-
-        if messages is not None and not isinstance(messages, str) and any(
-            value is not None
-            for value in (
-                content,
-                author,
-                source,
-                occurred_at,
-                idempotency_key,
-            )
-        ):
-            raise ValueError("pass either messages or single-message fields, not both")
-        if messages is None:
-            if content is None:
-                raise TypeError("ingest requires messages or content")
-            if author is None:
-                raise ValueError("author is required for ingest")
-            messages = {
-                "content": content,
-                "author": author,
-                "source": source,
-                "occurred_at": occurred_at,
-                "idempotency_key": idempotency_key,
-            }
-        elif isinstance(messages, str):
-            messages = {
-                "content": messages,
-                "author": author,
-                "source": source,
-                "occurred_at": occurred_at,
-                "idempotency_key": idempotency_key,
-            }
-        return await self._request(
-            "POST", self._space_path("turns"), {"messages": _normalise_messages(messages)}
-        )
+        return await self._request(*self._turn_call(message, **kwargs))
 
     async def query(
         self,
@@ -729,22 +709,17 @@ class AsyncGossipMemo(_ClientCommon):
         limit: int = 30,
         **extra: Any,
     ) -> Any:
-        if isinstance(question, Mapping):
-            payload = dict(question)
-            payload.update(extra)
-        else:
-            if not isinstance(question, str) or not question.strip():
-                raise ValueError("question is required")
-            payload = {
-                "question": question,
-                "people": list(people or []),
-                "include_relationships": include_relationships,
-                "expand_relationships": expand_relationships,
-                "include_evidence": include_evidence,
-                "limit": limit,
-                **extra,
-            }
-        return await self._request("POST", self._space_path("query"), payload)
+        """Query memories and relationship/person projections."""
+
+        return await self._request(*self._query_call(
+            question,
+            people=people,
+            include_relationships=include_relationships,
+            expand_relationships=expand_relationships,
+            include_evidence=include_evidence,
+            limit=limit,
+            **extra,
+        ))
 
     async def add_memory(
         self,
@@ -756,30 +731,21 @@ class AsyncGossipMemo(_ClientCommon):
         valid_to: str | None = None,
         **extra: Any,
     ) -> Any:
-        if isinstance(content, Mapping):
-            payload = dict(content)
-            payload.update(extra)
-        else:
-            if not isinstance(content, str) or not content.strip():
-                raise ValueError("content is required")
-            payload = {
-                "content": content,
-                "kind": kind,
-                "people": list(people or []),
-                "valid_from": valid_from,
-                "valid_to": valid_to,
-                **extra,
-            }
-        return await self._request("POST", self._space_path("memories"), payload)
+        """Create a manual memory in the configured space."""
+
+        return await self._request(*self._add_memory_call(
+            content,
+            kind=kind,
+            people=people,
+            valid_from=valid_from,
+            valid_to=valid_to,
+            **extra,
+        ))
 
     async def retract(self, memory_id: str, *, reason: str | None = None) -> Any:
-        if not isinstance(memory_id, str) or not memory_id.strip():
-            raise ValueError("memory_id is required")
-        payload = {"reason": reason} if reason is not None else {}
-        identifier = quote(memory_id, safe="")
-        return await self._request(
-            "POST", self._space_path(f"memories/{identifier}/retract"), payload
-        )
+        """Retract an active memory while retaining its provenance."""
+
+        return await self._request(*self._retract_call(memory_id, reason=reason))
 
     async def supersede(
         self,
@@ -791,19 +757,16 @@ class AsyncGossipMemo(_ClientCommon):
         valid_from: str | None = None,
         valid_to: str | None = None,
     ) -> Any:
-        if not memory_id.strip() or not content.strip():
-            raise ValueError("memory_id and content are required")
-        payload = {
-            "content": content,
-            "kind": kind,
-            "reason": reason,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-        }
-        identifier = quote(memory_id, safe="")
-        return await self._request(
-            "POST", self._space_path(f"memories/{identifier}/supersede"), payload
-        )
+        """Replace a memory while preserving its correction history."""
+
+        return await self._request(*self._supersede_call(
+            memory_id,
+            content,
+            kind=kind,
+            reason=reason,
+            valid_from=valid_from,
+            valid_to=valid_to,
+        ))
 
     async def recall(
         self,
@@ -815,10 +778,8 @@ class AsyncGossipMemo(_ClientCommon):
     ) -> Any:
         """Cheap, LLM-free keyword search over stored memories."""
 
-        return await self._request(
-            "GET",
-            self._recall_path(q, about_user=about_user, person_ids=person_ids, limit=limit),
-        )
+        return await self._request(*self._recall_call(
+            q, about_user=about_user, person_ids=person_ids, limit=limit))
 
     async def guidance(
         self,
@@ -827,52 +788,31 @@ class AsyncGossipMemo(_ClientCommon):
         kind: str | None = None,
         limit: int = 50,
     ) -> Any:
-        """Full, unsampled list of open hypotheses and open/partial learning goals.
+        """Full, unsampled list of open hypotheses and open/partial learning goals."""
 
-        Unlike the small sample riding along in `context()`/`turn()`
-        (deliberately KV-cache-friendly), this returns everything matching
-        the focus filter -- for an agent that explicitly asks what it still
-        wants to find out about the user or about given people.
-        """
-
-        return await self._request(
-            "GET",
-            self._guidance_path(person_ids=person_ids, kind=kind, limit=limit),
-        )
+        return await self._request(*self._guidance_call(
+            person_ids=person_ids, kind=kind, limit=limit))
 
     async def list_people(self, q: str = "", *, limit: int = 50) -> Any:
-        """List/search known people (id, display name, aliases) -- no LLM.
+        """List/search known people (id, display name, aliases) -- no LLM."""
 
-        This is the discovery step before `merge_person`: it is the only
-        way to see that two similar person records exist.
-        """
-
-        params = {"q": q, "limit": str(limit)}
-        return await self._request("GET", f"{self._space_path('people')}?{urlencode(params)}")
+        return await self._request(*self._list_people_call(q, limit=limit))
 
     async def person_dossier(self, person_id: str) -> Any:
-        if not person_id:
-            raise ValueError("person_id is required")
-        return await self._request(
-            "GET", self._space_path(f"people/{quote(person_id, safe='')}"))
+        """Read a person projection without synthesis."""
+
+        return await self._request(*self._person_dossier_call(person_id))
 
     async def merge_person(self, source_person_id: str, target_person_id: str) -> Any:
         """Merge a confirmed source person into the canonical target person."""
-        if not str(source_person_id).strip() or not str(target_person_id).strip():
-            raise ValueError("source_person_id and target_person_id are required")
-        return await self._request(
-            "POST",
-            self._space_path(f"people/{quote(str(source_person_id), safe='')}/merge"),
-            {"target_person_id": str(target_person_id)},
-        )
+
+        return await self._request(*self._merge_person_call(
+            source_person_id, target_person_id))
 
     async def relationship_dossier(self, relationship_id: str) -> Any:
-        if not relationship_id:
-            raise ValueError("relationship_id is required")
-        return await self._request(
-            "GET",
-            self._space_path(f"relationships/{quote(relationship_id, safe='')}"),
-        )
+        """Read a relationship projection without synthesis."""
+
+        return await self._request(*self._relationship_dossier_call(relationship_id))
 
     async def close(self) -> None:
         if self._owns_client:

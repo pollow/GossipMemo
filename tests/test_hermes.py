@@ -11,9 +11,10 @@ def test_hermes_provider_keeps_session_as_source_coordinate():
     received = threading.Event()
 
     class FakeClient:
-        def ingest(self, messages):
+        def turn(self, messages, **kwargs):
             ingested.append(messages)
             received.set()
+            return {"status": "accepted"}
 
         def query(self, question, **kwargs):
             return {
@@ -166,7 +167,7 @@ def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
 
 
 class _TurnClient:
-    """A fake SDK client that records turn/ingest calls."""
+    """A fake SDK client that records single-message turns and batch writes."""
 
     def __init__(self, *, turn_result=None, turn_error=None):
         self.turn_result = turn_result
@@ -177,6 +178,11 @@ class _TurnClient:
         self.received = threading.Event()
 
     def turn(self, message, **kwargs):
+        if isinstance(message, list):
+            # The completed-turn write path posts a whole batch.
+            self.ingested.append(message)
+            self.received.set()
+            return {"status": "accepted"}
         self.turn_calls.append((message, kwargs))
         try:
             if self.turn_error is not None:
@@ -184,10 +190,6 @@ class _TurnClient:
             return self.turn_result
         finally:
             self.turned.set()
-
-    def ingest(self, messages):
-        self.ingested.append(messages)
-        self.received.set()
 
     def close(self):
         return None

@@ -661,10 +661,7 @@ def test_sync_and_async_sdk_follow_server_contract():
     with GossipMemo(
         "http://memory.test", api_key="secret", transport=transport
     ) as client:
-        result = client.ingest(
-            content="Bob likes tea.",
-            author="user",
-        )
+        result = client.turn("Bob likes tea.")
         assert result == {"status": "accepted", "message_ids": ["message_1"]}
         assert client.query("What does Bob like?")["answer"] == "Tea"
 
