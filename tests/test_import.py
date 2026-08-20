@@ -221,7 +221,7 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
     asyncio.run(scenario())
 
 
-def test_import_reports_background_reasoning_failure(tmp_path):
+def test_import_propagates_reasoning_failure(tmp_path):
     class FailingModel:
         configured = True
         gate = ProviderGate()
@@ -251,11 +251,54 @@ def test_import_reports_background_reasoning_failure(tmp_path):
         world = SocialMemoryWorld(store, FailingModel())
         await world.start()
         try:
-            with pytest.raises(
-                RuntimeError,
-                match="background import operation reasoning-pipeline failed",
-            ):
+            with pytest.raises(RuntimeError, match="reasoning failed"):
                 await world.import_messages("personal", [])
+        finally:
+            await world.stop()
+
+    asyncio.run(scenario())
+
+
+def test_import_propagates_extraction_failure(tmp_path):
+    class FailingModel:
+        configured = True
+        gate = ProviderGate()
+        context_budget = ContextBudget()
+        retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
+
+        def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
+            return ChatCompletionRequest(
+                model="fake",
+                messages=list(messages),
+                response_format={"type": "json_object"} if structured else None,
+            )
+
+        async def complete(self, request: ChatCompletionRequest) -> str:
+            raise RuntimeError("extraction failed")
+
+        async def aclose(self):
+            return None
+
+    async def scenario() -> None:
+        store = SqliteWorldStore(tmp_path / "failed-extraction.db")
+        world = SocialMemoryWorld(store, FailingModel(), extraction_batch_size=6)
+        messages = [
+            MessageInput(
+                author="user",
+                content="I like tea.",
+                occurred_at=datetime(2026, 8, 1, 16, index, tzinfo=timezone.utc),
+                source=SourceRef(
+                    provider="import", conversation_key="history", item_id=str(index)
+                ),
+            )
+            for index in range(2)
+        ]
+        await world.start()
+        try:
+            with pytest.raises(
+                RuntimeError, match="one or more imported messages failed extraction"
+            ):
+                await world.import_messages("personal", messages)
         finally:
             await world.stop()
 

@@ -88,7 +88,6 @@ class SocialMemoryWorld:
         self._flush_tasks: dict[str, asyncio.Task[None]] = {}
         self._scheduled: set[tuple[str, str, str]] = set()
         self._dirty_intake_spaces: set[str] = set()
-        self._background_errors: dict[tuple[str, str, str], Exception] = {}
         self._stopping = False
         self._induction_task: asyncio.Task[None] | None = None
 
@@ -96,7 +95,6 @@ class SocialMemoryWorld:
         logger.info("world_start_begin")
         started = asyncio.get_running_loop().time()
         self._stopping = False
-        self._background_errors.clear()
         self.store.initialize()
         unbatched_spaces: set[str] = set()
         for pending in self.store.pending_extractions():
@@ -154,8 +152,7 @@ class SocialMemoryWorld:
         async def run() -> None:
             try:
                 await operation
-            except Exception as error:
-                self._background_errors[key] = error
+            except Exception:
                 logger.exception("background memory operation failed: %s", key)
             finally:
                 self._scheduled.discard(key)
@@ -174,7 +171,11 @@ class SocialMemoryWorld:
     async def import_messages(
         self, space_id: str, messages: list[MessageInput]
     ) -> dict[str, int]:
-        """Durably import and synchronously drain extraction for CLI imports."""
+        """Durably import and run every stage for this space to completion.
+
+        Unlike the server path this is synchronous by design: a CLI import
+        drives each reasoner directly, in order, and lets failures raise.
+        """
         self.store.initialize()
         message_ids = self.store.record_messages(space_id, messages)
         # Imports must not leave a partial six-message batch waiting for the timer.
@@ -184,58 +185,22 @@ class SocialMemoryWorld:
                 break
             batch_id = self.store.create_extraction_batch(
                 space_id,
-                [
-                    message_id
-                    for message_id, _ in pending[: self.extraction_batch_size]
-                ],
+                [message_id for message_id, _ in pending[: self.extraction_batch_size]],
             )
-            if batch_id:
-                self._schedule_extraction(space_id)
-            else:
+            if not batch_id:
                 break
-        while True:
-            extraction_running = any(
-                key[0] == "extraction" and key[1] == space_id
-                for key in self._scheduled
-            )
-            if not extraction_running:
-                break
-            tasks = tuple(self._tasks)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                break
+        await self._catch_up(self._extraction_reasoner, space_id)
         states = self.store.extraction_states(space_id, message_ids)
         if "failed" in states:
             raise RuntimeError("one or more imported messages failed extraction")
         if any(state != "completed" for state in states):
             raise RuntimeError("imported message extraction did not complete")
-        self._schedule_all_stale()
+        # Only this space: an import must not do work for unrelated spaces,
+        # and only when stale, so a repeated import stays a no-op.
+        if space_id in self._stale_spaces():
+            await self.reasoning_pipeline.run_until_caught_up(space_id)
         if self.store.pending_continuities(self.continuity_threshold, space_id):
-            self._schedule_continuity_reason(space_id)
-        # Wait for induction spawned by the imported Memories as well.
-        while any(
-            key[1] == space_id
-            and key[0] in {"continuity", "reasoning-pipeline"}
-            for key in self._scheduled
-        ):
-            tasks = tuple(self._tasks)
-            if tasks:
-                await asyncio.gather(*tasks, return_exceptions=True)
-            else:
-                await asyncio.sleep(0)
-        failures = [
-            (key, error)
-            for key, error in self._background_errors.items()
-            if key[1] == space_id
-        ]
-        for key, _ in failures:
-            self._background_errors.pop(key, None)
-        if failures:
-            key, error = failures[0]
-            raise RuntimeError(
-                f"background import operation {key[0]} failed: {error}"
-            ) from error
+            await self._catch_up(self._continuity_reasoner, space_id)
         return {
             "messages": len(message_ids),
             "extracted": len(message_ids),
@@ -415,9 +380,7 @@ class SocialMemoryWorld:
         replacement_id = self.store.supersede_memory(space_id, memory_id, request)
         return replacement_id
 
-    def _schedule_all_stale(self) -> None:
-        if self._stopping:
-            return
+    def _stale_spaces(self) -> set[str]:
         people, relationships, user_models = self.store.stale_entities()
         logger.info(
             "induction_scan_completed",
@@ -433,7 +396,12 @@ class SocialMemoryWorld:
         # Coverage has an independent source watermark, including spaces whose
         # UserModel card is already current.
         stale_spaces.update(self.store.stale_coverage_spaces())
-        for space_id in stale_spaces:
+        return stale_spaces
+
+    def _schedule_all_stale(self) -> None:
+        if self._stopping:
+            return
+        for space_id in self._stale_spaces():
             self._schedule_reasoning_pipeline(space_id)
 
     def health(self) -> HealthResponse:
