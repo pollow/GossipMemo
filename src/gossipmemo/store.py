@@ -140,21 +140,15 @@ class PendingExtraction:
 
 
 class WorldStore(Protocol):
-    """Internal persistence seam expressed in social-memory operations."""
+    """The store surface the reasoners depend on, and nothing else.
 
-    def initialize(self) -> None: ...
+    Every method here is called by a module under `gossipmemo.reasoners`,
+    and every store call those modules make is declared here. Signatures
+    mirror `SqliteWorldStore` exactly. `tests/test_store_protocol.py`
+    enforces both directions.
+    """
 
-    def ensure_space(self, space_id: str, name: str | None = None) -> str: ...
-
-    def record_messages(
-        self, space_id: str, messages: list[MessageInput]
-    ) -> list[str]: ...
-
-    def create_extraction_batch(
-        self, space_id: str, message_ids: list[str]
-    ) -> str | None: ...
-
-    def unbatched_messages(self, space_id: str) -> list[tuple[str, str]]: ...
+    def pending_extractions(self) -> list[PendingExtraction]: ...
 
     def load_batch(self, space_id: str, batch_id: str) -> list[ModelMessage]: ...
 
@@ -171,12 +165,22 @@ class WorldStore(Protocol):
         limit: int = DEFAULT_EXTRACTION_COMPARISON_LIMIT,
     ) -> list[MemoryView]: ...
 
+    def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None: ...
+
+    def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None: ...
+
     def apply_extraction(
         self, space_id: str, batch_id: str, result: ExtractionResult,
         comparison_memory_ids: set[str] | None = None,
     ) -> tuple[set[str], set[str]]: ...
 
-    def read(self, space_id: str, request: QueryRequest) -> QueryContext: ...
+    def stale_entities(
+        self,
+    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
+
+    def owner_review_context(
+        self, space_id: str, owner_kind: str, owner_id: str | None,
+    ) -> tuple[list[MemoryView], list[HypothesisView]]: ...
 
     def user_model_context(
         self, space_id: str
@@ -192,14 +196,6 @@ class WorldStore(Protocol):
         self, space_id: str, person_id: str
     ) -> tuple[PersonView, list[MemoryView], str | None] | None: ...
 
-    def relationship_context(
-        self, space_id: str, relationship_id: str
-    ) -> tuple[RelationshipView, list[MemoryView], str | None] | None: ...
-
-    def owner_review_context(
-        self, space_id: str, owner_kind: str, owner_id: str | None,
-    ) -> tuple[list[MemoryView], list[HypothesisView]]: ...
-
     def apply_person_reasoning(
         self,
         space_id: str,
@@ -209,6 +205,10 @@ class WorldStore(Protocol):
         context_inferred_memory_ids: set[str] | None = None,
         context_hypothesis_ids: set[str] | None = None,
     ) -> bool: ...
+
+    def relationship_context(
+        self, space_id: str, relationship_id: str
+    ) -> tuple[RelationshipView, list[MemoryView], str | None] | None: ...
 
     def apply_relationship_reasoning(
         self,
@@ -220,14 +220,8 @@ class WorldStore(Protocol):
         context_hypothesis_ids: set[str] | None = None,
     ) -> bool: ...
 
-    def pending_extractions(self) -> list[PendingExtraction]: ...
-
-    def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None: ...
-
-    def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None: ...
-
     def coverage_context(
-        self, space_id: str,
+        self, space_id: str, limit: int | None = 400,
     ) -> tuple[CoverageRootView, list[CoverageEntryView], list[MemoryView]] | None: ...
 
     def apply_coverage_audit(
@@ -240,61 +234,19 @@ class WorldStore(Protocol):
         int, list[CoverageEntryView], list[LearningGoalView], list[LearningGoalView],
     ] | None: ...
 
-    def apply_goal_planning(self, space_id: str, expected_revision: int,
-                            result: GoalPlanningResult, context_goal_ids: set[str]) -> bool: ...
+    def apply_goal_planning(
+        self, space_id: str, expected_revision: int, result: GoalPlanningResult,
+        context_goal_ids: set[str],
+    ) -> bool: ...
 
     def continuity_context(
         self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
 
-    def pending_continuities(self, threshold: int = 20, space_id: str |
-                             None = None) -> list[str]: ...
-
-    def apply_continuity_reasoning(self, space_id: str, expected_through_message_id: str |
-                                   None, result: ContinuityReasoningResult) -> bool: ...
-
-    def context_bundle(self, space_id: str) -> ContextBundle: ...
-
-    def turn_view(
-        self, space_id: str, text: str, memory_limit: int, known_version: str | None,
-    ) -> tuple[
-        list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None,
-        Literal["available", "unavailable"],
-    ]: ...
-
-    def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (
-    ), query: str = "") -> GuidanceBundle: ...
-
-    def list_guidance(
-        self, space_id: str, person_ids: Iterable[str] = (),
-        kind: str | None = None, limit: int = 50,
-    ) -> list[GuidanceItem]: ...
-
-    def match_people_in_text(self, space_id: str, text: str) -> list[PersonView]: ...
-
-    def list_people(
-        self, space_id: str, query: str = "", limit: int = 50
-    ) -> list[PersonSummaryView]: ...
-
-    def recall_user_memories(self, space_id: str, text: str,
-                             limit: int = 5) -> list[MemoryView]: ...
-
-    def recall_memories(
-        self, space_id: str, text: str, about_user: bool | None = None,
-        person_ids: Iterable[str] | None = None, limit: int = 5,
-    ) -> list[MemoryView]: ...
-
-    def stale_entities(
-        self,
-    ) -> tuple[list[tuple[str, str]], list[tuple[str, str]], list[str]]: ...
-
-    def stale_coverage_spaces(self) -> list[str]: ...
-
-    def overwrite_user_model(self, space_id: str, profile_card: dict[str, Any]) -> None: ...
-
-    def merge_person(
-        self, space_id: str, source_person_id: str, target_person_id: str
-    ) -> dict[str, Any]: ...
+    def apply_continuity_reasoning(
+        self, space_id: str, expected_through_message_id: str | None,
+        result: ContinuityReasoningResult,
+    ) -> bool: ...
 
 
 class AmbiguousPersonError(ValueError):
