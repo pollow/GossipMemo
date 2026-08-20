@@ -8,6 +8,7 @@ chain, and only the concrete class in `sqlite` is ever instantiated.
 
 from __future__ import annotations
 
+from ._context import TurnView
 from ._errors import AmbiguousPersonError, PersonMergeError
 from ._messages import DEFAULT_EXTRACTION_COMPARISON_LIMIT, PendingExtraction
 from .sqlite import SqliteWorldStore, WorldStore
@@ -18,5 +19,6 @@ __all__ = [
     "PendingExtraction",
     "PersonMergeError",
     "SqliteWorldStore",
+    "TurnView",
     "WorldStore",
 ]

@@ -6,7 +6,10 @@ import hashlib
 import logging
 import sqlite3
 from collections.abc import Iterable
+from dataclasses import dataclass, field
 from typing import Literal
+
+from pydantic import ValidationError
 
 from ..models import (
     ContextBundle,
@@ -26,6 +29,28 @@ from .policy import (
 )
 
 logger = logging.getLogger(__name__)
+
+# What the turn read path can genuinely fail with: SQLite trouble (a busy or
+# locked database, and FTS5 `MATCH` syntax rejected as an `OperationalError`)
+# and pydantic rejecting a row while a view is built. Every other exception
+# is a bug and must propagate rather than degrade into `"unavailable"`.
+TURN_READ_ERRORS = (sqlite3.Error, ValidationError)
+
+
+@dataclass(frozen=True)
+class TurnView:
+    """Everything the turn read path enriches one persisted batch with.
+
+    `context_status` reports whether that enrichment is trustworthy, so it
+    is derived once in `turn_view` from which steps succeeded, rather than
+    assigned from inside the individual guards.
+    """
+
+    known_people: list[PersonView] = field(default_factory=list)
+    guidance: GuidanceBundle = field(default_factory=GuidanceBundle)
+    memory_recall: list[MemoryView] = field(default_factory=list)
+    context_update: ContextBundle | None = None
+    context_status: Literal["available", "unavailable"] = "available"
 
 
 class _ContextMixin(_ContinuityMixin):
@@ -210,10 +235,7 @@ class _ContextMixin(_ContinuityMixin):
 
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
-    ) -> tuple[
-        list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None,
-        Literal["available", "unavailable"],
-    ]:
+    ) -> TurnView:
         """One connection, one `_context_state` call, for the whole turn read path.
 
         Alias matching, guidance, memory recall, and the context bundle all
@@ -222,10 +244,15 @@ class _ContextMixin(_ContinuityMixin):
         hash) runs exactly once. The `ContextBundle` is built only when
         `known_version` is stale.
 
-        Failures degrade per step: alias matching and the shared
-        context-state-plus-guidance step each independently flip
-        `context_status` to `"unavailable"`; memory recall failure is logged
-        only; building the final `ContextBundle` is its own guarded step.
+        Each step degrades on its own and records whether it succeeded;
+        `context_status` is then derived once, at the end, from those
+        outcomes. Memory recall is deliberately absent from that derivation:
+        an empty recall is an ordinary result, so a failed recall is logged
+        but does not make the context unavailable. Only the expected
+        failures of these reads are caught (`TURN_READ_ERRORS`); anything
+        else -- a programming error in particular -- propagates, and cannot
+        lose the write, because `world.turn` records the messages and
+        schedules intake before calling this.
 
         Guidance sampling is deliberately derived from the exact same
         `version` the (possibly returned) `ContextBundle` uses -- see
@@ -236,12 +263,14 @@ class _ContextMixin(_ContinuityMixin):
         memory_recall: list[MemoryView] = []
         context_update: ContextBundle | None = None
         guidance = GuidanceBundle()
-        context_status: Literal["available", "unavailable"] = "available"
+        matched = False
+        guided = False
+        contextualized = False
         with self._connect() as connection:
             try:
                 known_people = self._match_people(connection, space_id, text)
-            except Exception:
-                context_status = "unavailable"
+                matched = True
+            except TURN_READ_ERRORS:
                 logger.exception("turn person matching failed for %s", space_id)
             state: tuple[UserModelView | None, ContinuityView |
                          None, list[PersonView], str] | None = None
@@ -252,14 +281,15 @@ class _ContextMixin(_ContinuityMixin):
                     connection, space_id,
                     [person.id for person in known_people], text, version=version,
                 )
-            except Exception:
-                context_status = "unavailable"
+                guided = True
+            except TURN_READ_ERRORS:
+                state = None
                 logger.exception("turn guidance preparation failed for %s", space_id)
             try:
                 memory_recall = self._recall_memories(
                     connection, space_id, text, about_user=True, limit=memory_limit,
                 )
-            except Exception:
+            except TURN_READ_ERRORS:
                 logger.exception("turn memory recall failed for %s", space_id)
             if state is not None:
                 try:
@@ -270,7 +300,14 @@ class _ContextMixin(_ContinuityMixin):
                             version=version, user_model=user_view, continuity=continuity,
                             people=people, guidance=generic_guidance,
                         )
-                except Exception:
-                    context_status = "unavailable"
+                    contextualized = True
+                except TURN_READ_ERRORS:
                     logger.exception("turn context preparation failed for %s", space_id)
-        return known_people, guidance, memory_recall, context_update, context_status
+        return TurnView(
+            known_people=known_people,
+            guidance=guidance,
+            memory_recall=memory_recall,
+            context_update=context_update,
+            context_status=(
+                "available" if matched and guided and contextualized else "unavailable"),
+        )

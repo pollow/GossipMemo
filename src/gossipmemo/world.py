@@ -4,10 +4,9 @@ import asyncio
 import logging
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
-from typing import Any, Literal
+from typing import Any
 
 from .models import (
-    GuidanceBundle,
     HealthResponse,
     ManualMemoryRequest,
     MergePersonResponse,
@@ -32,7 +31,7 @@ from .reasoners import (
     build_user_model_reasoner,
 )
 from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
-from .store import SqliteWorldStore
+from .store import SqliteWorldStore, TurnView
 from .transport import LlmTransport
 
 logger = logging.getLogger(__name__)
@@ -219,31 +218,26 @@ class SocialMemoryWorld:
         message_ids = self.store.record_messages(space_id, request.messages)
         self._schedule_intake(space_id)
         last_message = request.messages[-1]
-        known_people: list[Any] = []
-        guidance = GuidanceBundle()
-        memory_recall: list[Any] = []
-        context_update = None
-        context_status: Literal["available", "unavailable"] = "available"
+        view = TurnView()
         if last_message.author == "user":
-            (known_people, guidance, memory_recall, context_update,
-             context_status) = self.store.turn_view(
+            view = self.store.turn_view(
                 space_id, last_message.content, request.memory_limit, request.context_version,
             )
         logger.info("turn_completed", extra={
             "space_id": space_id,
             "message_count": len(message_ids),
-            "known_people": len(known_people),
-            "recalled_memories": len(memory_recall),
-            "context_status": context_status,
+            "known_people": len(view.known_people),
+            "recalled_memories": len(view.memory_recall),
+            "context_status": view.context_status,
             "duration_ms": round((asyncio.get_running_loop().time() - started) * 1000, 2),
         })
         return TurnResponse(
             message_ids=message_ids,
-            known_people=known_people,
-            memory_recall=memory_recall,
-            guidance=guidance,
-            context_update=context_update,
-            context_status=context_status,
+            known_people=view.known_people,
+            memory_recall=view.memory_recall,
+            guidance=view.guidance,
+            context_update=view.context_update,
+            context_status=view.context_status,
         )
 
     def _schedule_intake(self, space_id: str) -> None:

@@ -1,9 +1,11 @@
 import asyncio
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 import httpx
+import pytest
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
@@ -87,27 +89,112 @@ def test_turn_matches_longest_alias_and_recalls_user_memory(tmp_path: Path):
     asyncio.run(scenario())
 
 
-def test_turn_accepts_when_context_read_fails(tmp_path: Path):
-    store = SqliteWorldStore(tmp_path / "turn-fail.db")
-    store.initialize()
-    world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
-    original = store._context_state
-    # `turn_view` now shares one `_context_state` read across guidance and
-    # the context bundle, so that shared read is the surface to fail here
-    # (this used to patch `context_bundle` directly, back when the turn
-    # path called it as an independent, separately-connected store call).
-    store._context_state = lambda connection, space_id: (
-        _ for _ in ()).throw(RuntimeError("offline"))
+def _failing(error: BaseException):
+    """A store-method double that raises `error` however it is called."""
+    def call(*args, **kwargs):
+        raise error
+    return call
 
+
+def _turn(store, content: str = "Alice likes tea"):
     async def scenario():
-        response = await world.turn(
-            "s", TurnRequest(messages=[MessageInput(author="user", content="hello")]))
-        assert response.status == "accepted"
-        assert response.context_status == "unavailable"
-        assert store.pending_extractions()
+        world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
+        return await world.turn(
+            "s", TurnRequest(messages=[MessageInput(author="user", content=content)]))
 
-    asyncio.run(scenario())
-    store._context_state = original
+    return asyncio.run(scenario())
+
+
+def _failure_store(tmp_path: Path, name: str) -> SqliteWorldStore:
+    """A store with one recallable, alias-matchable `about_user` Memory."""
+    store = SqliteWorldStore(tmp_path / name)
+    store.initialize()
+    store.add_manual_memory("s", ManualMemoryRequest(
+        content="Alice likes tea", people=["Alice"], about_user=True))
+    return store
+
+
+def test_turn_degrades_when_person_matching_fails(tmp_path: Path):
+    store = _failure_store(tmp_path, "fail-match.db")
+    store._match_people = _failing(sqlite3.OperationalError("database is locked"))
+
+    response = _turn(store)
+
+    assert response.status == "accepted"
+    assert response.context_status == "unavailable"
+    assert response.known_people == []
+    # The remaining steps are independent, so they still carry their result.
+    assert response.memory_recall[0].content == "Alice likes tea"
+    assert response.context_update is not None
+
+
+def test_turn_degrades_when_shared_context_state_fails(tmp_path: Path):
+    # `turn_view` shares one `_context_state` read across guidance and the
+    # context bundle, so failing it takes out both dependent steps at once.
+    store = _failure_store(tmp_path, "fail-state.db")
+    store._context_state = _failing(sqlite3.OperationalError("database is locked"))
+
+    response = _turn(store)
+
+    assert response.status == "accepted"
+    assert response.context_status == "unavailable"
+    assert response.context_update is None
+    assert response.guidance.items == []
+    assert [person.display_name for person in response.known_people] == ["Alice"]
+    assert response.memory_recall[0].content == "Alice likes tea"
+    assert store.pending_extractions()
+
+
+def test_turn_degrades_when_context_bundle_build_fails(tmp_path: Path):
+    store = _failure_store(tmp_path, "fail-bundle.db")
+    original = store._guidance
+    calls = {"count": 0}
+
+    def guidance(*args, **kwargs):
+        # The generic re-sample for the `ContextBundle` is the second call;
+        # the first is the activated bundle returned to the caller.
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original(*args, **kwargs)
+
+    store._guidance = guidance
+
+    response = _turn(store)
+
+    assert response.status == "accepted"
+    assert response.context_status == "unavailable"
+    assert response.context_update is None
+    assert [person.display_name for person in response.known_people] == ["Alice"]
+    assert response.memory_recall[0].content == "Alice likes tea"
+
+
+def test_turn_stays_available_when_memory_recall_fails(tmp_path: Path):
+    # An empty recall is an ordinary result, so a failed recall is logged
+    # but must not make the whole context unavailable.
+    store = _failure_store(tmp_path, "fail-recall.db")
+    store._recall_memories = _failing(sqlite3.OperationalError("fts5: syntax error"))
+
+    response = _turn(store)
+
+    assert response.status == "accepted"
+    assert response.context_status == "available"
+    assert response.memory_recall == []
+    assert [person.display_name for person in response.known_people] == ["Alice"]
+    assert response.context_update is not None
+
+
+def test_turn_propagates_programming_errors_but_keeps_the_write(tmp_path: Path):
+    store = _failure_store(tmp_path, "fail-bug.db")
+    store._context_state = _failing(AttributeError("no such attribute"))
+
+    with pytest.raises(AttributeError):
+        _turn(store)
+
+    # The batch is recorded and intake scheduled before any enrichment runs,
+    # so an escaping exception cannot lose the write.
+    assert store.unbatched_messages("s")
+    assert store.pending_extractions()
 
 
 def test_turn_schedules_continuity_and_batches_ending_in_assistant_skip_enrichment(tmp_path: Path):
