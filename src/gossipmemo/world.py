@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -185,14 +185,60 @@ class SocialMemoryWorld:
         if self._tasks:
             await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
         await self.model.aclose()
+        await self._close_embedding_client()
         logger.info("world_stop_complete", extra={"duration_ms": round(
             (asyncio.get_running_loop().time() - started) * 1000, 2)})
+
+    async def _close_embedding_client(self) -> None:
+        """Release the embedding client's resources on shutdown.
+
+        `EmbeddingClient` deliberately does not declare `aclose` on its
+        Protocol -- a minimal fake (`FakeEmbeddingClient`, used throughout
+        the test suite) has no connection pool to release and should not
+        have to grow a no-op method just to satisfy this call, so the call
+        is protective (`getattr`) rather than assumed.
+
+        Whether world "owns" the client is not decided by *how* World got
+        it (constructor injection vs. built from `settings` in `start()`):
+        `self.model` -- always constructed by the caller, sometimes a test
+        double -- is closed unconditionally the same way just above, and an
+        embedding client follows that same precedent for consistency. The
+        thing `OpenAICompatibleEmbeddingClient._owns_client` decides is a
+        level below this: whether *its* `aclose()` actually tears down the
+        underlying `httpx.AsyncClient`, or leaves alone one the caller
+        supplied to its own constructor. Calling `aclose()` here is always
+        safe either way -- it is that method's job to know which.
+        """
+
+        client = self._embedding_client
+        if client is None:
+            return
+        aclose = getattr(client, "aclose", None)
+        if aclose is not None:
+            await aclose()
 
     def _spawn(
         self,
         key: tuple[str, str, str],
         operation: Coroutine[Any, Any, None],
+        *,
+        on_success: Callable[[], None] | None = None,
     ) -> None:
+        """Run `operation` as a deduplicated background task.
+
+        `on_success` fires only after `operation` completes without raising
+        -- never on the dedup-skip path and never after a failed attempt
+        (that reasoner will simply be retried on its own next trigger).
+        Deliberately a callback rather than a second coroutine wrapped
+        around `operation`: wrapping would mean the dedup-skip branch below
+        closes the *wrapper*, not `operation` itself, and since an
+        unstarted coroutine's `.close()` does not run any of its body, the
+        real `operation` coroutine would never get closed and would be
+        garbage-collected instead -- a "coroutine was never awaited" leak.
+        A plain callback keeps `operation` exactly what gets passed to
+        `.close()` here, matching every other `_spawn` call site.
+        """
+
         if self._stopping or key in self._scheduled:
             operation.close()
             return
@@ -203,6 +249,9 @@ class SocialMemoryWorld:
                 await operation
             except Exception:
                 logger.exception("background memory operation failed: %s", key)
+            else:
+                if on_success is not None:
+                    on_success()
             finally:
                 self._scheduled.discard(key)
 
@@ -377,23 +426,14 @@ class SocialMemoryWorld:
 
     def _schedule_extraction(self, space_id: str) -> None:
         logger.info("extraction_scheduled", extra={"space_id": space_id})
+        # `on_success` triggers the embedding worker only once extraction's
+        # `Memory` rows actually land -- see `_spawn` for why this is a
+        # callback rather than a second coroutine wrapped around the catch-up.
         self._spawn(
             ("extraction", space_id, space_id),
-            self._run_and_embed(self._catch_up(self._extraction_reasoner, space_id)),
+            self._catch_up(self._extraction_reasoner, space_id),
+            on_success=self._schedule_embedding,
         )
-
-    async def _run_and_embed(self, operation: Coroutine[Any, Any, None]) -> None:
-        """Run a reasoner catch-up, then trigger the embedding worker.
-
-        Extraction writes `Memory` rows and the reasoning pipeline writes
-        `hypothesis`/`learning_goal`/`coverage_entry` rows -- the four
-        owner kinds `pending_embeddings()` tracks. Hooking the trigger here,
-        after the write actually lands, means the worker never has to guess
-        which reasoner produced what; it just re-checks the anti-join.
-        """
-
-        await operation
-        self._schedule_embedding()
 
     def _next_induction_delay(self) -> float:
         if self.induction_interval_seconds is not None:
@@ -414,9 +454,13 @@ class SocialMemoryWorld:
                 self._schedule_all_stale()
 
     def _schedule_reasoning_pipeline(self, space_id: str) -> None:
+        # Same reasoning as `_schedule_extraction`: the reasoning pipeline
+        # writes `hypothesis`/`learning_goal`/`coverage_entry` rows, the
+        # remaining owner kinds `pending_embeddings()` tracks.
         self._spawn(
             ("reasoning-pipeline", space_id, space_id),
-            self._run_and_embed(self.reasoning_pipeline.run_until_caught_up(space_id)),
+            self.reasoning_pipeline.run_until_caught_up(space_id),
+            on_success=self._schedule_embedding,
         )
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:

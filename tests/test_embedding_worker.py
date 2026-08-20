@@ -293,3 +293,46 @@ def test_startup_backfill_processes_pre_existing_rows(tmp_path):
 
     assert store.pending_embedding_count(model=client.model, dim=client.dim) == 0
     assert len(client.calls) >= 1
+
+
+# -- shutdown resource cleanup --------------------------------------------
+
+
+class _ClosableEmbeddingClient:
+    """An `EmbeddingClient` that *does* implement `aclose` -- unlike
+    `FakeEmbeddingClient`, which deliberately doesn't (the Protocol makes
+    it optional). Used to assert `stop()` actually calls it."""
+
+    model = "fake-embedding"
+    dim = 8
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def embed(self, texts, *, instruction=None):
+        return [[0.0] * self.dim for _ in texts]
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+def test_stop_closes_an_embedding_client_that_declares_aclose(tmp_path):
+    store = _store(tmp_path)
+    client = _ClosableEmbeddingClient()
+    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+
+    asyncio.run(_start_stop(world))
+
+    assert client.closed is True
+
+
+def test_stop_does_not_choke_on_a_client_with_no_aclose(tmp_path):
+    """`FakeEmbeddingClient` has no `aclose` -- `stop()` must treat that as
+    nothing to close, not as an error."""
+
+    store = _store(tmp_path)
+    client = FakeEmbeddingClient()
+    assert not hasattr(client, "aclose")
+    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+
+    asyncio.run(_start_stop(world))  # must not raise
