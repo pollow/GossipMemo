@@ -19,6 +19,7 @@ that slice ask for one without this module knowing who calls it or why.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 from collections.abc import Mapping, Sequence
@@ -29,6 +30,14 @@ import httpx
 from .config import Settings
 
 logger = logging.getLogger(__name__)
+
+# Default when no `Settings` is available to supply
+# `embedding_query_timeout_seconds` (e.g. a test injects a client directly).
+# Deliberately short and independent of `llm_timeout_seconds`: a query-side
+# embedding call sits on a foreground request path (a turn or a `/query`
+# call), and must never hold that request hostage to a slow or wedged
+# embedding provider the way a 120s LLM timeout would.
+DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS = 2.0
 
 # Conservative character cap applied before a text is sent for embedding.
 # The deployed provider is llama.cpp with n_ctx=4096 tokens; this is a
@@ -291,6 +300,37 @@ def _response_detail(response: httpx.Response) -> str:
     return str(detail).strip()[:1000] or "no response body"
 
 
+async def embed_query_vector(
+    client: EmbeddingClient | None,
+    text: str,
+    *,
+    instruction: str,
+    timeout: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
+) -> list[float] | None:
+    """Best-effort single-text query embedding, for the hybrid-retrieval slice.
+
+    Every failure mode -- no client configured, a request/protocol error, or
+    exceeding `timeout` -- degrades to `None` rather than raising: it is
+    always this call's job to fall back to plain FTS, never to fail the
+    caller's request. `instruction` is the asymmetric query-side prefix
+    (see `_apply_instruction`); storage-side embedding must never go
+    through this function.
+    """
+
+    if client is None:
+        return None
+    try:
+        vectors = await asyncio.wait_for(
+            client.embed([text], instruction=instruction), timeout=timeout,
+        )
+    except Exception:
+        logger.warning("embedding_query_failed", exc_info=True)
+        return None
+    if not vectors:
+        return None
+    return vectors[0]
+
+
 async def resolve_embedding_dim(
     base_url: str, api_key: str, model: str, configured_dim: int | None,
     *, client: httpx.AsyncClient | None = None, timeout: float = 120.0,
@@ -361,6 +401,7 @@ async def create_embedding_client(
 
 
 __all__ = [
+    "DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS",
     "EmbeddingClient",
     "EmbeddingDimensionError",
     "EmbeddingError",
@@ -369,6 +410,7 @@ __all__ = [
     "MAX_EMBEDDING_INPUT_CHARS",
     "OpenAICompatibleEmbeddingClient",
     "create_embedding_client",
+    "embed_query_vector",
     "normalize",
     "probe_dimension",
     "resolve_embedding_dim",

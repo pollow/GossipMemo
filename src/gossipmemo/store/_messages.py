@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -17,14 +19,18 @@ from ..models import (
 from ._errors import AmbiguousPersonError
 from ._memories import _MemoriesMixin
 from .policy import (
+    RRF_CANDIDATE_K,
     dump_json,
     fts_query,
     load_json,
     new_id,
     normalized,
     now_iso,
+    reciprocal_rank_fusion,
     similar_memory_content,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EXTRACTION_COMPARISON_LIMIT = 12
 
@@ -304,8 +310,27 @@ class _MessagesMixin(_MemoriesMixin):
     def load_extraction_comparisons(
         self, space_id: str, batch_id: str,
         limit: int = DEFAULT_EXTRACTION_COMPARISON_LIMIT,
+        query_vectors: Mapping[str, Sequence[float]] | None = None,
     ) -> list[MemoryView]:
-        """Return a small comparison set; these rows are never new evidence."""
+        """Return a small comparison set; these rows are never new evidence.
+
+        `query_vectors` is optional: a new-fact text -> already-embedded
+        query vector map (the extraction reasoner embeds the batch's
+        user-authored texts with the "same fact?" instruction before
+        calling this). Keyed by the exact text rather than position, so a
+        text this method's own SQL selection doesn't happen to carry a key
+        for just falls back to FTS-only for that text -- this stays
+        resilient to any drift between the reasoner's view of the batch
+        and the `texts` selected below, rather than depending on both
+        sides agreeing on an implicit row order.
+
+        `query_vectors=None` (or empty) is the exact pre-existing
+        FTS + person-match candidate pool, sorted by recency,
+        byte-for-byte. When given, the FTS and vector hits are RRF-fused
+        into a ranked prefix of the result; any person-matched candidate
+        that neither path surfaced is still appended after it, most recent
+        first, so the "known people" signal is never silently dropped.
+        """
         if limit <= 0:
             return []
         with self._connect() as connection:
@@ -320,6 +345,7 @@ class _MessagesMixin(_MemoriesMixin):
                 space_id, "\n".join(texts + [message.content for message in context])
             )]
             candidates: dict[str, sqlite3.Row] = {}
+            fts_ranked_ids: list[str] = []
             for text in texts:
                 fts = fts_query(text)
                 if not fts:
@@ -331,7 +357,50 @@ class _MessagesMixin(_MemoriesMixin):
                        ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
                     (fts, space_id, limit),
                 ).fetchall():
+                    if row["id"] not in candidates:
+                        fts_ranked_ids.append(row["id"])
                     candidates[row["id"]] = row
+
+            vector_ranked_ids: list[str] = []
+            if query_vectors:
+                seen: set[str] = set()
+                for text in texts:
+                    vector = query_vectors.get(text)
+                    if vector is None:
+                        continue
+                    try:
+                        hits = self.search_vectors(
+                            space_id, "memory", vector, RRF_CANDIDATE_K, statuses=["active"],
+                        )
+                    except Exception:
+                        logger.exception(
+                            "vector comparison search failed for batch %s; falling "
+                            "back to FTS-only ranking for this text", batch_id,
+                        )
+                        continue
+                    for owner_id, _ in hits:
+                        if owner_id not in seen:
+                            seen.add(owner_id)
+                            vector_ranked_ids.append(owner_id)
+                missing_ids = [
+                    item_id for item_id in vector_ranked_ids if item_id not in candidates
+                ]
+                if missing_ids:
+                    placeholders = ",".join("?" for _ in missing_ids)
+                    for row in connection.execute(
+                        f"""SELECT m.* FROM memories m WHERE m.space_id = ?
+                           AND m.status = 'active' AND m.basis <> 'inferred'
+                           AND m.id IN ({placeholders})""",
+                        (space_id, *missing_ids),
+                    ).fetchall():
+                        candidates[row["id"]] = row
+                # A vector hit whose owner row didn't match (retracted/superseded
+                # since the search, or a different basis) never entered
+                # `candidates` -- drop it from the ranking too.
+                vector_ranked_ids = [
+                    item_id for item_id in vector_ranked_ids if item_id in candidates
+                ]
+
             if person_ids:
                 placeholders = ",".join("?" for _ in person_ids)
                 for row in connection.execute(
@@ -342,8 +411,18 @@ class _MessagesMixin(_MemoriesMixin):
                     (space_id, *person_ids, limit),
                 ).fetchall():
                     candidates[row["id"]] = row
-            rows = sorted(candidates.values(),
-                          key=lambda row: row["updated_at"], reverse=True)[:limit]
+
+            if query_vectors and (fts_ranked_ids or vector_ranked_ids):
+                fused_ids = reciprocal_rank_fusion([fts_ranked_ids, vector_ranked_ids])
+                remaining = sorted(
+                    (row_id for row_id in candidates if row_id not in fused_ids),
+                    key=lambda row_id: candidates[row_id]["updated_at"], reverse=True,
+                )
+                ordered_ids = (fused_ids + remaining)[:limit]
+                rows = [candidates[row_id] for row_id in ordered_ids]
+            else:
+                rows = sorted(candidates.values(),
+                              key=lambda row: row["updated_at"], reverse=True)[:limit]
             return [self._memory_view(connection, row, False) for row in rows]
 
     def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None:

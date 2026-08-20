@@ -76,6 +76,11 @@ class PromptLibrary:
     goal_reconciliation_merge_rule: str = defaults.GOAL_RECONCILIATION_MERGE_RULE
     goal_reconciliation_lifecycle_rule: str = defaults.GOAL_RECONCILIATION_LIFECYCLE_RULE
     goal_candidate_reduction_rule: str = defaults.GOAL_CANDIDATE_REDUCTION_RULE
+    embedding_turn_recall_instruction: str = defaults.EMBEDDING_TURN_RECALL_INSTRUCTION
+    embedding_query_instruction: str = defaults.EMBEDDING_QUERY_INSTRUCTION
+    embedding_extraction_comparison_instruction: str = (
+        defaults.EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION
+    )
 
     @classmethod
     def from_file(cls, path: Path) -> PromptLibrary:

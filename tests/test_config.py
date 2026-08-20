@@ -209,6 +209,40 @@ def test_settings_reject_non_positive_embedding_dim():
         )
 
 
+def test_embedding_query_timeout_defaults_to_two_seconds(monkeypatch):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.delenv("GOSSIPMEMO_EMBEDDING_QUERY_TIMEOUT_SECONDS", raising=False)
+
+    assert get_settings().embedding_query_timeout_seconds == 2.0
+
+
+def test_embedding_query_timeout_is_loaded_from_environment_and_independent_of_llm_timeout(
+    monkeypatch,
+):
+    monkeypatch.setenv("GOSSIPMEMO_LLM_BASE_URL", "http://model.test/v1")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
+    monkeypatch.setenv("GOSSIPMEMO_LLM_TIMEOUT_SECONDS", "120")
+    monkeypatch.setenv("GOSSIPMEMO_EMBEDDING_QUERY_TIMEOUT_SECONDS", "1.5")
+
+    settings = get_settings()
+
+    assert settings.embedding_query_timeout_seconds == 1.5
+    assert settings.llm_timeout_seconds == 120.0
+
+
+def test_settings_reject_non_positive_embedding_query_timeout():
+    with pytest.raises(ConfigurationError, match="embedding_query_timeout_seconds"):
+        Settings(
+            llm_base_url="http://model.test/v1",
+            llm_api_key="secret",
+            llm_model="model-a",
+            embedding_query_timeout_seconds=0,
+        )
+
+
 def test_settings_do_not_require_embedding_model():
     # embedding_model empty must not raise -- it is the documented off state.
     Settings(

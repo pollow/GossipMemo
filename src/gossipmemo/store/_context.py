@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -235,6 +235,7 @@ class _ContextMixin(_ContinuityMixin):
 
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
+        query_vector: Sequence[float] | None = None,
     ) -> TurnView:
         """One connection, one `_context_state` call, for the whole turn read path.
 
@@ -288,6 +289,7 @@ class _ContextMixin(_ContinuityMixin):
             try:
                 memory_recall = self._recall_memories(
                     connection, space_id, text, about_user=True, limit=memory_limit,
+                    query_vector=query_vector,
                 )
             except TURN_READ_ERRORS:
                 logger.exception("turn memory recall failed for %s", space_id)

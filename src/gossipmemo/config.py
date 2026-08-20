@@ -53,6 +53,7 @@ class Settings:
     embedding_api_key: str = ""
     embedding_model: str = ""
     embedding_dim: int | None = None
+    embedding_query_timeout_seconds: float = 2.0
 
     def __post_init__(self) -> None:
         missing = [
@@ -123,6 +124,8 @@ class Settings:
             raise ConfigurationError("llm_output_reserve_tokens must be at least llm_max_tokens")
         if self.embedding_dim is not None and self.embedding_dim <= 0:
             raise ConfigurationError("embedding_dim must be greater than zero")
+        if self.embedding_query_timeout_seconds <= 0:
+            raise ConfigurationError("embedding_query_timeout_seconds must be greater than zero")
 
     @property
     def embedding_enabled(self) -> bool:
@@ -182,6 +185,9 @@ class Settings:
             embedding_api_key=(embedding_api_key if embedding_api_key else llm_api_key),
             embedding_model=_env("GOSSIPMEMO_EMBEDDING_MODEL"),
             embedding_dim=(int(value) if (value := _env("GOSSIPMEMO_EMBEDDING_DIM")) else None),
+            embedding_query_timeout_seconds=float(
+                _env("GOSSIPMEMO_EMBEDDING_QUERY_TIMEOUT_SECONDS", "2")
+            ),
         )
 
 

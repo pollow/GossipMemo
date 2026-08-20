@@ -14,11 +14,18 @@ import random
 import re
 import unicodedata
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from difflib import SequenceMatcher
 from typing import Any
 
 from ..models import GuidanceItem, utc_now
+
+# Reciprocal Rank Fusion constants for hybrid (FTS + vector) recall. `RRF_K`
+# is the standard RRF damping constant; `RRF_CANDIDATE_K` is how many
+# top-ranked candidates each retrieval path contributes before fusion --
+# fixed regardless of a call site's own `limit`, per the design brief.
+RRF_K = 60
+RRF_CANDIDATE_K = 20
 
 
 def new_id(prefix: str) -> str:
@@ -86,6 +93,33 @@ def fts_query(question: str, excluded: Iterable[str] = ()) -> str | None:
             terms.append(token)
     unique = list(dict.fromkeys(terms))[:16]
     return " OR ".join(f'"{term.replace(chr(34), chr(34) * 2)}"' for term in unique) or None
+
+
+def reciprocal_rank_fusion(
+    rankings: Iterable[Sequence[str]], *, k: int = RRF_K,
+) -> list[str]:
+    """Fuse several best-match-first id rankings into one, by RRF.
+
+    `score(id) = sum(1 / (k + rank))` over every ranking the id appears in,
+    `rank` 0-based within that ranking. Deliberately rank-only: bm25 and
+    cosine similarity sit on incomparable scales, so combining them by raw
+    score would need a data-dependent calibration this design avoids
+    entirely. An id absent from a ranking simply contributes nothing from
+    it. Ties (most commonly an id that appears in only one ranking, or the
+    trivial case of a single non-empty ranking) break by first appearance
+    across the input rankings, so the result is deterministic.
+    """
+
+    scores: dict[str, float] = {}
+    first_seen: dict[str, int] = {}
+    counter = 0
+    for ranking in rankings:
+        for rank, item_id in enumerate(ranking):
+            if item_id not in first_seen:
+                first_seen[item_id] = counter
+                counter += 1
+            scores[item_id] = scores.get(item_id, 0.0) + 1.0 / (k + rank)
+    return sorted(scores, key=lambda item_id: (-scores[item_id], first_seen[item_id]))
 
 
 def is_profile_stale(profile_source_updated_at: str | None, watermark: str | None) -> bool:

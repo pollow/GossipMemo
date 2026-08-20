@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient, embed_query_vector
 from ..models import ExtractionResult, MemoryView, ModelMessage
 from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier, llm_call_tier
 from ..prompts import PromptLibrary, schema_instruction
@@ -141,11 +142,43 @@ class _ExtractionReasoner(AttemptLoop):
     name = "extraction"
 
     def __init__(
-        self, store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+        self, store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+        embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+        embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
     ) -> None:
         self.store = store
         self.transport = model
         self.settings = settings
+        # A getter rather than the client itself: this reasoner is built once
+        # in `SocialMemoryWorld.__init__`, before `start()` resolves the
+        # embedding client asynchronously -- see `world._embedding_client`.
+        self._embedding_client_getter = embedding_client_getter or (lambda: None)
+        self._embedding_query_timeout_seconds = embedding_query_timeout_seconds
+
+    async def _comparison_query_vectors(
+        self, texts: Sequence[str],
+    ) -> dict[str, list[float]] | None:
+        """Embed each distinct user-authored text with the "same fact?"
+        instruction, for `load_extraction_comparisons`'s hybrid recall.
+
+        Keyed by text (not position) -- see that method's docstring for why.
+        `None` (not an empty dict) when embedding is unavailable at all, so
+        the store takes its exact pre-existing FTS-only path rather than a
+        hybrid path with zero vectors.
+        """
+        client = self._embedding_client_getter()
+        if client is None:
+            return None
+        vectors: dict[str, list[float]] = {}
+        for text in dict.fromkeys(texts):  # de-duplicate, preserve order
+            vector = await embed_query_vector(
+                client, text,
+                instruction=self.settings.prompts.embedding_extraction_comparison_instruction,
+                timeout=self._embedding_query_timeout_seconds,
+            )
+            if vector is not None:
+                vectors[text] = vector
+        return vectors
 
     async def _attempt(self, space_id: str) -> bool:
         eligible = [
@@ -164,7 +197,13 @@ class _ExtractionReasoner(AttemptLoop):
             return more_batches
         context = self.store.load_extraction_context(space_id, batch_id)
         known_people = self.store.load_known_people(space_id, messages + context)
-        comparisons = self.store.load_extraction_comparisons(space_id, batch_id)
+        comparison_texts = [
+            message.content for message in messages if message.author == "user"
+        ]
+        query_vectors = await self._comparison_query_vectors(comparison_texts)
+        comparisons = self.store.load_extraction_comparisons(
+            space_id, batch_id, query_vectors=query_vectors,
+        )
         started = asyncio.get_running_loop().time()
         self.store.mark_extraction_attempt(space_id, batch_id)
         try:
@@ -195,9 +234,13 @@ class _ExtractionReasoner(AttemptLoop):
 
 
 def build_extraction_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> Reasoner:
-    return _ExtractionReasoner(store, model, settings)
+    return _ExtractionReasoner(
+        store, model, settings, embedding_client_getter, embedding_query_timeout_seconds,
+    )
 
 
 __all__ = ["build_extraction_reasoner", "extraction_prompt"]

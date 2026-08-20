@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from .config import Settings
-from .embedding import EmbeddingClient, create_embedding_client
+from .embedding import (
+    DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
+    EmbeddingClient,
+    create_embedding_client,
+    embed_query_vector,
+)
 from .models import (
     HealthResponse,
     ManualMemoryRequest,
@@ -100,7 +105,13 @@ class SocialMemoryWorld:
         self._continuity_reasoner: Reasoner = build_continuity_reasoner(
             self.store, self.model, reasoning)
         self._extraction_reasoner: Reasoner = build_extraction_reasoner(
-            self.store, self.model, reasoning)
+            self.store, self.model, reasoning,
+            embedding_client_getter=lambda: self._embedding_client,
+            embedding_query_timeout_seconds=(
+                settings.embedding_query_timeout_seconds if settings is not None
+                else DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS
+            ),
+        )
         self.reasoning_pipeline = ReasoningPipeline(
             [reasoners[name] for name in DEFAULT_REASONING_PIPELINE],
             should_continue=lambda: not self._stopping,
@@ -259,6 +270,25 @@ class SocialMemoryWorld:
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
+    def _embedding_query_timeout_seconds(self) -> float:
+        if self._settings is not None:
+            return self._settings.embedding_query_timeout_seconds
+        return DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS
+
+    async def _embed_query(self, text: str, instruction: str) -> list[float] | None:
+        """Best-effort query-side embedding for a hybrid recall call site.
+
+        Delegates the actual degrade discipline (no client, request/protocol
+        error, timeout) to `embedding.embed_query_vector` -- this method only
+        supplies this world's client and its short, independent timeout
+        (never `llm_timeout_seconds`; see `Settings.embedding_query_timeout_seconds`).
+        `None` here always means "the caller falls back to plain FTS."
+        """
+        return await embed_query_vector(
+            self._embedding_client, text,
+            instruction=instruction, timeout=self._embedding_query_timeout_seconds(),
+        )
+
     def merge_person(
         self, space_id: str, source_person_id: str, target_person_id: str
     ) -> MergePersonResponse:
@@ -324,8 +354,12 @@ class SocialMemoryWorld:
         last_message = request.messages[-1]
         view = TurnView()
         if last_message.author == "user":
+            query_vector = await self._embed_query(
+                last_message.content, self.reasoning.prompts.embedding_turn_recall_instruction,
+            )
             view = self.store.turn_view(
                 space_id, last_message.content, request.memory_limit, request.context_version,
+                query_vector,
             )
         logger.info("turn_completed", extra={
             "space_id": space_id,
@@ -464,7 +498,10 @@ class SocialMemoryWorld:
         )
 
     async def query(self, space_id: str, request: QueryRequest) -> QueryResponse:
-        context = self.store.read(space_id, request)
+        query_vector = await self._embed_query(
+            request.question, self.reasoning.prompts.embedding_query_instruction,
+        )
+        context = self.store.read(space_id, request, query_vector)
         # `synthesize` is the only synchronous, HTTP-response-blocking call;
         # it sets the foreground gate tier itself in query.py.
         answer = await synthesize(

@@ -358,6 +358,22 @@ GOAL_CANDIDATE_REDUCTION_RULE = (
     "transition any lifecycle."
 )
 
+# Query-side embedding instruction prefixes (Qwen3 asymmetric encoding:
+# "Instruct: {task}\nQuery: {text}"). Each hybrid-retrieval call site has
+# its own task wording; storage-side embedding never uses one of these.
+EMBEDDING_TURN_RECALL_INSTRUCTION = (
+    "Given the user's latest message, find memories about the user that are "
+    "relevant to it."
+)
+EMBEDDING_QUERY_INSTRUCTION = (
+    "Given a question about the user, find memories that are relevant to answering it."
+)
+EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION = (
+    "Given a newly stated fact, find existing memories that may already state "
+    "the same fact, so it can be recognized as a duplicate or update rather than "
+    "new information."
+)
+
 
 __all__ = [
     "ACTIONS_STAGE_PROMPT",
@@ -369,6 +385,9 @@ __all__ = [
     "COVERAGE_METHOD",
     "COVERAGE_ROOT_BLIND_SPOTS",
     "COVERAGE_ROOT_VIEWPOINTS",
+    "EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION",
+    "EMBEDDING_QUERY_INSTRUCTION",
+    "EMBEDDING_TURN_RECALL_INSTRUCTION",
     "EXTRACTION_COMPARISON_RULE",
     "EXTRACTION_KNOWN_PEOPLE_RULE",
     "EXTRACTION_PERSON_IDENTITY_RULE",

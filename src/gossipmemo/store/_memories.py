@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import Any
 
 from ..models import (
@@ -17,16 +18,34 @@ from ..models import (
 )
 from ._people import _PeopleMixin
 from .policy import (
+    RRF_CANDIDATE_K,
     fts_query,
     new_id,
     now_iso,
+    reciprocal_rank_fusion,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class _MemoriesMixin(_PeopleMixin):
     """Reads, recalls, adds, supersedes, and retracts Memories."""
 
-    def read(self, space_id: str, request: QueryRequest) -> QueryContext:
+    def read(
+        self, space_id: str, request: QueryRequest,
+        query_vector: Sequence[float] | None = None,
+    ) -> QueryContext:
+        """Candidate pruning for `/v1/spaces/{id}/query`.
+
+        `query_vector` is optional and computed by the caller (see
+        `store/_context.py`'s module docstring on why the store never
+        awaits): `None` means "run exactly the pure-FTS path this always
+        ran", byte-for-byte. When present, it adds a second, RRF-fused
+        recall path over `memories` embeddings, scoped to the same
+        structural candidate pool (`memory_rows`) this method already
+        computed -- so person/relationship scoping keeps applying to
+        vector hits exactly as it does to FTS hits.
+        """
         with self._connect() as connection:
             person_ids: list[str] = []
             people: list[PersonView] = []
@@ -109,10 +128,13 @@ class _MemoriesMixin(_PeopleMixin):
                     (space_id,),
                 ).fetchall()
 
+            rows_by_id = {row["id"]: row for row in memory_rows}
+            fts_ranked_ids: list[str] = []
             query = fts_query(request.question, request.people)
             if query and memory_rows:
                 memory_ids = [row["id"] for row in memory_rows]
                 placeholders = ",".join("?" for _ in memory_ids)
+                fts_limit = RRF_CANDIDATE_K if query_vector is not None else request.limit
                 matched = connection.execute(
                     f"""
                     SELECT m.* FROM memory_fts
@@ -120,13 +142,34 @@ class _MemoriesMixin(_PeopleMixin):
                     WHERE memory_fts MATCH ? AND m.id IN ({placeholders})
                     ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?
                     """,
-                    [query, *memory_ids, request.limit],
+                    [query, *memory_ids, fts_limit],
                 ).fetchall()
                 # Natural-language wording can have no lexical overlap. In
                 # that case the latest structurally scoped memories remain a
                 # useful fallback for synthesis.
                 if matched:
-                    memory_rows = matched
+                    fts_ranked_ids = [row["id"] for row in matched]
+                    if query_vector is None:
+                        memory_rows = matched
+            if query_vector is not None and memory_rows:
+                allowed_ids = set(rows_by_id)
+                try:
+                    vector_hits = self.search_vectors(
+                        space_id, "memory", query_vector, RRF_CANDIDATE_K,
+                        statuses=["active"],
+                    )
+                except Exception:
+                    logger.exception(
+                        "vector search failed for %s; falling back to FTS-only ranking",
+                        space_id,
+                    )
+                    vector_hits = []
+                vector_ranked_ids = [
+                    owner_id for owner_id, _ in vector_hits if owner_id in allowed_ids
+                ]
+                if fts_ranked_ids or vector_ranked_ids:
+                    fused_ids = reciprocal_rank_fusion([fts_ranked_ids, vector_ranked_ids])
+                    memory_rows = [rows_by_id[item_id] for item_id in fused_ids]
             memory_rows = memory_rows[: request.limit]
             memories = [
                 self._memory_view(connection, row, request.include_evidence)
@@ -154,32 +197,78 @@ class _MemoriesMixin(_PeopleMixin):
     def _recall_memories(
         self, connection: sqlite3.Connection, space_id: str, text: str,
         about_user: bool | None = None, person_ids: Iterable[str] | None = None,
-        limit: int = 5,
+        limit: int = 5, query_vector: Sequence[float] | None = None,
     ) -> list[MemoryView]:
-        """FTS recall on a caller's connection, so `turn_view` can share it."""
+        """FTS (optionally RRF-fused with vector) recall on a caller's
+        connection, so `turn_view` can share it.
+
+        `query_vector=None` is the exact pre-existing pure-FTS path,
+        byte-for-byte. When given, a second recall path searches `memory`
+        embeddings and is fused with the FTS ranking by RRF; the
+        `about_user`/`person_ids` filters are re-applied in SQL to whatever
+        vector hits aren't already among the FTS rows, so both paths honor
+        the same scoping.
+        """
         query = fts_query(text)
         if not query:
             return []
-        clauses = ["memory_fts MATCH ?", "m.space_id = ?", "m.status = 'active'"]
-        params: list[Any] = [query, space_id]
-        if about_user is not None:
-            clauses.append("m.about_user = ?")
-            params.append(1 if about_user else 0)
         person_ids = list(person_ids) if person_ids is not None else None
+        base_clauses = ["m.space_id = ?", "m.status = 'active'"]
+        base_params: list[Any] = [space_id]
+        if about_user is not None:
+            base_clauses.append("m.about_user = ?")
+            base_params.append(1 if about_user else 0)
         if person_ids:
             placeholders = ",".join("?" for _ in person_ids)
-            clauses.append(
+            base_clauses.append(
                 f"m.id IN (SELECT memory_id FROM memory_people WHERE person_id IN ({placeholders}))"
             )
-            params.extend(person_ids)
-        params.append(limit)
+            base_params.extend(person_ids)
+
+        fts_limit = RRF_CANDIDATE_K if query_vector is not None else limit
+        fts_params: list[Any] = [query, *base_params, fts_limit]
         rows = connection.execute(
             f"""SELECT m.* FROM memory_fts JOIN memories m ON m.rowid = memory_fts.rowid
-               WHERE {' AND '.join(clauses)}
+               WHERE memory_fts MATCH ? AND {' AND '.join(base_clauses)}
                ORDER BY bm25(memory_fts), m.created_at DESC LIMIT ?""",
-            params,
+            fts_params,
         ).fetchall()
-        return [self._memory_view(connection, row, False) for row in rows]
+        if query_vector is None:
+            return [self._memory_view(connection, row, False) for row in rows]
+
+        rows_by_id: dict[str, sqlite3.Row] = {row["id"]: row for row in rows}
+        fts_ranked_ids = [row["id"] for row in rows]
+
+        try:
+            vector_hits = self.search_vectors(
+                space_id, "memory", query_vector, RRF_CANDIDATE_K, statuses=["active"],
+            )
+        except Exception:
+            logger.exception(
+                "vector recall failed for %s; falling back to FTS-only ranking", space_id,
+            )
+            vector_hits = []
+
+        vector_ranked_ids: list[str] = []
+        if vector_hits:
+            missing_ids = [
+                owner_id for owner_id, _ in vector_hits if owner_id not in rows_by_id
+            ]
+            if missing_ids:
+                placeholders = ",".join("?" for _ in missing_ids)
+                extra_clauses = [f"m.id IN ({placeholders})", *base_clauses]
+                extra_rows = connection.execute(
+                    f"SELECT m.* FROM memories m WHERE {' AND '.join(extra_clauses)}",
+                    [*missing_ids, *base_params],
+                ).fetchall()
+                for row in extra_rows:
+                    rows_by_id[row["id"]] = row
+            vector_ranked_ids = [
+                owner_id for owner_id, _ in vector_hits if owner_id in rows_by_id
+            ]
+
+        fused_ids = reciprocal_rank_fusion([fts_ranked_ids, vector_ranked_ids])[:limit]
+        return [self._memory_view(connection, rows_by_id[item_id], False) for item_id in fused_ids]
 
     def add_manual_memory(
         self, space_id: str, request: ManualMemoryRequest

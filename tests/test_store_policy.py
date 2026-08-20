@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from gossipmemo.models import GuidanceItem
 from gossipmemo.store.policy import (
+    RRF_K,
     fts_query,
     is_profile_stale,
     rank_guidance,
+    reciprocal_rank_fusion,
     sample_learning_goals,
     similar_memory_content,
 )
@@ -164,3 +166,48 @@ def test_changing_the_version_or_the_pool_rotates_the_sample():
     assert [item.id for item in sample_learning_goals(pool, "version-b", 3, 5)] != base
     grown = pool + [_goal("g_99")]
     assert [item.id for item in sample_learning_goals(grown, "version-a", 3, 5)] != base
+
+
+# --- reciprocal_rank_fusion --------------------------------------------
+
+
+def test_rrf_orders_by_combined_rank_across_both_rankings():
+    # "b" is #1 in both rankings, so it must win even though "a" is #1 FTS.
+    fts = ["a", "b", "c"]
+    vector = ["b", "d", "a"]
+    fused = reciprocal_rank_fusion([fts, vector])
+    assert fused[0] == "b"
+    # "d" (vector rank 1) outranks "c" (fts rank 2, absent from vector)
+    # because a lower rank in either ranking scores higher via 1/(k+rank).
+    assert fused == ["b", "a", "d", "c"]
+
+
+def test_rrf_matches_hand_computed_scores():
+    fts = ["a", "b"]
+    vector = ["b", "a"]
+    fused = reciprocal_rank_fusion([fts, vector], k=10)
+    # a: rank0 in fts (1/10) + rank1 in vector (1/11); b: rank1 in fts (1/11)
+    # + rank0 in vector (1/10) -- symmetric, so both scores tie exactly.
+    score_a = 1 / 10 + 1 / 11
+    score_b = 1 / 11 + 1 / 10
+    assert score_a == score_b
+    # Tie breaks by first appearance across the input rankings: "a" appears
+    # first (it leads the first ranking passed in).
+    assert fused == ["a", "b"]
+
+
+def test_rrf_degrades_to_the_single_present_ranking():
+    fused = reciprocal_rank_fusion([["x", "y", "z"], []])
+    assert fused == ["x", "y", "z"]
+    fused_reverse = reciprocal_rank_fusion([[], ["x", "y", "z"]])
+    assert fused_reverse == ["x", "y", "z"]
+
+
+def test_rrf_ignores_ids_absent_from_every_ranking():
+    assert reciprocal_rank_fusion([[], []]) == []
+
+
+def test_rrf_default_k_matches_module_constant():
+    fused_default = reciprocal_rank_fusion([["a", "b"], ["b", "a"]])
+    fused_explicit = reciprocal_rank_fusion([["a", "b"], ["b", "a"]], k=RRF_K)
+    assert fused_default == fused_explicit
