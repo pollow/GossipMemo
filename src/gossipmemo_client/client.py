@@ -19,7 +19,6 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-
 Json = dict[str, Any]
 _ClientT = TypeVar("_ClientT", httpx.Client, httpx.AsyncClient)
 
@@ -572,7 +571,7 @@ class GossipMemo(_ClientCommon):
         if self._owns_client:
             self._client.close()
 
-    def __enter__(self) -> "GossipMemo":
+    def __enter__(self) -> GossipMemo:
         return self
 
     def __exit__(self, *_: Any) -> None:
@@ -879,7 +878,7 @@ class AsyncGossipMemo(_ClientCommon):
         if self._owns_client:
             await self._client.aclose()
 
-    async def __aenter__(self) -> "AsyncGossipMemo":
+    async def __aenter__(self) -> AsyncGossipMemo:
         return self
 
     async def __aexit__(self, *_: Any) -> None:

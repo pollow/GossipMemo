@@ -237,7 +237,9 @@ async def _plan_learning_goals(
             )
 
         def reduction_fits(items: Sequence[LearningGoalCandidate]) -> bool:
-            return context_budget.report(context_budget.estimate_request(reduction_request(items))).fits
+            return context_budget.report(
+                context_budget.estimate_request(reduction_request(items))
+            ).fits
 
         def reduction_check(items: Sequence[LearningGoalCandidate]) -> None:
             context_budget.check(context_budget.estimate_request(reduction_request(items)))
@@ -270,7 +272,8 @@ async def _plan_learning_goals(
         final_request = reconciliation_request(candidates)
 
     context_budget.check(context_budget.estimate_request(final_request))
-    _, result = await structured(transport, final_request.messages, GoalPlanningResult, tier=tier, label=label)
+    _, result = await structured(
+        transport, final_request.messages, GoalPlanningResult, tier=tier, label=label)
     return result
 
 

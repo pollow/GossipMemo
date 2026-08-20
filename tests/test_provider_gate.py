@@ -157,7 +157,8 @@ def test_semantic_retry_backoff_does_not_block_other_caller() -> None:
                 # and therefore must not hold the provider gate.
                 return httpx.Response(200, json={"choices": [{"message": {"content": "not json"}}]})
             body = {"text": "ok-a", "related_person_ids": [], "through_message_id": "m"}
-            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
         timeline.append(("b", now))
         body = {"text": "ok-b", "related_person_ids": [], "through_message_id": "m"}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})

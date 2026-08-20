@@ -16,26 +16,32 @@ import json
 import httpx
 
 from gossipmemo.context_budget import ContextBudget
-from gossipmemo.transport import ChatCompletionRequest
 from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
-    ContinuityView, CoverageEntryView, MemoryView, ModelMessage,
+    ContinuityView,
+    CoverageEntryView,
+    MemoryView,
+    ModelMessage,
 )
 from gossipmemo.reasoners.continuity import _reason_continuity
 from gossipmemo.reasoners.coverage import _audit_coverage
 from gossipmemo.reasoners.learning_goals import _plan_learning_goals
+from gossipmemo.transport import ChatCompletionRequest
 
 
 def _memory(identifier: str, content: str) -> MemoryView:
-    return MemoryView(id=identifier, content=content, kind="fact", basis="stated", status="active", created_at="1")
+    return MemoryView(id=identifier, content=content, kind="fact", basis="stated",
+                      status="active", created_at="1")
 
 
 def _entry(identifier: str, content: str, *, root: str = "M1", path: str = "") -> CoverageEntryView:
-    return CoverageEntryView(id=identifier, space_id="s", root=root, path=path, content=content, created_at="1", updated_at="1")
+    return CoverageEntryView(id=identifier, space_id="s", root=root, path=path, content=content,
+                             created_at="1", updated_at="1")
 
 
 def _message(identifier: str, content: str) -> ModelMessage:
-    return ModelMessage(id=identifier, space_id="s", author="user", content=content, occurred_at="1", source_provider="test")
+    return ModelMessage(id=identifier, space_id="s", author="user", content=content,
+                        occurred_at="1", source_provider="test")
 
 
 def test_small_paths_send_original_single_requests() -> None:
@@ -45,8 +51,8 @@ def test_small_paths_send_original_single_requests() -> None:
         payload = json.loads(request.content)
         calls.append(payload)
         prompt = str(payload["messages"])
-        body = {"additions": []} if "<new-evidence>" in prompt else {"text": "ok",
-                                                                     "related_person_ids": [], "through_message_id": "m"}
+        body = {"additions": []} if "<new-evidence>" in prompt else {
+            "text": "ok", "related_person_ids": [], "through_message_id": "m"}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
     async def run() -> None:
@@ -54,7 +60,8 @@ def test_small_paths_send_original_single_requests() -> None:
             adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
             await _audit_coverage(adapter, "M1", [_entry("c", "prior understanding")],
                                   [_memory("e", "raw evidence")])
-            await _reason_continuity(adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
+            await _reason_continuity(
+                adapter, ContinuityView(text="prior"), [_message("m", "raw message")])
     asyncio.run(run())
     assert len(calls) == 2
     assert "prior understanding" in str(calls[0]) and "raw evidence" in str(calls[0])
@@ -68,7 +75,8 @@ def test_coverage_cjk_backlog_audits_one_budget_sized_chunk() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"additions": [{"path": "", "content": "总结"}]})}}]})
+        content = json.dumps({"additions": [{"path": "", "content": "总结"}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -133,13 +141,17 @@ def test_continuity_oversized_cjk_streams_and_preserves_last_id() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"text": "ok", "related_person_ids": ["forged"], "through_message_id": "wrong"})}}]})
+        content = json.dumps(
+            {"text": "ok", "related_person_ids": ["forged"], "through_message_id": "wrong"})
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://x", "k", "m", client=client, context_budget=budget)
-            result = await _reason_continuity(adapter, ContinuityView(), [_message("m0", "消息" * 9000), _message("m1", "消息" * 9000)])
+            result = await _reason_continuity(
+                adapter, ContinuityView(),
+                [_message("m0", "消息" * 9000), _message("m1", "消息" * 9000)])
             assert result.through_message_id == "m1"
     asyncio.run(run())
     assert len(calls) > 1

@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
-from ..models import HypothesisView, MemoryView, PersonProjectionResult, PersonReasoningResult, PersonView
+from ..models import (
+    HypothesisView,
+    MemoryView,
+    PersonProjectionResult,
+    PersonReasoningResult,
+    PersonView,
+    ReasoningActionsResult,
+)
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
@@ -21,11 +28,13 @@ relevance to the target, not that the target is the semantic subject of every
 memory. Do not transfer the current user's or any co-occurring person's traits,
 preferences, intentions, or actions onto the target. Recurring patterns require
 multiple distinct source memories; a narrow impression from one highly diagnostic
-event is allowed when calibrated to that evidence. Identify supported patterns in behavior, preferences,
+event is allowed when calibrated to that evidence. Identify supported patterns
+in behavior, preferences,
 communication, decision-making, sensitivities, and helpful ways to interact.
 Make reasonable social inferences when supported, with uncertainty proportional
 to evidence. Do not use projections, inferred memories, or hypotheses as evidence.
-Distinguish current conditions from historical events. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
+Distinguish current conditions from historical events. Use the language that
+best matches supplied memories; keep IDs and enum values unchanged.
 """
 
 
@@ -42,25 +51,25 @@ class _PersonTarget:
     more_targets: bool
     person: PersonView | None = None
     memories: tuple[MemoryView, ...] = ()
-    watermark: object = None
+    watermark: str | None = None
     inferred: tuple[MemoryView, ...] = field(default_factory=tuple)
     hypotheses: tuple[HypothesisView, ...] = field(default_factory=tuple)
 
 
 async def _reason_person(
-    transport: "LlmTransport", person: PersonView, memories: Sequence[MemoryView],
+    transport: LlmTransport, person: PersonView, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> PersonReasoningResult:
     projection, actions = await owner_reasoning(
         transport, PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories,
-        hypotheses, PersonProjectionResult,
+        hypotheses, PersonProjectionResult, ReasoningActionsResult,
     )
     return PersonReasoningResult(
         profile_card=projection.profile_card, **actions.model_dump(exclude_none=True),
     )
 
 
-def build_person_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
+def build_person_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
     """Refresh one stale Person card per attempt.
 
     If Extract updates the same Person while an LLM call is in flight, the

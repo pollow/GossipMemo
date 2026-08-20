@@ -102,9 +102,12 @@ async def _reason_continuity(
         raise ValueError("continuity requires at least one message")
     context_budget = transport.context_budget
 
-    def request_for(prior: ContinuityView | None, chunk: list[ModelMessage]) -> ChatCompletionRequest:
+    def request_for(
+        prior: ContinuityView | None, chunk: list[ModelMessage]
+    ) -> ChatCompletionRequest:
         return _continuity_request(transport, prior, chunk)
 
+    result: ContinuityReasoningResult | None = None
     normal = request_for(continuity, source)
     if context_budget.report(context_budget.estimate_request(normal)).fits:
         _, result = await structured(
@@ -122,7 +125,9 @@ async def _reason_continuity(
                 "person"]
         ),
         through_message_id=(
-            continuity.through_message_id if continuity and continuity.through_message_id else "continuity"
+            continuity.through_message_id
+            if continuity and continuity.through_message_id
+            else "continuity"
         ),
     )
 
@@ -138,7 +143,6 @@ async def _reason_continuity(
     # A small normal update deliberately remains one call. Large updates
     # stream typed summaries forward; only the caller persists the final one.
     prior = continuity
-    result: ContinuityReasoningResult | None = None
     for chunk in chunks:
         prior = _fit_continuity_prior(transport, prior, chunk, request_for)
         request = request_for(prior, chunk)

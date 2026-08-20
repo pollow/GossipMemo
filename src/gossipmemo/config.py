@@ -4,7 +4,7 @@ import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 
 class ConfigurationError(RuntimeError):
@@ -107,7 +107,11 @@ class Settings:
             )
         if self.logging_format.lower() not in {"json", "text"}:
             raise ConfigurationError("logging_format must be json or text")
-        if self.llm_context_window_tokens - self.llm_output_reserve_tokens - self.llm_context_safety_tokens <= 0:
+        if (
+            self.llm_context_window_tokens
+            - self.llm_output_reserve_tokens
+            - self.llm_context_safety_tokens
+        ) <= 0:
             raise ConfigurationError("LLM context usable input tokens must be greater than zero")
         if self.llm_output_reserve_tokens < 0 or self.llm_context_safety_tokens < 0:
             raise ConfigurationError(
@@ -116,7 +120,7 @@ class Settings:
             raise ConfigurationError("llm_output_reserve_tokens must be at least llm_max_tokens")
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             llm_base_url=_required_env("GOSSIPMEMO_LLM_BASE_URL").rstrip("/"),
             llm_api_key=_required_env("GOSSIPMEMO_LLM_API_KEY"),
@@ -145,7 +149,10 @@ class Settings:
             extraction_batch_timeout_seconds=float(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS", "1800")
             ),
-            extraction_policy=_env("GOSSIPMEMO_EXTRACTION_POLICY", "balanced"),
+            extraction_policy=cast(
+                'Literal["conservative", "balanced", "comprehensive"]',
+                _env("GOSSIPMEMO_EXTRACTION_POLICY", "balanced"),
+            ),
             logging_level=_env("GOSSIPMEMO_LOG_LEVEL", "INFO").upper(),
             logging_format=_env("GOSSIPMEMO_LOG_FORMAT", "json").lower(),
             llm_context_window_tokens=int(_env("GOSSIPMEMO_LLM_CONTEXT_WINDOW_TOKENS", "65536")),

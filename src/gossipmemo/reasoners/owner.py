@@ -21,7 +21,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
@@ -31,7 +31,6 @@ from ..models import (
     HypothesisView,
     MemoryView,
     OwnerEvidenceDigestView,
-    ReasoningActionsResult,
 )
 from ..priority import current_call_label, current_call_tier
 from ..prompts import (
@@ -51,6 +50,9 @@ from ..transport import (
 
 logger = logging.getLogger(__name__)
 
+ProjectionT = TypeVar("ProjectionT", bound=BaseModel)
+ActionsT = TypeVar("ActionsT", bound=BaseModel)
+
 
 async def owner_reasoning(
     transport: LlmTransport,
@@ -59,9 +61,9 @@ async def owner_reasoning(
     memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView],
     hypotheses: Sequence[HypothesisView],
-    projection_type: type[BaseModel],
-    actions_type: type[BaseModel] = ReasoningActionsResult,
-) -> tuple[BaseModel, BaseModel]:
+    projection_type: type[ProjectionT],
+    actions_type: type[ActionsT],
+) -> tuple[ProjectionT, ActionsT]:
     """Run the shared two-call owner-reasoning shape over `transport`.
 
     Comparison-only inferred memories and hypotheses are bounded first
@@ -199,10 +201,10 @@ def _bounded_comparisons(
         skeleton = item.model_copy(update={"content": ""})
         if fits([*chosen_inferred, skeleton], chosen_hypotheses):
             chosen_inferred.append(skeleton)
-    for item in hypotheses:
-        skeleton = item.model_copy(update={"content": ""})
-        if fits(chosen_inferred, [*chosen_hypotheses, skeleton]):
-            chosen_hypotheses.append(skeleton)
+    for hypothesis in hypotheses:
+        hypothesis_skeleton = hypothesis.model_copy(update={"content": ""})
+        if fits(chosen_inferred, [*chosen_hypotheses, hypothesis_skeleton]):
+            chosen_hypotheses.append(hypothesis_skeleton)
 
     inferred_by_id = {item.id: item for item in inferred}
     for index, skeleton in enumerate(tuple(chosen_inferred)):
@@ -214,13 +216,14 @@ def _bounded_comparisons(
             chosen_inferred = candidate
 
     hypotheses_by_id = {item.id: item for item in hypotheses}
-    for index, skeleton in enumerate(tuple(chosen_hypotheses)):
-        original = hypotheses_by_id[skeleton.id]
-        expanded = original.model_copy(update={"content": original.content[:1200]})
-        candidate = [*chosen_hypotheses]
-        candidate[index] = expanded
-        if fits(chosen_inferred, candidate):
-            chosen_hypotheses = candidate
+    for index, hypothesis_skeleton in enumerate(tuple(chosen_hypotheses)):
+        hypothesis_original = hypotheses_by_id[hypothesis_skeleton.id]
+        hypothesis_expanded = hypothesis_original.model_copy(
+            update={"content": hypothesis_original.content[:1200]})
+        hypothesis_candidate = [*chosen_hypotheses]
+        hypothesis_candidate[index] = hypothesis_expanded
+        if fits(chosen_inferred, hypothesis_candidate):
+            chosen_hypotheses = hypothesis_candidate
     return chosen_inferred, chosen_hypotheses
 
 
@@ -357,24 +360,26 @@ async def _digest_evidence(
 
     async def reduce_round(
         source: Sequence[MemoryView | OwnerEvidenceDigestView],
-    ) -> list[OwnerEvidenceDigestView]:
-        output: list[OwnerEvidenceDigestView] = []
+    ) -> list[MemoryView | OwnerEvidenceDigestView]:
+        output: list[MemoryView | OwnerEvidenceDigestView] = []
         for chunk in chunks_for(source):
             output.extend(await digest_chunk(chunk))
         if not output:
             raise ValueError("owner evidence digest made no progress")
         return output
 
-    def final_first_messages(output: list[OwnerEvidenceDigestView]) -> list[ChatMessage]:
+    def final_first_messages(
+        output: list[MemoryView | OwnerEvidenceDigestView]
+    ) -> list[ChatMessage]:
         return _first_messages(
             transport, system_prompt, target, output, list(inferred_memories),
             list(hypotheses), projection_type,
         )
 
-    def target_fits(output: list[OwnerEvidenceDigestView]) -> bool:
+    def target_fits(output: list[MemoryView | OwnerEvidenceDigestView]) -> bool:
         return _stage2_fits(transport, final_first_messages(output), actions_type)
 
-    def progress_size(output: list[OwnerEvidenceDigestView]) -> int:
+    def progress_size(output: list[MemoryView | OwnerEvidenceDigestView]) -> int:
         return context_budget.estimate_text(
             owner_reasoning_prefix(
                 target, output, list(inferred_memories), list(hypotheses),
@@ -382,10 +387,13 @@ async def _digest_evidence(
             )
         )
 
-    return await reduce_until_fits(
-        reduce_round, target_fits, progress_size, list(memories),
+    source: list[MemoryView | OwnerEvidenceDigestView] = list(memories)
+    reduced = await reduce_until_fits(
+        reduce_round, target_fits, progress_size, source,
         max_rounds=3, no_progress_message="owner evidence digest reduction made no progress",
     )
+    # Every round replaces its input with digests, so the survivors are digests.
+    return cast(list[OwnerEvidenceDigestView], reduced)
 
 
 __all__ = ["owner_reasoning"]

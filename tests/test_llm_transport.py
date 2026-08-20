@@ -16,6 +16,8 @@ import pytest
 
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.llm import OpenAICompatibleAdapter
+from gossipmemo.models import ExtractionResult
+from gossipmemo.priority import TIER_BACKGROUND, llm_call_tier
 from gossipmemo.transport import (
     ChatCompletionRequest,
     ChatMessage,
@@ -24,8 +26,6 @@ from gossipmemo.transport import (
     RetryPolicy,
     structured,
 )
-from gossipmemo.models import ExtractionResult
-from gossipmemo.priority import TIER_BACKGROUND, llm_call_tier
 
 
 def test_complete_acquires_gate_around_the_request() -> None:

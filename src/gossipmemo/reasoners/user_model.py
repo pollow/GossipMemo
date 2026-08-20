@@ -27,12 +27,13 @@ situations, and practical interaction guidance. Generalize recurring patterns
 when supported, but do not turn a one-off event into a stable trait or include
 another person's identity. Use valid_from and valid_to to separate current
 conditions from historical events. Do not use projections, inferred memories, or
-hypotheses as evidence. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
+hypotheses as evidence. Use the language that best matches supplied memories;
+keep IDs and enum values unchanged.
 """
 
 
 async def _reason_user_model(
-    transport: "LlmTransport", memories: Sequence[MemoryView],
+    transport: LlmTransport, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
@@ -45,7 +46,7 @@ async def _reason_user_model(
     )
 
 
-def build_user_model_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
+def build_user_model_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
     reason_user_model = partial(_reason_user_model, model)
 
     def load_context(space_id: str):

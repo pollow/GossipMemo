@@ -1,17 +1,17 @@
 from gossipmemo.models import GoalClosureRecommendation, MemoryView, ModelMessage
 from gossipmemo.query import QUERY_SYNTHESIS_SYSTEM_PROMPT
 from gossipmemo.reasoners import (
+    CONTINUITY_SYSTEM_PROMPT,
+    COVERAGE_AUDIT_SYSTEM_PROMPT,
     EXTRACTION_SYSTEM_PROMPT,
+    GOAL_PLANNING_SYSTEM_PROMPT,
     PERSON_REASONING_SYSTEM_PROMPT,
     RELATIONSHIP_REASONING_SYSTEM_PROMPT,
     USER_MODEL_REASONING_SYSTEM_PROMPT,
-    CONTINUITY_SYSTEM_PROMPT,
-    extraction_prompt,
     coverage_audit_prompt,
+    extraction_prompt,
     goal_candidate_prompt,
     goal_reconciliation_prompt,
-    COVERAGE_AUDIT_SYSTEM_PROMPT,
-    GOAL_PLANNING_SYSTEM_PROMPT,
 )
 
 

@@ -9,7 +9,6 @@ import pytest
 
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.imports import load_chat_messages
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.models import (
     COVERAGE_ROOTS,
     ManualMemoryRequest,
@@ -17,6 +16,7 @@ from gossipmemo.models import (
     SourceRef,
 )
 from gossipmemo.store import SqliteWorldStore
+from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.world import SocialMemoryWorld
 
 

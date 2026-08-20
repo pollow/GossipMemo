@@ -18,8 +18,8 @@ from gossipmemo.models import (
     TurnRequest,
 )
 from gossipmemo.reasoners.continuity import build_continuity_reasoner
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
+from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.world import SocialMemoryWorld
 
 

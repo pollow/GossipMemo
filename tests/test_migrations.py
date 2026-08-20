@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS learning_goals (
     boundary_ids TEXT NOT NULL,
     focus_kind TEXT NOT NULL DEFAULT 'user' CHECK(focus_kind IN ('user', 'person', 'relationship')),
     focus_id TEXT,
-    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'partial', 'answered', 'deferred', 'retired')),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK(status IN ('open', 'partial', 'answered', 'deferred', 'retired')),
     status_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -210,7 +211,8 @@ CREATE TABLE IF NOT EXISTS hypotheses (
     content TEXT NOT NULL,
     kind TEXT NOT NULL,
     confidence TEXT NOT NULL CHECK(confidence IN ('low', 'medium', 'high')),
-    status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'promoted', 'rejected', 'superseded', 'retired')),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK(status IN ('open', 'promoted', 'rejected', 'superseded', 'retired')),
     status_reason TEXT,
     promoted_memory_id TEXT REFERENCES memories(id),
     created_at TEXT NOT NULL,
@@ -295,7 +297,8 @@ def _build_v1_database(path) -> None:
         connection.execute(
             """INSERT INTO memories(
                 id, space_id, content, kind, basis, about_user, created_by, created_at, updated_at
-            ) VALUES ('memory_1', 'personal', 'Bob likes hiking on weekends', 'fact', 'stated', 0, 'extractor', ?, ?)""",
+            ) VALUES ('memory_1', 'personal', 'Bob likes hiking on weekends', 'fact',
+                      'stated', 0, 'extractor', ?, ?)""",
             (now, now),
         )
         connection.execute(
@@ -341,7 +344,8 @@ def _structural_fingerprint(connection: sqlite3.Connection):
     indexes = {
         row[0]
         for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_autoindex_%'"
+            "SELECT name FROM sqlite_master WHERE type = 'index' "
+            "AND name NOT LIKE 'sqlite_autoindex_%'"
         ).fetchall()
     }
     triggers = {
@@ -394,7 +398,8 @@ def test_learning_goals_kept_with_entry_ids_default_and_old_columns_dropped(tmp_
     connection = sqlite3.connect(path)
     try:
         row = connection.execute(
-            "SELECT prompt, rationale, entry_ids, focus_kind, status FROM learning_goals WHERE id = 'goal_1'"
+            "SELECT prompt, rationale, entry_ids, focus_kind, status "
+            "FROM learning_goals WHERE id = 'goal_1'"
         ).fetchone()
         assert row == ("What does Bob do for work?", "unexplored", "[]", "user", "open")
         columns = {
@@ -423,7 +428,8 @@ def test_coverage_roots_seeded_and_coverage_maps_dropped(tmp_path):
 
         for space_id in ("personal", "work"):
             rows = connection.execute(
-                "SELECT root, source_watermark, source_cursor_id FROM coverage_roots WHERE space_id = ?",
+                "SELECT root, source_watermark, source_cursor_id "
+                "FROM coverage_roots WHERE space_id = ?",
                 (space_id,),
             ).fetchall()
             roots = {row[0] for row in rows}

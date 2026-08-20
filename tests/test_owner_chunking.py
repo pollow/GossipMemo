@@ -9,15 +9,15 @@ import pytest
 
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.llm import OpenAICompatibleAdapter
-from gossipmemo.transport import ChatCompletionRequest
-from gossipmemo.reasoners.person import _reason_person
 from gossipmemo.models import (
     HypothesisView,
     ManualMemoryRequest,
     MemoryView,
     PersonView,
 )
+from gossipmemo.reasoners.person import _reason_person
 from gossipmemo.store import SqliteWorldStore
+from gossipmemo.transport import ChatCompletionRequest
 
 
 def _memory(identifier: str, content: str, *, basis: str = "stated") -> MemoryView:
@@ -41,7 +41,9 @@ def test_owner_chunking_filters_fake_ids_and_keeps_final_two_calls() -> None:
         if "Compress evidence only" in text:
             body = {"items": [{"summary": "tea", "source_memory_ids": ["m1"]},
                               {"summary": "fake", "source_memory_ids": ["forged"]}]}
-        elif len([c for c in calls if "Compress evidence only" not in " ".join(str(m) for m in c["messages"])]) == 1:
+        elif len([c for c in calls
+                  if "Compress evidence only" not in
+                  " ".join(str(m) for m in c["messages"])]) == 1:
             body = {"profile_card": {"summary": "tea"}}
         else:
             body = {"hypothesis_actions": {"upserts": [], "transitions": []}}

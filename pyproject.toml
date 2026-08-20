@@ -21,8 +21,10 @@ server = [
 ]
 dev = [
   "autopep8>=2,<3",
+  "mypy>=1.11,<2",
   "pytest>=8,<10",
   "pytest-asyncio>=0.24,<2",
+  "ruff>=0.6,<1",
 ]
 
 [project.scripts]
@@ -33,6 +35,21 @@ packages = ["src/gossipmemo", "src/gossipmemo_client"]
 
 [tool.autopep8]
 max_line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+
+[tool.mypy]
+files = ["src"]
+python_version = "3.10"
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
 
 [tool.pytest.ini_options]
 addopts = "-q"

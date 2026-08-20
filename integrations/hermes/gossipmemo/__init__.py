@@ -13,10 +13,10 @@ import os
 import queue
 import threading
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from gossipmemo_client import GossipMemo, GossipMemoError
 
@@ -599,7 +599,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 "Cheap, LLM-free keyword search over stored GossipMemo memories. This is the "
                 "default lookup for 'what do I have on file matching these keywords' -- it does "
                 "direct FTS matching with no synthesis, so prefer it over gossipmemo_query for "
-                "plain lookups; reach for gossipmemo_query only when you need a synthesized answer.",
+                "plain lookups; reach for gossipmemo_query only when you need a synthesized "
+                "answer.",
                 {
                     "q": {"type": "string", "description": "Keyword text to search for."},
                     "about_user": {
@@ -616,12 +617,20 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 "Store an explicit durable memory with person reference strings.",
                 {
                     "content": {"type": "string"},
-                    "kind": {"type": "string", "enum": ["fact", "event", "preference", "plan", "situation", "impression"]},
+                    "kind": {
+                        "type": "string",
+                        "enum": [
+                            "fact", "event", "preference", "plan", "situation", "impression",
+                        ],
+                    },
                     "people": {
                         "type": "array", "items": {"type": "string"},
                         "description": "Person reference strings mentioned by the memory.",
                     },
-                    "about_user": {"type": "boolean", "description": "Whether this memory is about the current user."},
+                    "about_user": {
+                        "type": "boolean",
+                        "description": "Whether this memory is about the current user.",
+                    },
                     "valid_from": {"type": "string"},
                     "valid_to": {"type": "string"},
                 },
@@ -629,7 +638,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
             ),
             _schema(
                 "gossipmemo_dossier",
-                "Read a person's or relationship's current GossipMemo dossier without query synthesis.",
+                "Read a person's or relationship's current GossipMemo dossier without query "
+                "synthesis.",
                 {
                     "person_id": {"type": "string"},
                     "relationship_id": {"type": "string"},
@@ -637,7 +647,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
             ),
             _schema(
                 "gossipmemo_retract",
-                "Retract a GossipMemo memory while retaining its provenance and correction history.",
+                "Retract a GossipMemo memory while retaining its provenance and correction "
+                "history.",
                 {
                     "memory_id": {"type": "string"},
                     "reason": {"type": "string"},
@@ -653,7 +664,8 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 {
                     "q": {
                         "type": "string",
-                        "description": "Optional text to match against display names and aliases. Omit to list all people.",
+                        "description": "Optional text to match against display names and "
+                                       "aliases. Omit to list all people.",
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
                 },
@@ -671,12 +683,14 @@ class GossipMemoMemoryProvider(MemoryProvider):
                 {
                     "person_ids": {
                         "type": "array", "items": {"type": "string"},
-                        "description": "Optional person IDs to focus on. Omit for the user/global scope.",
+                        "description": "Optional person IDs to focus on. Omit for the "
+                                       "user/global scope.",
                     },
                     "kind": {
                         "type": "string",
                         "enum": ["hypothesis", "learning_goal"],
-                        "description": "Restrict to just hypotheses or just learning goals. Omit for both.",
+                        "description": "Restrict to just hypotheses or just learning goals. "
+                                       "Omit for both.",
                     },
                     "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
                 },

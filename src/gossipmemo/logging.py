@@ -15,7 +15,7 @@ request_id_context: ContextVar[str | None] = ContextVar("request_id", default=No
 class StructuredFormatter(logging.Formatter):
     """Render event messages and structured fields as JSON or readable text."""
 
-    _standard = set(logging.LogRecord(None, 0, "", 0, "", (), None).__dict__)
+    _standard = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
     _sensitive = (
         "api_key",
         "apikey",
@@ -45,7 +45,8 @@ class StructuredFormatter(logging.Formatter):
             fields["request_id"] = request_id
         if self.mode == "text":
             suffix = " ".join(f"{key}={value!r}" for key, value in sorted(fields.items()))
-            return f"{record.levelname} {record.name} {record.getMessage()}" + (f" {suffix}" if suffix else "")
+            return f"{record.levelname} {record.name} {record.getMessage()}" + (
+                f" {suffix}" if suffix else "")
         payload: dict[str, Any] = {
             "timestamp": datetime.fromtimestamp(record.created, timezone.utc).isoformat(),
             "level": record.levelname,

@@ -9,31 +9,31 @@ import pytest
 
 from gossipmemo.models import (
     COVERAGE_ROOTS,
-    ExtractionResult,
+    ExtractedCoverageAudit,
+    ExtractedCoverageEntry,
+    ExtractedCoverageEntryEdit,
+    ExtractedMemory,
     ExtractedPerson,
-    InferredMemory,
-    InferredMemoryActions,
-    InferredMemoryRetraction,
+    ExtractedRelationship,
+    ExtractionResult,
+    GoalPlanningResult,
     HypothesisActions,
     HypothesisEvidence,
     HypothesisTransition,
     HypothesisUpsert,
+    InferredMemory,
+    InferredMemoryActions,
+    InferredMemoryRetraction,
+    LearningGoalTransition,
+    LearningGoalUpsert,
     ManualMemoryRequest,
-    ExtractedMemory,
     MessageInput,
     ModelMessage,
     PersonReasoningResult,
-    RelationshipReasoningResult,
     QueryRequest,
-    ExtractedRelationship,
+    RelationshipReasoningResult,
     SourceRef,
     UserModelReasoningResult,
-    ExtractedCoverageAudit,
-    ExtractedCoverageEntry,
-    ExtractedCoverageEntryEdit,
-    GoalPlanningResult,
-    LearningGoalTransition,
-    LearningGoalUpsert,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
 
@@ -1277,7 +1277,7 @@ def test_inferred_reasoning_is_reconciled_without_recursive_inputs(store):
     )
     # An inferred source cannot be reused, but its omission is deliberately a
     # no-op: existing hypotheses remain active until explicitly retracted.
-    new_source = store.add_manual_memory(
+    store.add_manual_memory(
         "personal", ManualMemoryRequest(content="Bob also follows up on decisions.", people=["Bob"])
     )
     _, _, next_watermark = store.person_context("personal", bob.id)
@@ -1484,7 +1484,8 @@ def test_hypothesis_promotion_requires_active_owned_memory(store):
         context_hypothesis_ids={hypothesis_id},
     )
     promoted = _rows(
-        store, "SELECT status, promoted_memory_id FROM hypotheses WHERE id = ?", (hypothesis_id,))[0]
+        store, "SELECT status, promoted_memory_id FROM hypotheses WHERE id = ?",
+        (hypothesis_id,))[0]
     assert promoted["status"] == "promoted" and promoted["promoted_memory_id"] == source_id
 
 
@@ -1510,7 +1511,8 @@ def test_inferred_outputs_are_scoped_to_each_person_target(store):
         PersonReasoningResult(inferred_memories=[InferredMemory(
             content=shared, source_memory_ids=[second_source])]),
     )
-    assert len(_rows(store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")) == 2
+    assert len(_rows(
+        store, "SELECT id FROM memories WHERE basis = 'inferred' AND status = 'active'")) == 2
 
 
 def test_relationship_inference_accepts_only_supplied_non_inferred_sources(store):
@@ -1635,7 +1637,8 @@ def test_coverage_entries_are_modified_and_superseded_by_a_later_audit(store):
         ExtractedCoverageAudit(modifications=[
             ExtractedCoverageEntryEdit(
                 entry_id=detail.id, path="study - Hangzhou",
-                content="Four years in Hangzhou, mostly legible through dorm ties that later loosened."),
+                content="Four years in Hangzhou, mostly legible through dorm ties that later "
+                        "loosened."),
             ExtractedCoverageEntryEdit(
                 entry_id=overview.id, content="absorbed", status="superseded"),
         ]),
@@ -1798,7 +1801,8 @@ def test_stale_coverage_restart_detects_same_timestamp_after_cursor(store):
     assert store.stale_coverage_spaces() == ["personal"]
 
 
-def _seeded_store(tmp_path, seed: int, goal_count: int, *, id_prefix: str | None = None) -> SqliteWorldStore:
+def _seeded_store(tmp_path, seed: int, goal_count: int, *,
+                  id_prefix: str | None = None) -> SqliteWorldStore:
     world = SqliteWorldStore(tmp_path / f"guidance-{seed}.db")
     world.initialize()
     world.ensure_space("s")

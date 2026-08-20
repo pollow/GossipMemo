@@ -1,28 +1,40 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
 import re
 import sqlite3
-import uuid
-import hashlib
 import unicodedata
-from difflib import SequenceMatcher
+import uuid
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Iterator, Protocol
+from typing import Any, Literal, Protocol
 
 from .migrations import migrate_database
 from .models import (
+    COVERAGE_ROOTS,
+    ContextBundle,
+    ContinuityReasoningResult,
+    ContinuityView,
+    CoverageEntryView,
+    CoverageRootView,
+    ExtractedCoverageAudit,
+    ExtractedMemory,
     ExtractionResult,
+    GoalPlanningResult,
+    GuidanceBundle,
+    GuidanceItem,
     HypothesisActions,
-    HypothesisView,
     HypothesisEvidence,
+    HypothesisView,
     InferredMemoryActions,
+    LearningGoalView,
     ManualMemoryRequest,
     MemoryView,
     MessageInput,
@@ -37,20 +49,8 @@ from .models import (
     SupersedeRequest,
     UserModelReasoningResult,
     UserModelView,
-    ContinuityReasoningResult,
-    ContinuityView,
-    COVERAGE_ROOTS,
-    CoverageEntryView,
-    CoverageRootView,
-    ExtractedCoverageAudit,
-    GoalPlanningResult,
-    LearningGoalView,
-    GuidanceItem,
-    GuidanceBundle,
-    ContextBundle,
     utc_now,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +185,46 @@ class WorldStore(Protocol):
     def apply_user_model_reasoning(
         self, space_id: str, expected_watermark: str | None,
         result: UserModelReasoningResult,
+        context_hypothesis_ids: set[str] | None = None,
     ) -> bool: ...
+
+    def person_context(
+        self, space_id: str, person_id: str
+    ) -> tuple[PersonView, list[MemoryView], str | None] | None: ...
+
+    def relationship_context(
+        self, space_id: str, relationship_id: str
+    ) -> tuple[RelationshipView, list[MemoryView], str | None] | None: ...
+
+    def owner_review_context(
+        self, space_id: str, owner_kind: str, owner_id: str | None,
+    ) -> tuple[list[MemoryView], list[HypothesisView]]: ...
+
+    def apply_person_reasoning(
+        self,
+        space_id: str,
+        person_id: str,
+        expected_watermark: str | None,
+        result: PersonReasoningResult,
+        context_inferred_memory_ids: set[str] | None = None,
+        context_hypothesis_ids: set[str] | None = None,
+    ) -> bool: ...
+
+    def apply_relationship_reasoning(
+        self,
+        space_id: str,
+        relationship_id: str,
+        expected_watermark: str | None,
+        result: RelationshipReasoningResult,
+        context_inferred_memory_ids: set[str] | None = None,
+        context_hypothesis_ids: set[str] | None = None,
+    ) -> bool: ...
+
+    def pending_extractions(self) -> list[PendingExtraction]: ...
+
+    def mark_extraction_attempt(self, space_id: str, batch_id: str) -> None: ...
+
+    def fail_extraction(self, space_id: str, batch_id: str, error: str) -> None: ...
 
     def coverage_context(
         self, space_id: str,
@@ -218,7 +257,10 @@ class WorldStore(Protocol):
 
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
-    ) -> tuple[list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None, str]: ...
+    ) -> tuple[
+        list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None,
+        Literal["available", "unavailable"],
+    ]: ...
 
     def guidance_bundle(self, space_id: str, activated_person_ids: Iterable[str] = (
     ), query: str = "") -> GuidanceBundle: ...
@@ -897,9 +939,9 @@ class SqliteWorldStore:
             for candidate in result.memories:
                 people_ids: set[str] = set()
                 for reference in candidate.people:
-                    person_id = resolve_extracted_person(reference)
-                    if person_id:
-                        people_ids.add(person_id)
+                    resolved_id = resolve_extracted_person(reference)
+                    if resolved_id:
+                        people_ids.add(resolved_id)
                 relationship_ids: set[str] = set()
                 for relationship in candidate.relationships:
                     a = resolve_extracted_person(relationship.person_a_ref)
@@ -915,7 +957,12 @@ class SqliteWorldStore:
                             relationship_ids.add(existing["id"])
                 comparison = comparison_rows.get(candidate.supersedes_memory_id or "")
 
-                def same_shape(row: sqlite3.Row) -> bool:
+                def same_shape(
+                    row: sqlite3.Row,
+                    candidate: ExtractedMemory = candidate,
+                    people_ids: set[str] = people_ids,
+                    relationship_ids: set[str] = relationship_ids,
+                ) -> bool:
                     memory_id = row["id"]
                     return (
                         row["kind"] == candidate.kind
@@ -967,17 +1014,17 @@ class SqliteWorldStore:
                     ),
                 )
                 for reference in candidate.people:
-                    person_id = resolve_extracted_person(reference)
-                    if not person_id:
+                    resolved_id = resolve_extracted_person(reference)
+                    if not resolved_id:
                         continue
                     connection.execute(
                         """
                         INSERT OR IGNORE INTO memory_people(memory_id, person_id)
                         VALUES (?, ?)
                         """,
-                        (memory_id, person_id),
+                        (memory_id, resolved_id),
                     )
-                    affected_people.add(person_id)
+                    affected_people.add(resolved_id)
 
                 for relationship in candidate.relationships:
                     person_a_id = resolve_extracted_person(relationship.person_a_ref)
@@ -1366,7 +1413,7 @@ class SqliteWorldStore:
 
     def relationship_context(
         self, space_id: str, relationship_id: str
-    ) -> tuple[RelationshipView, list[MemoryView]] | None:
+    ) -> tuple[RelationshipView, list[MemoryView], str | None] | None:
         with self._connect() as connection:
             relationship = connection.execute(
                 "SELECT * FROM relationships WHERE space_id = ? AND id = ?",
@@ -1411,7 +1458,6 @@ class SqliteWorldStore:
     ) -> None:
         """Add or deduplicate inferences; lifecycle retraction is explicit elsewhere."""
         owner_kind = owner_kind or ("person" if person_id else "relationship")
-        owner_id = person_id or relationship_id
         if person_id:
             target_join = "JOIN memory_people mt ON mt.memory_id = m.id AND mt.person_id = ?"
             target_params: list[Any] = [person_id]
@@ -1946,10 +1992,11 @@ class SqliteWorldStore:
                     "VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (_id("entry"), space_id, root, addition.path, addition.content, now, now),
                 )
+            placeholders = ",".join("?" for _ in chunk_ids)
             cursor_row = connection.execute(
-                "SELECT updated_at, id FROM memories WHERE id IN (%s) "
-                "ORDER BY updated_at DESC, id DESC LIMIT 1"
-                % ",".join("?" for _ in chunk_ids), chunk_ids).fetchone() if chunk_ids else None
+                f"SELECT updated_at, id FROM memories WHERE id IN ({placeholders}) "
+                "ORDER BY updated_at DESC, id DESC LIMIT 1",
+                chunk_ids).fetchone() if chunk_ids else None
             next_watermark = cursor_row["updated_at"] if cursor_row else expected_watermark
             next_cursor_id = cursor_row["id"] if cursor_row else expected_cursor_id
             connection.execute(
@@ -2062,12 +2109,12 @@ class SqliteWorldStore:
                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (_id("goal"), space_id, item.prompt, item.rationale, entry_ids,
                              focus_kind, focus_id, now, now))
-            for item in result.transitions:
-                if item.goal_id in context_goal_ids:
+            for transition in result.transitions:
+                if transition.goal_id in context_goal_ids:
                     connection.execute(
                         "UPDATE learning_goals SET status = ?, status_reason = ?, updated_at = ? "
                         "WHERE id = ? AND space_id = ?",
-                        (item.status, item.reason, now, item.goal_id, space_id))
+                        (transition.status, transition.reason, now, transition.goal_id, space_id))
             return True
 
     def continuity_context(
@@ -2344,7 +2391,10 @@ class SqliteWorldStore:
 
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
-    ) -> tuple[list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None, str]:
+    ) -> tuple[
+        list[PersonView], GuidanceBundle, list[MemoryView], ContextBundle | None,
+        Literal["available", "unavailable"],
+    ]:
         """One connection, one `_context_state` call, for the whole turn read path.
 
         Alias matching, guidance, memory recall, and the context bundle all
@@ -2367,7 +2417,7 @@ class SqliteWorldStore:
         memory_recall: list[MemoryView] = []
         context_update: ContextBundle | None = None
         guidance = GuidanceBundle()
-        context_status = "available"
+        context_status: Literal["available", "unavailable"] = "available"
         with self._connect() as connection:
             try:
                 known_people = self._match_people(connection, space_id, text)
@@ -2928,17 +2978,6 @@ class SqliteWorldStore:
                 return False
             if row["status"] == "retracted":
                 return True
-            people = connection.execute(
-                "SELECT DISTINCT person_id FROM memory_people WHERE memory_id = ?",
-                (memory_id,),
-            ).fetchall()
-            relationships = connection.execute(
-                """
-                SELECT DISTINCT relationship_id FROM memory_relationships
-                WHERE memory_id = ?
-                """,
-                (memory_id,),
-            ).fetchall()
             now = _now()
             connection.execute(
                 """

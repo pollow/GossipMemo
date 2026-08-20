@@ -19,7 +19,6 @@ from gossipmemo.models import MessageInput, QueryRequest, SourceRef
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
-
 FIXTURE_RE = re.compile(r"^===== FIXTURE-(\d+): (.+) =====$")
 MESSAGE_RE = re.compile(
     r"^--- message \d+/\d+ \| role=(USER|ASSISTANT) \| source_id=(\d+) ---$"
@@ -248,7 +247,8 @@ CASES = {
         "stages": [["01"]],
         "people": ["Person_A", "Person_B", "Person_C"],
         "questions": [
-            "请区分事实、转述和推测：Person_A 与 Person_B、Person_C 当前分别是什么关系？哪些仍不确定？",
+            "请区分事实、转述和推测："
+            "Person_A 与 Person_B、Person_C 当前分别是什么关系？哪些仍不确定？",
             "基于现有证据，Person_A 可能有哪些关系需求或行为模式？用户适合给他什么建议？",
         ],
     },

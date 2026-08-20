@@ -44,9 +44,9 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 
 class MigrationError(RuntimeError):
@@ -91,7 +91,7 @@ class Migration:
     @property
     def checksum(self) -> str:
         return hashlib.sha256(
-            f"{self.version}:{self.description}".encode("utf-8")
+            f"{self.version}:{self.description}".encode()
         ).hexdigest()
 
 
@@ -165,9 +165,11 @@ def _upgrade_v1_to_v2(connection: sqlite3.Connection) -> None:
             prompt TEXT NOT NULL,
             rationale TEXT NOT NULL,
             entry_ids TEXT NOT NULL DEFAULT '[]',
-            focus_kind TEXT NOT NULL DEFAULT 'user' CHECK(focus_kind IN ('user', 'person', 'relationship')),
+            focus_kind TEXT NOT NULL DEFAULT 'user'
+                CHECK(focus_kind IN ('user', 'person', 'relationship')),
             focus_id TEXT,
-            status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'partial', 'answered', 'deferred', 'retired')),
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open', 'partial', 'answered', 'deferred', 'retired')),
             status_reason TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,

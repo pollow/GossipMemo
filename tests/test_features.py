@@ -9,37 +9,37 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from gossipmemo.app import create_app
+from gossipmemo.config import Settings
 from gossipmemo.context_budget import ContextBudget
+from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
-    ExtractionResult,
-    ExtractedPerson,
-    ManualMemoryRequest,
     ExtractedMemory,
+    ExtractedPerson,
+    ExtractedRelationship,
+    ExtractionResult,
+    ManualMemoryRequest,
+    MemoryView,
     MessageInput,
     ModelMessage,
-    MemoryView,
     PersonView,
     QueryContext,
     QueryRequest,
-    ExtractedRelationship,
     SourceRef,
     SupersedeRequest,
     TurnRequest,
 )
+from gossipmemo.query import synthesize
+from gossipmemo.reasoners.extraction import _extract
+from gossipmemo.reasoners.person import _reason_person
+from gossipmemo.reasoners.user_model import _reason_user_model
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.transport import (
     ChatCompletionRequest,
     LLMRequestError,
     ProviderGate,
     RetryPolicy,
 )
-from gossipmemo.query import synthesize
-from gossipmemo.reasoners.extraction import _extract
-from gossipmemo.reasoners.person import _reason_person
-from gossipmemo.reasoners.user_model import _reason_user_model
-from gossipmemo.app import create_app
-from gossipmemo.config import Settings
 from gossipmemo.world import SocialMemoryWorld
 from gossipmemo_client import AsyncGossipMemo, GossipMemo
 
@@ -682,7 +682,8 @@ def test_openai_compatible_adapter_validates_structured_output():
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert payload["response_format"] == {"type": "json_object"}
-        assert "server's balanced extraction policy for the whole batch" in payload["messages"][1]["content"]
+        assert ("server's balanced extraction policy for the whole batch"
+                in payload["messages"][1]["content"])
         return httpx.Response(
             200,
             json={
@@ -741,7 +742,8 @@ def test_owner_reasoning_uses_an_identical_prefix_for_both_stages():
                 adapter,
                 PersonView(id="person_1", display_name="Bob"),
                 [MemoryView(id="memory_1", content="Bob likes tea.", kind="fact",
-                            basis="stated", status="active", created_at="2026-08-01T00:00:00+00:00")],
+                            basis="stated", status="active",
+                            created_at="2026-08-01T00:00:00+00:00")],
             )
             assert result.profile_card == {"summary": "tea"}
 

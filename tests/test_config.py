@@ -7,7 +7,6 @@ import pytest
 from gossipmemo.cli import main
 from gossipmemo.config import ConfigurationError, Settings, get_settings
 
-
 REQUIRED_LLM_ENV = (
     "GOSSIPMEMO_LLM_BASE_URL",
     "GOSSIPMEMO_LLM_API_KEY",

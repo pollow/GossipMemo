@@ -61,7 +61,7 @@ def coverage_audit_prompt(
 
 
 def _structured_request(
-    transport: "LlmTransport", system_prompt: str, user_prompt: str, result_type: type,
+    transport: LlmTransport, system_prompt: str, user_prompt: str, result_type: type,
 ) -> ChatCompletionRequest:
     return transport.prepare(
         [
@@ -74,7 +74,7 @@ def _structured_request(
 
 
 async def _audit_coverage(
-    transport: "LlmTransport", root: str, entries: Sequence[CoverageEntryView],
+    transport: LlmTransport, root: str, entries: Sequence[CoverageEntryView],
     memories: Sequence[MemoryView],
 ) -> tuple[ExtractedCoverageAudit, list[MemoryView]]:
     """Audit the largest prefix of `memories` that fits one request.
@@ -107,7 +107,7 @@ async def _audit_coverage(
     return result, chunk
 
 
-def build_coverage_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
+def build_coverage_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
     """Audit one root's next evidence chunk per attempt, until none is behind."""
 
     audit_coverage = partial(_audit_coverage, model)

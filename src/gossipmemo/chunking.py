@@ -29,7 +29,12 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, TypeVar
 
+from pydantic import BaseModel
+
 T = TypeVar("T")
+# `greedy_chunks` splits an oversized item through `.model_copy`, so unlike
+# `reduce_until_fits` it is only usable with pydantic models.
+ChunkItemT = TypeVar("ChunkItemT", bound=BaseModel)
 
 
 async def reduce_until_fits(
@@ -69,10 +74,10 @@ async def reduce_until_fits(
 
 
 def greedy_chunks(
-    items: Sequence[T],
-    fits: Callable[[Sequence[T]], bool],
-    check: Callable[[Sequence[T]], None],
-) -> list[list[T]]:
+    items: Sequence[ChunkItemT],
+    fits: Callable[[Sequence[ChunkItemT]], bool],
+    check: Callable[[Sequence[ChunkItemT]], None],
+) -> list[list[ChunkItemT]]:
     """Pack `items` into as few `fits`-sized chunks as possible, in order.
 
     A single item that does not fit on its own is split by bisecting its
@@ -83,8 +88,8 @@ def greedy_chunks(
     not a generic one from this module.
     """
 
-    chunks: list[list[T]] = []
-    current: list[T] = []
+    chunks: list[list[ChunkItemT]] = []
+    current: list[ChunkItemT] = []
     for item in items:
         for piece in _split_oversized(item, fits):
             candidate = [*current, piece]
@@ -98,7 +103,9 @@ def greedy_chunks(
     return chunks
 
 
-def _split_oversized(item: T, fits: Callable[[Sequence[T]], bool]) -> list[T]:
+def _split_oversized(
+    item: ChunkItemT, fits: Callable[[Sequence[ChunkItemT]], bool]
+) -> list[ChunkItemT]:
     if fits([item]):
         return [item]
     content: Any = getattr(item, "content", None)

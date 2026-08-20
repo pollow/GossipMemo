@@ -13,8 +13,8 @@ from gossipmemo.models import (
     MessageInput,
     TurnRequest,
 )
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.store import SqliteWorldStore
+from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.world import SocialMemoryWorld
 
 
@@ -62,7 +62,8 @@ def test_turn_matches_longest_alias_and_recalls_user_memory(tmp_path: Path):
         person = connection.execute(
             "SELECT id FROM people WHERE display_name = 'Alice'").fetchone()["id"]
         connection.execute(
-            "INSERT INTO person_aliases(id, space_id, person_id, value, normalized_value) VALUES ('a', 's', ?, 'Al', 'al')",
+            "INSERT INTO person_aliases(id, space_id, person_id, value, normalized_value) "
+            "VALUES ('a', 's', ?, 'Al', 'al')",
             (person,),
         )
 
@@ -101,7 +102,8 @@ def test_turn_accepts_when_context_read_fails(tmp_path: Path):
         _ for _ in ()).throw(RuntimeError("offline"))
 
     async def scenario():
-        response = await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="hello")]))
+        response = await world.turn(
+            "s", TurnRequest(messages=[MessageInput(author="user", content="hello")]))
         assert response.status == "accepted"
         assert response.context_status == "unavailable"
         assert store.pending_extractions()
@@ -118,8 +120,10 @@ def test_turn_schedules_continuity_and_batches_ending_in_assistant_skip_enrichme
         )
         await world.start()
         try:
-            await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="one")]))
-            await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="two")]))
+            await world.turn(
+                "s", TurnRequest(messages=[MessageInput(author="user", content="one")]))
+            await world.turn(
+                "s", TurnRequest(messages=[MessageInput(author="user", content="two")]))
             for _ in range(50):
                 if store.context_bundle("s").continuity.text == "rolling":
                     break
@@ -180,17 +184,29 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
         pid = connection.execute(
             "SELECT id FROM people WHERE display_name = 'Alice'").fetchone()["id"]
         connection.execute(
-            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('h','s','person',?,'Alice may move','impression','low','1','1')", (pid,))
+            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,"
+            "created_at,updated_at) "
+            "VALUES ('h','s','person',?,'Alice may move','impression','low','1','1')", (pid,))
         connection.execute(
-            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('new','s','person',?,'unrelated newest','impression','low','3','3')", (pid,))
+            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,"
+            "created_at,updated_at) "
+            "VALUES ('new','s','person',?,'unrelated newest','impression','low','3','3')", (pid,))
         connection.execute(
-            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,created_at,updated_at) VALUES ('cjk','s','person',?,'旅行计划未定','impression','low','0','0')", (pid,))
+            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,"
+            "created_at,updated_at) "
+            "VALUES ('cjk','s','person',?,'旅行计划未定','impression','low','0','0')", (pid,))
         connection.execute(
-            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,status,created_at,updated_at) VALUES ('closed','s','person',?,'旅行已确认','impression','low','rejected','4','4')", (pid,))
+            "INSERT INTO hypotheses(id,space_id,owner_kind,owner_id,content,kind,confidence,"
+            "status,created_at,updated_at) "
+            "VALUES ('closed','s','person',?,'旅行已确认','impression','low','rejected','4','4')",
+            (pid,))
         connection.execute(
-            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,status,created_at,updated_at) VALUES ('deferred','s','旅行方向','context','[]','deferred','5','5')")
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,status,"
+            "created_at,updated_at) "
+            "VALUES ('deferred','s','旅行方向','context','[]','deferred','5','5')")
         connection.execute(
-            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,created_at,updated_at) VALUES ('g','s','Learn Alice plans','context','[]','2','2')")
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,created_at,"
+            "updated_at) VALUES ('g','s','Learn Alice plans','context','[]','2','2')")
     generic = store.context_bundle("s")
     assert [item.id for item in generic.guidance.items] == ["g"]
     assert store.context_bundle("s").version == generic.version
@@ -200,7 +216,8 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
 
     async def scenario():
         world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
-        response = await world.turn("s", TurnRequest(messages=[MessageInput(author="user", content="Alice?")]))
+        response = await world.turn(
+            "s", TurnRequest(messages=[MessageInput(author="user", content="Alice?")]))
         assert any(item.id == "h" for item in response.guidance.items)
     before = store.context_bundle("s").version
     asyncio.run(scenario())

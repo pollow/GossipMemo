@@ -11,6 +11,7 @@ the blind-spot cues and method scan that only goal planning reads.
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from pydantic import BaseModel
@@ -18,9 +19,6 @@ from pydantic import BaseModel
 from .models import (
     HypothesisView,
     MemoryView,
-    PersonView,
-    RelationshipView,
-    UserModelView,
 )
 
 
@@ -54,9 +52,7 @@ def _json(value: Any) -> str:
     return json.dumps(_plain(value), ensure_ascii=False, indent=2, default=str)
 
 
-def _evidence_lines(
-    memories: list[MemoryView] | tuple[MemoryView, ...] | list[Any] | tuple[Any, ...],
-) -> str:
+def _evidence_lines(memories: Sequence[Any]) -> str:
     """Compact, injection-resistant enough-for-reading evidence representation."""
     lines = []
     for m in memories:
@@ -83,8 +79,8 @@ def _hypothesis_lines(hypotheses: list[HypothesisView] | tuple[HypothesisView, .
 
 
 def owner_reasoning_prefix(
-    target: PersonView | RelationshipView | UserModelView,
-    evidence_memories: list[MemoryView] | tuple[MemoryView, ...],
+    target: BaseModel,
+    evidence_memories: Sequence[Any],
     inferred_memories: list[MemoryView] | tuple[MemoryView, ...],
     hypotheses: list[HypothesisView] | tuple[HypothesisView, ...],
     *, user_name: str = "CurrentUser",

@@ -9,9 +9,9 @@ import pytest
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
-from gossipmemo.transport import ProviderGate
 from gossipmemo.models import ManualMemoryRequest
 from gossipmemo.store import PersonMergeError, SqliteWorldStore
+from gossipmemo.transport import ProviderGate
 from gossipmemo.world import SocialMemoryWorld
 from gossipmemo_client import AsyncGossipMemo, GossipMemo
 from integrations.hermes.gossipmemo import GossipMemoMemoryProvider

@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from ..models import (
     HypothesisView,
     MemoryView,
+    ReasoningActionsResult,
     RelationshipProjectionResult,
     RelationshipReasoningResult,
     RelationshipView,
@@ -31,7 +32,8 @@ meaningful changes in closeness, tone, or status. Recurring patterns require
 multiple distinct source memories; a narrow inference from one highly diagnostic
 interaction is allowed when calibrated to that evidence. Do not use projections,
 inferred memories, or hypotheses as evidence. Distinguish current from historical
-conditions. Use the language that best matches supplied memories; keep IDs and enum values unchanged.
+conditions. Use the language that best matches supplied memories; keep IDs and
+enum values unchanged.
 """
 
 
@@ -48,25 +50,25 @@ class _RelationshipTarget:
     more_targets: bool
     relationship: RelationshipView | None = None
     memories: tuple[MemoryView, ...] = ()
-    watermark: object = None
+    watermark: str | None = None
     inferred: tuple[MemoryView, ...] = field(default_factory=tuple)
     hypotheses: tuple[HypothesisView, ...] = field(default_factory=tuple)
 
 
 async def _reason_relationship(
-    transport: "LlmTransport", relationship: RelationshipView, memories: Sequence[MemoryView],
+    transport: LlmTransport, relationship: RelationshipView, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> RelationshipReasoningResult:
     projection, actions = await owner_reasoning(
         transport, RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories,
-        inferred_memories, hypotheses, RelationshipProjectionResult,
+        inferred_memories, hypotheses, RelationshipProjectionResult, ReasoningActionsResult,
     )
     return RelationshipReasoningResult(
         **projection.model_dump(), **actions.model_dump(exclude_none=True),
     )
 
 
-def build_relationship_reasoner(store: WorldStore, model: "LlmTransport") -> DescriptorReasoner:
+def build_relationship_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
     """Refresh one stale Relationship projection per attempt.
 
     Mirrors the person reasoner: an in-flight watermark conflict simply

@@ -21,7 +21,12 @@ class BudgetReport:
 class ContextBudget:
     """A deliberately conservative estimate, not a tokenizer replacement."""
 
-    def __init__(self, context_window_tokens: int = 65536, output_reserve_tokens: int = 8192, safety_tokens: int = 4096) -> None:
+    def __init__(
+        self,
+        context_window_tokens: int = 65536,
+        output_reserve_tokens: int = 8192,
+        safety_tokens: int = 4096,
+    ) -> None:
         if context_window_tokens <= 0 or output_reserve_tokens < 0 or safety_tokens < 0:
             raise ValueError("context budget values must be positive/non-negative")
         usable = context_window_tokens - output_reserve_tokens - safety_tokens
@@ -51,7 +56,8 @@ class ContextBudget:
         report = self.report(estimated_tokens)
         if not report.fits:
             raise ValueError(
-                f"LLM context exceeds input budget: estimated {report.estimated_tokens} tokens, limit {report.limit_tokens}")
+                f"LLM context exceeds input budget: estimated "
+                f"{report.estimated_tokens} tokens, limit {report.limit_tokens}")
         return report
 
 

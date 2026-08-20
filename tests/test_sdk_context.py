@@ -76,7 +76,8 @@ def test_list_people_builds_query_params():
 
     async def run():
         client = AsyncGossipMemo(
-            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_list_people_handler)))
+            "http://test",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(_list_people_handler)))
         result = await client.list_people("al", limit=10)
         assert result["people"][0]["display_name"] == "Alice"
         await client.close()
@@ -105,7 +106,8 @@ def test_guidance_builds_query_params():
 
     async def run():
         client = AsyncGossipMemo(
-            "http://test", client=httpx.AsyncClient(transport=httpx.MockTransport(_guidance_handler)))
+            "http://test",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(_guidance_handler)))
         result = await client.guidance(person_ids=["p1", "p2"], kind="hypothesis", limit=10)
         assert result["items"][0]["id"] == "h1"
         await client.close()
@@ -140,7 +142,16 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
                 started.set()
                 assert release.wait(2)
                 finished.set()
-                return {"context_update": {"version": "v1", "user_model": {"profile_card": {"summary": "calm"}}, "continuity": {"text": "thread"}, "people": [{"id": "p1", "display_name": "Alice"}]}, "known_people": [{"id": "p1", "display_name": "Alice"}], "memory_recall": [{"content": "likes tea"}]}
+                return {
+                    "context_update": {
+                        "version": "v1",
+                        "user_model": {"profile_card": {"summary": "calm"}},
+                        "continuity": {"text": "thread"},
+                        "people": [{"id": "p1", "display_name": "Alice"}],
+                    },
+                    "known_people": [{"id": "p1", "display_name": "Alice"}],
+                    "memory_recall": [{"content": "likes tea"}],
+                }
             if len(calls) == 2:
                 return {"context_update": None, "known_people": [], "memory_recall": []}
             raise RuntimeError("offline")

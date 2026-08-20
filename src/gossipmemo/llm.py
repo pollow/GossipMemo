@@ -13,9 +13,9 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
+from datetime import datetime, timezone
 from itertools import count
 from pathlib import Path
 from types import TracebackType
@@ -25,6 +25,7 @@ from pydantic import ValidationError
 
 from .config import Settings
 from .context_budget import ContextBudget
+from .priority import _call_label, _call_tier
 from .transport import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -36,7 +37,6 @@ from .transport import (
     RetryPolicy,
     _message_content,
 )
-from .priority import _call_label, _call_tier
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self._gate = ProviderGate()
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "OpenAICompatibleAdapter":
+    def from_settings(cls, settings: Settings) -> OpenAICompatibleAdapter:
         """Build the Adapter from the already-validated global settings."""
 
         return cls(
@@ -351,7 +351,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
     async def close(self) -> None:
         await self.aclose()
 
-    async def __aenter__(self) -> "OpenAICompatibleAdapter":
+    async def __aenter__(self) -> OpenAICompatibleAdapter:
         return self
 
     async def __aexit__(

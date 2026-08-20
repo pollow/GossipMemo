@@ -4,9 +4,8 @@ import asyncio
 import logging
 from collections.abc import Coroutine
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 
-from .logging import elapsed_ms
 from .models import (
     GuidanceBundle,
     HealthResponse,
@@ -20,6 +19,7 @@ from .models import (
     TurnRequest,
     TurnResponse,
 )
+from .query import synthesize
 from .reasoners import (
     Reasoner,
     build_continuity_reasoner,
@@ -30,11 +30,9 @@ from .reasoners import (
     build_relationship_reasoner,
     build_user_model_reasoner,
 )
-from .query import synthesize
 from .reasoning import DEFAULT_REASONING_PIPELINE, ReasoningPipeline
 from .store import SqliteWorldStore
 from .transport import LlmTransport
-
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +248,7 @@ class SocialMemoryWorld:
         guidance = GuidanceBundle()
         memory_recall: list[Any] = []
         context_update = None
-        context_status = "available"
+        context_status: Literal["available", "unavailable"] = "available"
         if last_message.author == "user":
             (known_people, guidance, memory_recall, context_update,
              context_status) = self.store.turn_view(

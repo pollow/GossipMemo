@@ -6,7 +6,6 @@ from collections.abc import Callable, Sequence
 
 from .reasoners import Reasoner
 
-
 DEFAULT_REASONING_PIPELINE = (
     "person",
     "relationship",
