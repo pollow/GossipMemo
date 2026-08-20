@@ -17,6 +17,7 @@ from ..models import (
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
+from .settings import ReasoningSettings
 
 if TYPE_CHECKING:
     from ..llm import LlmTransport
@@ -33,11 +34,12 @@ keep IDs and enum values unchanged.
 
 
 async def _reason_user_model(
-    transport: LlmTransport, memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, USER_MODEL_REASONING_SYSTEM_PROMPT, UserModelView(space_id="current"),
+        transport, settings, USER_MODEL_REASONING_SYSTEM_PROMPT,
+        UserModelView(space_id="current"),
         memories, inferred_memories, hypotheses, PersonProjectionResult,
         UserReasoningActionsResult,
     )
@@ -46,8 +48,10 @@ async def _reason_user_model(
     )
 
 
-def build_user_model_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
-    reason_user_model = partial(_reason_user_model, model)
+def build_user_model_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
+    reason_user_model = partial(_reason_user_model, model, settings)
 
     def load_context(space_id: str):
         _, _, user_models = store.stale_entities()

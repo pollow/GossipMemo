@@ -2,7 +2,8 @@
 load/call/apply logic.
 
 `base` holds the shared `Reasoner` seam. Every module in this package builds
-a `Reasoner` the same way, via a `build_*_reasoner(store, model)` factory.
+a `Reasoner` the same way, via a `build_*_reasoner(store, model, settings)`
+factory.
 Query synthesis (`gossipmemo.query`) is not a reasoner -- it is a single
 read-only call with no watermark to commit -- so it lives outside this
 package.
@@ -26,6 +27,7 @@ from .relationship import (
     RELATIONSHIP_REASONING_SYSTEM_PROMPT,
     build_relationship_reasoner,
 )
+from .settings import ReasoningSettings
 from .user_model import (
     USER_MODEL_REASONING_SYSTEM_PROMPT,
     build_user_model_reasoner,
@@ -40,6 +42,7 @@ __all__ = [
     "GOAL_PLANNING_SYSTEM_PROMPT",
     "PERSON_REASONING_SYSTEM_PROMPT",
     "RELATIONSHIP_REASONING_SYSTEM_PROMPT",
+    "ReasoningSettings",
     "Reasoner",
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "build_continuity_reasoner",

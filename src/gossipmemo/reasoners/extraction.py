@@ -23,6 +23,7 @@ from ..prompts import _json, schema_instruction
 from ..store import PendingExtraction, WorldStore
 from ..transport import ChatMessage, LlmTransport, structured
 from .base import AttemptLoop, Reasoner
+from .settings import ReasoningSettings
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,7 @@ def extraction_prompt(
 
 async def _extract(
     transport: LlmTransport,
+    settings: ReasoningSettings,
     messages: Sequence[ModelMessage],
     context: Sequence[ModelMessage] = (),
     known_people: Sequence[dict[str, Any]] = (),
@@ -156,7 +158,7 @@ async def _extract(
                 role="user",
                 content=extraction_prompt(
                     list(messages), list(context), list(known_people),
-                    transport.user_name, list(comparison_memories),
+                    settings.user_name, list(comparison_memories),
                 ),
             ),
         ],
@@ -179,9 +181,12 @@ class _ExtractionReasoner(AttemptLoop):
 
     name = "extraction"
 
-    def __init__(self, store: WorldStore, model: LlmTransport) -> None:
+    def __init__(
+        self, store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    ) -> None:
         self.store = store
         self.transport = model
+        self.settings = settings
 
     async def _attempt(self, space_id: str) -> bool:
         eligible = [
@@ -206,7 +211,7 @@ class _ExtractionReasoner(AttemptLoop):
         try:
             with llm_call_tier(TIER_FRESHNESS, "extract"):
                 result = await _extract(
-                    self.transport, messages, context, known_people, comparisons,
+                    self.transport, self.settings, messages, context, known_people, comparisons,
                 )
             self.store.apply_extraction(
                 space_id, batch_id, result,
@@ -230,8 +235,10 @@ class _ExtractionReasoner(AttemptLoop):
         return more_batches
 
 
-def build_extraction_reasoner(store: WorldStore, model: LlmTransport) -> Reasoner:
-    return _ExtractionReasoner(store, model)
+def build_extraction_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> Reasoner:
+    return _ExtractionReasoner(store, model, settings)
 
 
 __all__ = ["EXTRACTION_SYSTEM_PROMPT", "build_extraction_reasoner", "extraction_prompt"]

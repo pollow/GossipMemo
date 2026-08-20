@@ -31,6 +31,7 @@ from gossipmemo.models import (
     TurnRequest,
 )
 from gossipmemo.query import synthesize
+from gossipmemo.reasoners import ReasoningSettings
 from gossipmemo.reasoners.extraction import _extract
 from gossipmemo.reasoners.person import _reason_person
 from gossipmemo.reasoners.user_model import _reason_user_model
@@ -43,6 +44,8 @@ from gossipmemo.transport import (
 )
 from gossipmemo.world import SocialMemoryWorld
 from gossipmemo_client import AsyncGossipMemo, GossipMemo
+
+REASONING = ReasoningSettings()
 
 
 class FakeModel:
@@ -66,7 +69,6 @@ class FakeModel:
     gate = ProviderGate()
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-    user_name = "CurrentUser"
 
     async def aclose(self):
         return None
@@ -402,7 +404,7 @@ def test_failing_batch_does_not_block_later_batch(tmp_path):
                 return json.dumps({})
             return self._owner_response(request)
 
-    reasoner = build_extraction_reasoner(store, FlakyModel())
+    reasoner = build_extraction_reasoner(store, FlakyModel(), ReasoningSettings())
 
     asyncio.run(reasoner.run_until_caught_up("personal"))
 
@@ -439,7 +441,7 @@ def test_two_permanently_failing_batches_terminate_drain(tmp_path):
                 raise RuntimeError("boom")
             return self._owner_response(request)
 
-    reasoner = build_extraction_reasoner(store, AlwaysFailsModel())
+    reasoner = build_extraction_reasoner(store, AlwaysFailsModel(), ReasoningSettings())
 
     guard = 0
 
@@ -479,7 +481,7 @@ def test_capped_batch_is_skipped_but_still_reported(tmp_path):
                 return json.dumps({})
             return self._owner_response(request)
 
-    reasoner = build_extraction_reasoner(store, RecordingModel())
+    reasoner = build_extraction_reasoner(store, RecordingModel(), ReasoningSettings())
 
     asyncio.run(reasoner.run_until_caught_up("personal"))
 
@@ -528,7 +530,7 @@ def test_batch_killed_mid_call_is_not_capped(tmp_path):
                 return json.dumps({})
             return self._owner_response(request)
 
-    reasoner = build_extraction_reasoner(store, RecordingModel())
+    reasoner = build_extraction_reasoner(store, RecordingModel(), ReasoningSettings())
     asyncio.run(reasoner.run_until_caught_up("personal"))
 
     assert calls == ["killed batch content"]
@@ -710,6 +712,7 @@ def test_openai_compatible_adapter_validates_structured_output():
             )
             result = await _extract(
                 adapter,
+                REASONING,
                 [ModelMessage(
                     id="message_1",
                     space_id="personal",
@@ -740,6 +743,7 @@ def test_owner_reasoning_uses_an_identical_prefix_for_both_stages():
                 "http://llm.test/v1", "key", "test-model", client=client)
             result = await _reason_person(
                 adapter,
+                REASONING,
                 PersonView(id="person_1", display_name="Bob"),
                 [MemoryView(id="memory_1", content="Bob likes tea.", kind="fact",
                             basis="stated", status="active",
@@ -769,7 +773,7 @@ def test_user_owner_review_schema_excludes_inferred_memory_actions():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://llm.test/v1", "key", "test-model", client=client)
-            await _reason_user_model(adapter, [])
+            await _reason_user_model(adapter, REASONING, [])
 
     asyncio.run(scenario())
     assert "hypothesis_actions" in payloads[1]["messages"][-1]["content"]

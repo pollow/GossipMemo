@@ -221,14 +221,13 @@ class LlmTransport(Protocol):
     `context_budget` with no drift between what was measured and what goes
     out, and `structured` needs no access to adapter internals.
 
-    One member is not about transport at all: `user_name` is server
-    configuration that reasoner prompts need, and this is the only object
-    a reasoner is handed today, so it arrived here as the alternative to
-    reaching past the protocol. It would sit more naturally on the
-    reasoner factories, which would mean threading `Settings` into
-    `SocialMemoryWorld` -- a call worth making deliberately rather than
-    as a side effect of the split. Until then, a transport double must
-    supply it.
+    Every member is about moving one request to a provider and back:
+    whether a provider is configured at all, the shared `gate` that
+    serializes outbound requests, the `context_budget` a prompt must fit,
+    the `retry_policy` both retry loops share, and `prepare`/`complete`/
+    `aclose`. Prompt-facing server configuration is not here -- it reaches
+    reasoners through `reasoners.ReasoningSettings` instead -- so a
+    transport double only has to be a transport.
     """
 
     @property
@@ -242,9 +241,6 @@ class LlmTransport(Protocol):
 
     @property
     def retry_policy(self) -> RetryPolicy: ...
-
-    @property
-    def user_name(self) -> str: ...
 
     def prepare(
         self, messages: Sequence[ChatMessage], *, structured: bool

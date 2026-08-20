@@ -50,6 +50,7 @@ from ..store import WorldStore
 from ..transport import ChatCompletionRequest, LlmTransport, structured
 from .base import DescriptorReasoner
 from .coverage import _structured_request
+from .settings import ReasoningSettings
 
 GOAL_PLANNING_SYSTEM_PROMPT = """Plan optional directions in which this user's memoir
 and persona could be understood better, reading summaries of what is already
@@ -277,7 +278,9 @@ async def _plan_learning_goals(
     return result
 
 
-def build_learning_goals_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
+def build_learning_goals_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
     """Single pass, no retry loop."""
 
     plan_learning_goals = partial(_plan_learning_goals, model)

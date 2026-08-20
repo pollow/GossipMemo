@@ -18,6 +18,7 @@ from ..models import (
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
+from .settings import ReasoningSettings
 
 if TYPE_CHECKING:
     from ..llm import LlmTransport
@@ -56,11 +57,12 @@ class _RelationshipTarget:
 
 
 async def _reason_relationship(
-    transport: LlmTransport, relationship: RelationshipView, memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, relationship: RelationshipView,
+    memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> RelationshipReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories,
+        transport, settings, RELATIONSHIP_REASONING_SYSTEM_PROMPT, relationship, memories,
         inferred_memories, hypotheses, RelationshipProjectionResult, ReasoningActionsResult,
     )
     return RelationshipReasoningResult(
@@ -68,14 +70,16 @@ async def _reason_relationship(
     )
 
 
-def build_relationship_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
+def build_relationship_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
     """Refresh one stale Relationship projection per attempt.
 
     Mirrors the person reasoner: an in-flight watermark conflict simply
     causes the next `attempt` to recompute from the latest snapshot.
     """
 
-    reason_relationship = partial(_reason_relationship, model)
+    reason_relationship = partial(_reason_relationship, model, settings)
 
     def load_context(space_id: str) -> _RelationshipTarget | None:
         _, relationships, _ = store.stale_entities()

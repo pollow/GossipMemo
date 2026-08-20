@@ -62,7 +62,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         temperature: float | None = 0.0,
         max_tokens: int | None = None,
         headers: Mapping[str, str] | None = None,
-        user_name: str = "CurrentUser",
         max_retries: int = 5,
         retry_base_seconds: float = 1.0,
         retry_max_seconds: float = 30.0,
@@ -80,8 +79,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             raise ValueError("LLM timeout must be greater than zero")
         if max_tokens is not None and max_tokens < 1:
             raise ValueError("LLM max_tokens must be greater than zero")
-        if not user_name.strip():
-            raise ValueError("LLM user_name must not be empty")
         if max_retries < 0:
             raise ValueError("LLM max_retries must not be negative")
         if retry_base_seconds <= 0:
@@ -97,7 +94,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.timeout = timeout
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.user_name = user_name.strip()
         self.max_retries = max_retries
         self.retry_base_seconds = retry_base_seconds
         self.retry_max_seconds = retry_max_seconds
@@ -119,7 +115,6 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             model=settings.llm_model,
             max_tokens=settings.llm_max_tokens,
             timeout=settings.llm_timeout_seconds,
-            user_name=settings.user_name,
             max_retries=settings.llm_max_retries,
             retry_base_seconds=settings.llm_retry_base_seconds,
             retry_max_seconds=settings.llm_retry_max_seconds,

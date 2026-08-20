@@ -47,6 +47,7 @@ from ..transport import (
     LlmTransport,
     structured,
 )
+from .settings import ReasoningSettings
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ ActionsT = TypeVar("ActionsT", bound=BaseModel)
 
 async def owner_reasoning(
     transport: LlmTransport,
+    settings: ReasoningSettings,
     system_prompt: str,
     target: BaseModel,
     memories: Sequence[MemoryView],
@@ -73,20 +75,20 @@ async def owner_reasoning(
     """
 
     bounded_inferred, bounded_hypotheses = _bounded_comparisons(
-        transport, system_prompt, target, inferred_memories, hypotheses,
+        transport, settings, system_prompt, target, inferred_memories, hypotheses,
         projection_type, actions_type,
     )
     first_messages = _first_messages(
-        transport, system_prompt, target, memories, bounded_inferred,
+        transport, settings, system_prompt, target, memories, bounded_inferred,
         bounded_hypotheses, projection_type,
     )
     if not _stage2_fits(transport, first_messages, actions_type):
         digest = await _digest_evidence(
-            transport, target, memories, bounded_inferred, bounded_hypotheses,
+            transport, settings, target, memories, bounded_inferred, bounded_hypotheses,
             system_prompt, projection_type, actions_type,
         )
         first_messages = _first_messages(
-            transport, system_prompt, target, digest, bounded_inferred,
+            transport, settings, system_prompt, target, digest, bounded_inferred,
             bounded_hypotheses, projection_type,
         )
         if not _stage2_fits(transport, first_messages, actions_type):
@@ -112,13 +114,13 @@ async def owner_reasoning(
 
 
 def _first_messages(
-    transport: LlmTransport, system_prompt: str, target: BaseModel,
-    evidence: Sequence[Any], inferred: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, system_prompt: str,
+    target: BaseModel, evidence: Sequence[Any], inferred: Sequence[MemoryView],
     hypotheses: Sequence[HypothesisView], projection_type: type[BaseModel],
 ) -> list[ChatMessage]:
     prefix = owner_reasoning_prefix(
         target, list(evidence), list(inferred), list(hypotheses),
-        user_name=transport.user_name,
+        user_name=settings.user_name,
     )
     return [
         ChatMessage(role="system", content=system_prompt),
@@ -161,7 +163,7 @@ def _stage2_fits(
 
 
 def _bounded_comparisons(
-    transport: LlmTransport, system_prompt: str, target: BaseModel,
+    transport: LlmTransport, settings: ReasoningSettings, system_prompt: str, target: BaseModel,
     inferred: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
     projection_type: type[BaseModel], actions_type: type[BaseModel],
 ) -> tuple[list[MemoryView], list[HypothesisView]]:
@@ -173,7 +175,8 @@ def _bounded_comparisons(
     evidence always has room to be represented or digested.
     """
     context_budget = transport.context_budget
-    empty_first = _first_messages(transport, system_prompt, target, [], [], [], projection_type)
+    empty_first = _first_messages(
+        transport, settings, system_prompt, target, [], [], [], projection_type)
     base = _stage2_estimate(transport, empty_first, actions_type)
     ceiling = min(
         context_budget.usable_input_tokens,
@@ -190,7 +193,7 @@ def _bounded_comparisons(
         candidate_hypotheses: Sequence[HypothesisView],
     ) -> bool:
         first = _first_messages(
-            transport, system_prompt, target, [], candidate_inferred,
+            transport, settings, system_prompt, target, [], candidate_inferred,
             candidate_hypotheses, projection_type,
         )
         return _stage2_estimate(transport, first, actions_type) <= ceiling
@@ -233,7 +236,9 @@ def _evidence_source_ids(item: MemoryView | OwnerEvidenceDigestView) -> set[str]
     return set(item.source_memory_ids)
 
 
-def _digest_request(transport: LlmTransport, chunk: list[Any]) -> ChatCompletionRequest:
+def _digest_request(
+    transport: LlmTransport, settings: ReasoningSettings, chunk: list[Any]
+) -> ChatCompletionRequest:
     return transport.prepare(
         [
             ChatMessage(
@@ -242,14 +247,15 @@ def _digest_request(transport: LlmTransport, chunk: list[Any]) -> ChatCompletion
                 + schema_instruction(ExtractedOwnerEvidenceDigest),
             ),
             ChatMessage(role="user", content=owner_evidence_digest_prompt(
-                chunk, transport.user_name)),
+                chunk, settings.user_name)),
         ],
         structured=True,
     )
 
 
 async def _digest_evidence(
-    transport: LlmTransport, target: BaseModel, memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, target: BaseModel,
+    memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
     system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel],
 ) -> list[OwnerEvidenceDigestView]:
@@ -264,7 +270,7 @@ async def _digest_evidence(
             # Segment oversized content so every digest request is valid.
             pieces: list[Any] = [memory]
             if isinstance(memory, MemoryView) and not context_budget.report(
-                context_budget.estimate_request(_digest_request(transport, [memory]))
+                context_budget.estimate_request(_digest_request(transport, settings, [memory]))
             ).fits:
                 lo, hi = 1, len(memory.content)
                 while lo < hi:
@@ -272,7 +278,7 @@ async def _digest_evidence(
                     candidate_piece = memory.model_copy(update={"content": memory.content[:mid]})
                     if context_budget.report(
                         context_budget.estimate_request(
-                            _digest_request(transport, [candidate_piece]))
+                            _digest_request(transport, settings, [candidate_piece]))
                     ).fits:
                         lo = mid
                     else:
@@ -293,14 +299,14 @@ async def _digest_evidence(
                     32 if any(isinstance(item, MemoryView) for item in candidate) else 512
                 )
                 candidate_fits = context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, candidate))
+                    context_budget.estimate_request(_digest_request(transport, settings, candidate))
                 ).fits and len(candidate_ids) <= source_id_limit
                 if current and not candidate_fits:
                     chunks.append(current)
                     current = []
                 current.append(piece)
                 if not context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, current))
+                    context_budget.estimate_request(_digest_request(transport, settings, current))
                 ).fits:
                     identifier = getattr(memory, "id", "digest")
                     raise ValueError(
@@ -313,7 +319,7 @@ async def _digest_evidence(
     async def digest_chunk(
         chunk: list[MemoryView | OwnerEvidenceDigestView],
     ) -> list[OwnerEvidenceDigestView]:
-        request = _digest_request(transport, chunk)
+        request = _digest_request(transport, settings, chunk)
         context_budget.check(context_budget.estimate_request(request))
         allowed = set().union(*(_evidence_source_ids(item) for item in chunk))
         recursive = all(isinstance(item, OwnerEvidenceDigestView) for item in chunk)
@@ -372,7 +378,7 @@ async def _digest_evidence(
         output: list[MemoryView | OwnerEvidenceDigestView]
     ) -> list[ChatMessage]:
         return _first_messages(
-            transport, system_prompt, target, output, list(inferred_memories),
+            transport, settings, system_prompt, target, output, list(inferred_memories),
             list(hypotheses), projection_type,
         )
 
@@ -383,7 +389,7 @@ async def _digest_evidence(
         return context_budget.estimate_text(
             owner_reasoning_prefix(
                 target, output, list(inferred_memories), list(hypotheses),
-                user_name=transport.user_name,
+                user_name=settings.user_name,
             )
         )
 

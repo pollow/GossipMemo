@@ -17,7 +17,7 @@ from pathlib import Path
 
 from gossipmemo.config import Settings
 from gossipmemo.llm import create_llm
-from gossipmemo.reasoners import build_learning_goals_reasoner
+from gossipmemo.reasoners import ReasoningSettings, build_learning_goals_reasoner
 from gossipmemo.store import SqliteWorldStore
 
 
@@ -44,7 +44,9 @@ async def main() -> int:
     store = SqliteWorldStore(args.database)
     store.initialize()
     model = create_llm(settings)
-    reasoner = build_learning_goals_reasoner(store, model)
+    reasoner = build_learning_goals_reasoner(
+        store, model, ReasoningSettings(user_name=settings.user_name)
+    )
     try:
         spaces = args.spaces or discover_spaces(store)
         for space_id in spaces:

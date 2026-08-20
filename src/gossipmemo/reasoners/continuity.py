@@ -29,6 +29,7 @@ from ..prompts import _json, schema_instruction
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
+from .settings import ReasoningSettings
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,9 @@ async def _reason_continuity(
     return result.model_copy(update={"through_message_id": source[-1].id})
 
 
-def build_continuity_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
+def build_continuity_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
     reason_continuity = partial(_reason_continuity, model)
 
     def load_context(space_id: str):

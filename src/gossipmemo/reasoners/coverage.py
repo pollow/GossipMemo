@@ -25,6 +25,7 @@ from ..prompts import COVERAGE_ROOT_VIEWPOINTS, _evidence_lines, schema_instruct
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
+from .settings import ReasoningSettings
 
 COVERAGE_AUDIT_SYSTEM_PROMPT = """Summarize what is known about one area of a person's
 life and persona. Return only the supplied JSON schema. An entry is a
@@ -107,7 +108,9 @@ async def _audit_coverage(
     return result, chunk
 
 
-def build_coverage_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
+def build_coverage_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
     """Audit one root's next evidence chunk per attempt, until none is behind."""
 
     audit_coverage = partial(_audit_coverage, model)

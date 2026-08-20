@@ -17,6 +17,7 @@ from gossipmemo.models import (
     QueryRequest,
     TurnRequest,
 )
+from gossipmemo.reasoners import ReasoningSettings
 from gossipmemo.reasoners.continuity import build_continuity_reasoner
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
@@ -83,7 +84,6 @@ class _ContinuityModel:
     gate = ProviderGate()
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-    user_name = "CurrentUser"
 
     def __init__(self):
         self.calls = 0
@@ -151,7 +151,7 @@ def test_continuity_backfill_reaches_last_message(tmp_path: Path):
         store.initialize()
         ids = store.record_messages("space", [MessageInput(
             author="user", content=f"m{i}") for i in range(1500)])
-        reasoner = build_continuity_reasoner(store, _ContinuityModel())
+        reasoner = build_continuity_reasoner(store, _ContinuityModel(), ReasoningSettings())
         await reasoner.run_until_caught_up("space")
         continuity, pending = store.continuity_context("space")
         assert continuity.through_message_id == ids[-1]

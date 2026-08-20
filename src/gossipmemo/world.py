@@ -22,6 +22,7 @@ from .models import (
 from .query import synthesize
 from .reasoners import (
     Reasoner,
+    ReasoningSettings,
     build_continuity_reasoner,
     build_coverage_reasoner,
     build_extraction_reasoner,
@@ -35,6 +36,9 @@ from .store import SqliteWorldStore
 from .transport import LlmTransport
 
 logger = logging.getLogger(__name__)
+
+# Module-level singleton so the default is shared rather than rebuilt per call.
+DEFAULT_REASONING = ReasoningSettings()
 
 
 class SocialMemoryWorld:
@@ -55,6 +59,7 @@ class SocialMemoryWorld:
         induction_interval_seconds: float | None = None,
         induction_time: str = "00:00",
         continuity_threshold: int = 20,
+        reasoning: ReasoningSettings = DEFAULT_REASONING,
     ) -> None:
         self.store = store
         self.model = model
@@ -63,15 +68,18 @@ class SocialMemoryWorld:
         self.induction_interval_seconds = induction_interval_seconds
         self.induction_time = induction_time
         self.continuity_threshold = continuity_threshold
+        self.reasoning = reasoning
         reasoners: dict[str, Reasoner] = {
-            "person": build_person_reasoner(self.store, self.model),
-            "relationship": build_relationship_reasoner(self.store, self.model),
-            "user_model": build_user_model_reasoner(self.store, self.model),
-            "coverage": build_coverage_reasoner(self.store, self.model),
-            "learning_goals": build_learning_goals_reasoner(self.store, self.model),
+            "person": build_person_reasoner(self.store, self.model, reasoning),
+            "relationship": build_relationship_reasoner(self.store, self.model, reasoning),
+            "user_model": build_user_model_reasoner(self.store, self.model, reasoning),
+            "coverage": build_coverage_reasoner(self.store, self.model, reasoning),
+            "learning_goals": build_learning_goals_reasoner(self.store, self.model, reasoning),
         }
-        self._continuity_reasoner: Reasoner = build_continuity_reasoner(self.store, self.model)
-        self._extraction_reasoner: Reasoner = build_extraction_reasoner(self.store, self.model)
+        self._continuity_reasoner: Reasoner = build_continuity_reasoner(
+            self.store, self.model, reasoning)
+        self._extraction_reasoner: Reasoner = build_extraction_reasoner(
+            self.store, self.model, reasoning)
         self.reasoning_pipeline = ReasoningPipeline(
             [reasoners[name] for name in DEFAULT_REASONING_PIPELINE],
             should_continue=lambda: not self._stopping,

@@ -29,7 +29,6 @@ class _NoopModel:
     gate = ProviderGate()
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-    user_name = "CurrentUser"
 
     async def aclose(self):
         return None

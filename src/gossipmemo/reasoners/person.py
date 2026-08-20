@@ -18,6 +18,7 @@ from ..models import (
 from ..store import WorldStore
 from .base import DescriptorReasoner
 from .owner import owner_reasoning
+from .settings import ReasoningSettings
 
 if TYPE_CHECKING:
     from ..llm import LlmTransport
@@ -57,11 +58,12 @@ class _PersonTarget:
 
 
 async def _reason_person(
-    transport: LlmTransport, person: PersonView, memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, person: PersonView,
+    memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
 ) -> PersonReasoningResult:
     projection, actions = await owner_reasoning(
-        transport, PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories,
+        transport, settings, PERSON_REASONING_SYSTEM_PROMPT, person, memories, inferred_memories,
         hypotheses, PersonProjectionResult, ReasoningActionsResult,
     )
     return PersonReasoningResult(
@@ -69,7 +71,9 @@ async def _reason_person(
     )
 
 
-def build_person_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorReasoner:
+def build_person_reasoner(
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+) -> DescriptorReasoner:
     """Refresh one stale Person card per attempt.
 
     If Extract updates the same Person while an LLM call is in flight, the
@@ -77,7 +81,7 @@ def build_person_reasoner(store: WorldStore, model: LlmTransport) -> DescriptorR
     `attempt` recomputes from the latest snapshot without taking a lock.
     """
 
-    reason_person = partial(_reason_person, model)
+    reason_person = partial(_reason_person, model, settings)
 
     def load_context(space_id: str) -> _PersonTarget | None:
         people, _, _ = store.stale_entities()

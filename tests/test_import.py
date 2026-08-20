@@ -109,7 +109,6 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         gate = ProviderGate()
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-        user_name = "CurrentUser"
 
         def __init__(self):
             self.extractions = 0
@@ -228,7 +227,6 @@ def test_import_reports_background_reasoning_failure(tmp_path):
         gate = ProviderGate()
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-        user_name = "CurrentUser"
 
         def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
             return ChatCompletionRequest(

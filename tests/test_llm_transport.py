@@ -118,10 +118,6 @@ class FakeTransport:
     def retry_policy(self) -> RetryPolicy:
         return RetryPolicy(attempts=2, base_seconds=0.001, max_seconds=0.002)
 
-    @property
-    def user_name(self) -> str:
-        return "CurrentUser"
-
     def prepare(
         self, messages, *, structured: bool
     ) -> ChatCompletionRequest:
