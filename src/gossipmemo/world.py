@@ -95,22 +95,48 @@ class SocialMemoryWorld:
         # subsystem is off and every path below falls back to plain FTS.
         self._settings = settings
         self._embedding_client: EmbeddingClient | None = embedding_client
+        # A getter (not the client) for every reasoner below too, for the
+        # same reason as extraction's: reasoners are built here, in the sync
+        # constructor, before `start()` resolves the embedding client
+        # asynchronously -- see `_start_embedding_subsystem`.
+        def embedding_client_getter(): return self._embedding_client  # noqa: E731
+        embedding_query_timeout = (
+            settings.embedding_query_timeout_seconds if settings is not None
+            else DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS
+        )
         reasoners: dict[str, Reasoner] = {
-            "person": build_person_reasoner(self.store, self.model, reasoning),
-            "relationship": build_relationship_reasoner(self.store, self.model, reasoning),
-            "user_model": build_user_model_reasoner(self.store, self.model, reasoning),
-            "coverage": build_coverage_reasoner(self.store, self.model, reasoning),
-            "learning_goals": build_learning_goals_reasoner(self.store, self.model, reasoning),
+            "person": build_person_reasoner(
+                self.store, self.model, reasoning,
+                embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout,
+            ),
+            "relationship": build_relationship_reasoner(
+                self.store, self.model, reasoning,
+                embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout,
+            ),
+            "user_model": build_user_model_reasoner(
+                self.store, self.model, reasoning,
+                embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout,
+            ),
+            "coverage": build_coverage_reasoner(
+                self.store, self.model, reasoning,
+                embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout,
+            ),
+            "learning_goals": build_learning_goals_reasoner(
+                self.store, self.model, reasoning,
+                embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout,
+            ),
         }
         self._continuity_reasoner: Reasoner = build_continuity_reasoner(
             self.store, self.model, reasoning)
         self._extraction_reasoner: Reasoner = build_extraction_reasoner(
             self.store, self.model, reasoning,
-            embedding_client_getter=lambda: self._embedding_client,
-            embedding_query_timeout_seconds=(
-                settings.embedding_query_timeout_seconds if settings is not None
-                else DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS
-            ),
+            embedding_client_getter=embedding_client_getter,
+            embedding_query_timeout_seconds=embedding_query_timeout,
         )
         self.reasoning_pipeline = ReasoningPipeline(
             [reasoners[name] for name in DEFAULT_REASONING_PIPELINE],

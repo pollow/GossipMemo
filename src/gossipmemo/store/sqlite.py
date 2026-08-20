@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from ..models import (
@@ -130,6 +131,16 @@ class WorldStore(Protocol):
     def continuity_context(
         self, space_id: str
     ) -> tuple[ContinuityView | None, list[ModelMessage]] | None: ...
+
+    def search_vectors(
+        self,
+        space_id: str,
+        owner_kind: str,
+        query_vector: Sequence[float],
+        k: int,
+        *,
+        statuses: Sequence[str] | None = None,
+    ) -> list[tuple[str, float]]: ...
 
     def apply_continuity_reasoning(
         self, space_id: str, expected_through_message_id: str | None,

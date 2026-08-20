@@ -15,10 +15,11 @@ that already landed.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 from ..chunking import greedy_chunks
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import COVERAGE_CRITERIA, CoverageEntryView, ExtractedCoverageAudit, MemoryView
 from ..priority import current_call_label, current_call_tier
 from ..prompts import PromptLibrary, schema_instruction
@@ -26,6 +27,7 @@ from ..prompts.render import _evidence_lines
 from ..store import WorldStore
 from ..transport import ChatCompletionRequest, ChatMessage, LlmTransport, structured
 from .base import DescriptorReasoner
+from .dedup_priority import similarity_priority_order
 from .settings import ReasoningSettings
 
 
@@ -62,6 +64,11 @@ def _structured_request(
 async def _audit_coverage(
     transport: LlmTransport, settings: ReasoningSettings, root: str,
     entries: Sequence[CoverageEntryView], memories: Sequence[MemoryView],
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> tuple[ExtractedCoverageAudit, list[MemoryView]]:
     """Audit the largest prefix of `memories` that fits one request.
 
@@ -69,7 +76,21 @@ async def _audit_coverage(
     caller advances this root's cursor by exactly that much. A root whose
     entries alone no longer fit the budget raises rather than dropping any of
     them: compacting such a root is its own pass, not a silent truncation.
+
+    `entries` is stable-resorted by similarity to `memories` (this attempt's
+    new evidence) first -- a priority signal only (see `dedup_priority`):
+    every entry is still included in full, in every request, exactly as
+    before. Missing `store`/`space_id`, or an unavailable embedding client,
+    leaves the order untouched.
     """
+    if store is not None and space_id is not None:
+        entries = await similarity_priority_order(
+            store, space_id, "coverage_entry", entries, lambda item: item.id,
+            "\n".join(memory.content for memory in memories),
+            embedding_client_getter=embedding_client_getter or (lambda: None),
+            instruction=settings.prompts.embedding_coverage_entry_dedup_instruction,
+            timeout=embedding_query_timeout_seconds,
+        )
     context_budget = transport.context_budget
 
     def request_for(chunk: Sequence[MemoryView]) -> ChatCompletionRequest:
@@ -95,18 +116,28 @@ async def _audit_coverage(
 
 
 def build_coverage_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
     """Audit one root's next evidence chunk per attempt, until none is behind."""
 
-    audit_coverage = partial(_audit_coverage, model, settings)
+    audit_coverage = partial(
+        _audit_coverage, model, settings,
+        store=store, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+    )
 
     def load_context(space_id: str):
         return store.coverage_context(space_id)
 
     def call(space_id: str, context):
         root, entries, memories = context
-        return "audit-coverage", audit_coverage, (root.root, entries, memories)
+        return (
+            "audit-coverage",
+            partial(audit_coverage, space_id=space_id),
+            (root.root, entries, memories),
+        )
 
     def apply(space_id: str, context, result) -> bool:
         root, entries, _ = context

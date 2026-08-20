@@ -25,10 +25,11 @@ per-root grounding that makes them worth having.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 
 from ..chunking import greedy_chunks, reduce_until_fits
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
     COVERAGE_CRITERIA,
     COVERAGE_ROOTS,
@@ -46,6 +47,7 @@ from ..store import WorldStore
 from ..transport import ChatCompletionRequest, LlmTransport, structured
 from .base import DescriptorReasoner
 from .coverage import _structured_request
+from .dedup_priority import similarity_priority_order
 from .settings import ReasoningSettings
 
 
@@ -117,6 +119,11 @@ def goal_candidate_reduction_prompt(
 async def _root_candidates(
     transport: LlmTransport, settings: ReasoningSettings, root: str,
     entries: Sequence[CoverageEntryView], open_goals: Sequence[LearningGoalView],
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> tuple[list[LearningGoalCandidate], list[GoalClosureRecommendation]]:
     """Plan one root, splitting its child entries when they outgrow a request.
 
@@ -125,7 +132,21 @@ async def _root_candidates(
     needs. Closure recommendations ride alongside the candidates: this pass
     is the only one that sees this root's entries, so it is the only place
     that can judge an open goal against what is actually now understood.
+
+    `open_goals` is stable-resorted by similarity to this root's entries
+    first -- a priority signal only (see `dedup_priority`): every open goal
+    is still listed, in full, in every chunk's prompt, exactly as before.
+    Missing `store`/`space_id`, or an unavailable embedding client, leaves
+    the order untouched.
     """
+    if store is not None and space_id is not None:
+        open_goals = await similarity_priority_order(
+            store, space_id, "learning_goal", open_goals, lambda item: item.id,
+            "\n".join(f"{item.path}: {item.content}" for item in entries),
+            embedding_client_getter=embedding_client_getter or (lambda: None),
+            instruction=settings.prompts.embedding_learning_goal_dedup_instruction,
+            timeout=embedding_query_timeout_seconds,
+        )
     context_budget = transport.context_budget
     overview = [item for item in entries if not item.path]
     children = [item for item in entries if item.path]
@@ -161,6 +182,11 @@ async def _root_candidates(
 async def _plan_learning_goals(
     transport: LlmTransport, settings: ReasoningSettings, entries: Sequence[CoverageEntryView],
     open_goals: Sequence[LearningGoalView], recent_closed_goals: Sequence[LearningGoalView],
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> GoalPlanningResult:
     context_budget = transport.context_budget
     tier, label = current_call_tier(), current_call_label()
@@ -175,7 +201,10 @@ async def _plan_learning_goals(
         root_entries = [item for item in entries if item.root == root]
         if root_entries:
             root_candidates, root_recommendations = await _root_candidates(
-                transport, settings, root, root_entries, open_goals)
+                transport, settings, root, root_entries, open_goals,
+                store=store, space_id=space_id, embedding_client_getter=embedding_client_getter,
+                embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+            )
             candidates.extend(root_candidates)
             recommendations.extend(root_recommendations)
     if not candidates and not open_goals:
@@ -242,18 +271,28 @@ async def _plan_learning_goals(
 
 
 def build_learning_goals_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
     """Single pass, no retry loop."""
 
-    plan_learning_goals = partial(_plan_learning_goals, model, settings)
+    plan_learning_goals = partial(
+        _plan_learning_goals, model, settings,
+        store=store, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+    )
 
     def load_context(space_id: str):
         return store.learning_goal_context(space_id)
 
     def call(space_id: str, context):
         _, entries, open_goals, closed_goals = context
-        return "plan-learning-goals", plan_learning_goals, (entries, open_goals, closed_goals)
+        return (
+            "plan-learning-goals",
+            partial(plan_learning_goals, space_id=space_id),
+            (entries, open_goals, closed_goals),
+        )
 
     def apply(space_id: str, context, result) -> bool:
         revision, _, open_goals, closed_goals = context

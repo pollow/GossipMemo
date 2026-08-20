@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
     HypothesisView,
     MemoryView,
@@ -46,10 +47,17 @@ async def _reason_relationship(
     transport: LlmTransport, settings: ReasoningSettings, relationship: RelationshipView,
     memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> RelationshipReasoningResult:
     projection, actions = await owner_reasoning(
         transport, settings, settings.prompts.relationship_reasoning_system, relationship, memories,
         inferred_memories, hypotheses, RelationshipProjectionResult, ReasoningActionsResult,
+        store=store, space_id=space_id, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
     )
     return RelationshipReasoningResult(
         **projection.model_dump(), **actions.model_dump(exclude_none=True),
@@ -57,7 +65,9 @@ async def _reason_relationship(
 
 
 def build_relationship_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
     """Refresh one stale Relationship projection per attempt.
 
@@ -65,7 +75,11 @@ def build_relationship_reasoner(
     causes the next `attempt` to recompute from the latest snapshot.
     """
 
-    reason_relationship = partial(_reason_relationship, model, settings)
+    reason_relationship = partial(
+        _reason_relationship, model, settings,
+        store=store, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+    )
 
     def load_context(space_id: str) -> _RelationshipTarget | None:
         _, relationships, _ = store.stale_entities()
@@ -91,7 +105,7 @@ def build_relationship_reasoner(
             return None
         return (
             "reason-relationship",
-            reason_relationship,
+            partial(reason_relationship, space_id=space_id),
             (context.relationship, context.memories, context.inferred, context.hypotheses),
         )
 

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
     HypothesisView,
     MemoryView,
@@ -46,10 +47,17 @@ async def _reason_person(
     transport: LlmTransport, settings: ReasoningSettings, person: PersonView,
     memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> PersonReasoningResult:
     projection, actions = await owner_reasoning(
         transport, settings, settings.prompts.person_reasoning_system, person, memories,
         inferred_memories, hypotheses, PersonProjectionResult, ReasoningActionsResult,
+        store=store, space_id=space_id, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
     )
     return PersonReasoningResult(
         profile_card=projection.profile_card, **actions.model_dump(exclude_none=True),
@@ -57,7 +65,9 @@ async def _reason_person(
 
 
 def build_person_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
     """Refresh one stale Person card per attempt.
 
@@ -66,7 +76,11 @@ def build_person_reasoner(
     `attempt` recomputes from the latest snapshot without taking a lock.
     """
 
-    reason_person = partial(_reason_person, model, settings)
+    reason_person = partial(
+        _reason_person, model, settings,
+        store=store, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+    )
 
     def load_context(space_id: str) -> _PersonTarget | None:
         people, _, _ = store.stale_entities()
@@ -92,7 +106,7 @@ def build_person_reasoner(
             return None
         return (
             "reason-person",
-            reason_person,
+            partial(reason_person, space_id=space_id),
             (context.person, context.memories, context.inferred, context.hypotheses),
         )
 

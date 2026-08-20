@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from functools import partial
 from typing import TYPE_CHECKING
 
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
     HypothesisView,
     MemoryView,
@@ -26,12 +27,19 @@ if TYPE_CHECKING:
 async def _reason_user_model(
     transport: LlmTransport, settings: ReasoningSettings, memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
         transport, settings, settings.prompts.user_model_reasoning_system,
         UserModelView(space_id="current"),
         memories, inferred_memories, hypotheses, PersonProjectionResult,
         UserReasoningActionsResult,
+        store=store, space_id=space_id, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
     )
     return UserModelReasoningResult(
         profile_card=projection.profile_card, hypothesis_actions=actions.hypothesis_actions,
@@ -39,9 +47,15 @@ async def _reason_user_model(
 
 
 def build_user_model_reasoner(
-    store: WorldStore, model: LlmTransport, settings: ReasoningSettings
+    store: WorldStore, model: LlmTransport, settings: ReasoningSettings,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
-    reason_user_model = partial(_reason_user_model, model, settings)
+    reason_user_model = partial(
+        _reason_user_model, model, settings,
+        store=store, embedding_client_getter=embedding_client_getter,
+        embedding_query_timeout_seconds=embedding_query_timeout_seconds,
+    )
 
     def load_context(space_id: str):
         _, _, user_models = store.stale_entities()
@@ -59,7 +73,11 @@ def build_user_model_reasoner(
 
     def call(space_id: str, context):
         _, evidence, inferred, hypotheses = context
-        return "reason-user-model", reason_user_model, (evidence, inferred, hypotheses)
+        return (
+            "reason-user-model",
+            partial(reason_user_model, space_id=space_id),
+            (evidence, inferred, hypotheses),
+        )
 
     def apply(space_id: str, context, result) -> bool:
         watermark, _, _, hypotheses = context

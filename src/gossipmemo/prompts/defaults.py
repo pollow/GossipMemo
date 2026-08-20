@@ -373,6 +373,19 @@ EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION = (
     "the same fact, so it can be recognized as a duplicate or update rather than "
     "new information."
 )
+EMBEDDING_HYPOTHESIS_DEDUP_INSTRUCTION = (
+    "Given evidence currently being reasoned about, find existing hypotheses that "
+    "already express the same tentative claim or direction, not merely a related topic."
+)
+EMBEDDING_LEARNING_GOAL_DEDUP_INSTRUCTION = (
+    "Given what is currently understood about a coverage root, find existing "
+    "learning goals that are already pursuing the same direction, not merely a "
+    "related topic."
+)
+EMBEDDING_COVERAGE_ENTRY_DEDUP_INSTRUCTION = (
+    "Given a piece of new evidence, find existing coverage entries that already "
+    "summarize this same area, not merely a related one."
+)
 
 
 __all__ = [
@@ -385,7 +398,10 @@ __all__ = [
     "COVERAGE_METHOD",
     "COVERAGE_ROOT_BLIND_SPOTS",
     "COVERAGE_ROOT_VIEWPOINTS",
+    "EMBEDDING_COVERAGE_ENTRY_DEDUP_INSTRUCTION",
     "EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION",
+    "EMBEDDING_HYPOTHESIS_DEDUP_INSTRUCTION",
+    "EMBEDDING_LEARNING_GOAL_DEDUP_INSTRUCTION",
     "EMBEDDING_QUERY_INSTRUCTION",
     "EMBEDDING_TURN_RECALL_INSTRUCTION",
     "EXTRACTION_COMPARISON_RULE",

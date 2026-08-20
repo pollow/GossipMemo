@@ -20,12 +20,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel
 
 from ..chunking import reduce_until_fits
+from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
     ExtractedOwnerEvidenceDigest,
     HypothesisView,
@@ -40,6 +41,7 @@ from ..prompts import (
     projection_stage_prompt,
     schema_instruction,
 )
+from ..store import WorldStore
 from ..transport import (
     ChatCompletionRequest,
     ChatMessage,
@@ -47,6 +49,7 @@ from ..transport import (
     LlmTransport,
     structured,
 )
+from .dedup_priority import similarity_priority_order
 from .settings import ReasoningSettings
 
 logger = logging.getLogger(__name__)
@@ -65,6 +68,11 @@ async def owner_reasoning(
     hypotheses: Sequence[HypothesisView],
     projection_type: type[ProjectionT],
     actions_type: type[ActionsT],
+    *,
+    store: WorldStore | None = None,
+    space_id: str | None = None,
+    embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
+    embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> tuple[ProjectionT, ActionsT]:
     """Run the shared two-call owner-reasoning shape over `transport`.
 
@@ -72,7 +80,25 @@ async def owner_reasoning(
     (they may never grow to consume the evidence budget); if the actions
     request still would not fit with full evidence, evidence is digested
     and the whole prefix rebuilt before either call goes out.
+
+    Before bounding, `hypotheses` is stable-resorted by similarity to
+    `memories` (the evidence this call is actually reasoning about): a
+    priority signal only (see `dedup_priority`), so that the hypotheses
+    most likely to already express the same claim as what the evidence
+    suggests are the ones `_bounded_comparisons` keeps in full text rather
+    than downgrading to an ID-only skeleton. `store`/`space_id` are
+    optional -- when either is missing, or embedding is unavailable, the
+    order is exactly what it was before this call.
     """
+
+    if store is not None and space_id is not None and hypotheses:
+        hypotheses = await similarity_priority_order(
+            store, space_id, "hypothesis", hypotheses, lambda item: item.id,
+            "\n".join(memory.content for memory in memories),
+            embedding_client_getter=embedding_client_getter or (lambda: None),
+            instruction=settings.prompts.embedding_hypothesis_dedup_instruction,
+            timeout=embedding_query_timeout_seconds,
+        )
 
     bounded_inferred, bounded_hypotheses = _bounded_comparisons(
         transport, settings, system_prompt, target, inferred_memories, hypotheses,

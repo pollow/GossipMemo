@@ -81,6 +81,13 @@ class PromptLibrary:
     embedding_extraction_comparison_instruction: str = (
         defaults.EMBEDDING_EXTRACTION_COMPARISON_INSTRUCTION
     )
+    embedding_hypothesis_dedup_instruction: str = defaults.EMBEDDING_HYPOTHESIS_DEDUP_INSTRUCTION
+    embedding_learning_goal_dedup_instruction: str = (
+        defaults.EMBEDDING_LEARNING_GOAL_DEDUP_INSTRUCTION
+    )
+    embedding_coverage_entry_dedup_instruction: str = (
+        defaults.EMBEDDING_COVERAGE_ENTRY_DEDUP_INSTRUCTION
+    )
 
     @classmethod
     def from_file(cls, path: Path) -> PromptLibrary:
