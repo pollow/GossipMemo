@@ -95,8 +95,6 @@ does not call an LLM.
 - 保留“可能”“据说”“我猜”等不确定性。
 - 识别明确的人物身份和关系表达。
 
-服务端通过 `GOSSIPMEMO_EXTRACTION_POLICY` 选择 `conservative`、`balanced` 或 `comprehensive` extraction policy，整个 extraction batch 使用同一策略；默认 `balanced`。
-
 Extraction 可以理解语言中的隐含语义，但不做跨历史的长期归纳。例如：
 
 ```text

@@ -221,14 +221,14 @@ class LlmTransport(Protocol):
     `context_budget` with no drift between what was measured and what goes
     out, and `structured` needs no access to adapter internals.
 
-    Two members are not about transport at all: `user_name` and
-    `extraction_policy` are server configuration that reasoner prompts
-    need, and this is the only object a reasoner is handed today, so they
-    arrived here as the alternative to reaching past the protocol. They
-    would sit more naturally on the reasoner factories, which would mean
-    threading `Settings` into `SocialMemoryWorld` -- a call worth making
-    deliberately rather than as a side effect of the split. Until then,
-    a transport double must supply both.
+    One member is not about transport at all: `user_name` is server
+    configuration that reasoner prompts need, and this is the only object
+    a reasoner is handed today, so it arrived here as the alternative to
+    reaching past the protocol. It would sit more naturally on the
+    reasoner factories, which would mean threading `Settings` into
+    `SocialMemoryWorld` -- a call worth making deliberately rather than
+    as a side effect of the split. Until then, a transport double must
+    supply it.
     """
 
     @property
@@ -245,9 +245,6 @@ class LlmTransport(Protocol):
 
     @property
     def user_name(self) -> str: ...
-
-    @property
-    def extraction_policy(self) -> str: ...
 
     def prepare(
         self, messages: Sequence[ChatMessage], *, structured: bool

@@ -30,7 +30,6 @@ class _NoopModel:
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
-    extraction_policy = "balanced"
 
     async def aclose(self):
         return None

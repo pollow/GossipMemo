@@ -65,7 +65,6 @@ natural-language field, including new display names; keep IDs and enum values un
 
 def extraction_prompt(
     messages: list[ModelMessage],
-    policy: str = "balanced",
     context: list[ModelMessage] | tuple[ModelMessage, ...] = (),
     known_people: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
     user_name: str = "CurrentUser",
@@ -73,29 +72,13 @@ def extraction_prompt(
 ) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`."""
 
-    policy_text = {
-        "conservative": (
-            "Keep only explicit, durable facts and meaningful events; skip "
-            "isolated transient details such as 'today I had coffee'."
-        ),
-        "balanced": (
-            "Keep explicit durable information and a transient detail only when "
-            "it affects an ongoing situation or helps reveal a recurring pattern."
-        ),
-        "comprehensive": (
-            "Keep explicit information plus relevant short-lived events as dated "
-            "evidence, including isolated details that may reveal a later pattern."
-        ),
-    }
-    if policy not in policy_text:
-        raise ValueError(f"unknown extraction policy: {policy}")
     evidence_messages = [message for message in messages if message.author == "user"]
     assistant_messages = [
         message for message in messages if message.author == "assistant"
     ]
     return (
-        f"Use the server's {policy} extraction policy for the whole batch.\n"
-        f"{policy_text[policy]}\n"
+        "Keep explicit durable information and a transient detail only when "
+        "it affects an ongoing situation or helps reveal a recurring pattern.\n"
         f"The fixed current user is named {user_name!r}. Use that name when referring "
         "to the current user; the current user is not a Person. User-authored "
         "messages in the current batch are the only evidence allowed to create "
@@ -172,8 +155,8 @@ async def _extract(
             ChatMessage(
                 role="user",
                 content=extraction_prompt(
-                    list(messages), transport.extraction_policy, list(context),
-                    list(known_people), transport.user_name, list(comparison_memories),
+                    list(messages), list(context), list(known_people),
+                    transport.user_name, list(comparison_memories),
                 ),
             ),
         ],

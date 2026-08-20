@@ -110,7 +110,6 @@ def test_import_drains_partial_batch_refreshes_projections_and_is_idempotent(
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
-        extraction_policy = "balanced"
 
         def __init__(self):
             self.extractions = 0

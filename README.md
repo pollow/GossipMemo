@@ -52,9 +52,7 @@ immutable `Settings` value.
 Extraction batches wait for 6 messages by default. A partial batch is flushed
 when its oldest message has waited 30 minutes. These values can be changed with
 `GOSSIPMEMO_EXTRACTION_BATCH_SIZE` and
-`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`. The server applies one global
-`GOSSIPMEMO_EXTRACTION_POLICY` (`conservative`, `balanced`, or `comprehensive`)
-to every extraction batch; the default is `balanced`.
+`GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS`.
 
 Transient LLM failures (`408`, `429`, `5xx`, and transport errors) are retried
 with jittered exponential backoff. Configure the retry count, initial delay,

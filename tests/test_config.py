@@ -34,7 +34,6 @@ def test_global_settings_are_loaded_from_environment_once(monkeypatch, tmp_path)
     monkeypatch.setenv("GOSSIPMEMO_LLM_API_KEY", "secret")
     monkeypatch.setenv("GOSSIPMEMO_LLM_MODEL", "model-a")
     monkeypatch.setenv("GOSSIPMEMO_DATABASE_PATH", str(tmp_path / "world.db"))
-    monkeypatch.setenv("GOSSIPMEMO_EXTRACTION_POLICY", "comprehensive")
     monkeypatch.setenv("GOSSIPMEMO_LLM_MAX_RETRIES", "7")
     monkeypatch.setenv("GOSSIPMEMO_LLM_RETRY_BASE_SECONDS", "2.5")
     monkeypatch.setenv("GOSSIPMEMO_LLM_RETRY_MAX_SECONDS", "45")
@@ -47,7 +46,6 @@ def test_global_settings_are_loaded_from_environment_once(monkeypatch, tmp_path)
     assert second.llm_base_url == "http://model.test/v1"
     assert second.llm_model == "model-a"
     assert second.database_path == tmp_path / "world.db"
-    assert second.extraction_policy == "comprehensive"
     assert second.user_name == "CurrentUser"
     assert second.llm_max_retries == 7
     assert second.llm_retry_base_seconds == 2.5
@@ -76,16 +74,6 @@ def test_settings_reject_empty_llm_values():
             llm_base_url="http://model.test/v1",
             llm_api_key="",
             llm_model="model-a",
-        )
-
-
-def test_settings_reject_invalid_extraction_policy():
-    with pytest.raises(ConfigurationError, match="extraction_policy"):
-        Settings(
-            llm_base_url="http://model.test/v1",
-            llm_api_key="secret",
-            llm_model="model-a",
-            extraction_policy="aggressive",  # type: ignore[arg-type]
         )
 
 

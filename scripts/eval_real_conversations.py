@@ -383,7 +383,6 @@ async def main() -> int:
     report: dict[str, Any] = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "model": settings.llm_model,
-        "extraction_policy": settings.extraction_policy,
         "fixture_counts": {
             number: len(fixture.messages) for number, fixture in fixtures.items()
         },

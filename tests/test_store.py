@@ -600,7 +600,6 @@ def test_recall_memories_route_is_protected_llm_free_and_caps_limit(store):
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
-        extraction_policy = "balanced"
 
         async def aclose(self):
             return None
@@ -689,7 +688,6 @@ def test_fastapi_lifespan_ingest_wait_and_query(store):
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
-        extraction_policy = "balanced"
 
         async def aclose(self):
             return None
@@ -1909,7 +1907,6 @@ def test_guidance_route_is_protected_llm_free_supports_filters_and_caps_limit(st
         context_budget = ContextBudget()
         retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
         user_name = "CurrentUser"
-        extraction_policy = "balanced"
 
         async def aclose(self):
             return None

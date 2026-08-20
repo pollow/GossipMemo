@@ -66,7 +66,6 @@ class FakeModel:
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
-    extraction_policy = "balanced"
 
     async def aclose(self):
         return None
@@ -682,7 +681,7 @@ def test_openai_compatible_adapter_validates_structured_output():
         assert request.url.path == "/v1/chat/completions"
         payload = json.loads(request.content)
         assert payload["response_format"] == {"type": "json_object"}
-        assert ("server's balanced extraction policy for the whole batch"
+        assert ("Keep explicit durable information and a transient detail only when"
                 in payload["messages"][1]["content"])
         return httpx.Response(
             200,

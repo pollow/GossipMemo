@@ -84,7 +84,6 @@ class _ContinuityModel:
     context_budget = ContextBudget()
     retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
     user_name = "CurrentUser"
-    extraction_policy = "balanced"
 
     def __init__(self):
         self.calls = 0

@@ -28,15 +28,13 @@ def message(
     )
 
 
-def test_extraction_prompt_applies_batch_policy_and_dates():
-    prompt = extraction_prompt(
-        [
-            message("m-conservative"),
-            message("m-comprehensive"),
-        ], "comprehensive"
-    )
+def test_extraction_prompt_states_retention_rule_and_dates():
+    prompt = extraction_prompt([message("m-1"), message("m-2")])
 
-    assert "server's comprehensive extraction policy for the whole batch" in prompt
+    assert (
+        "Keep explicit durable information and a transient detail only when "
+        "it affects an ongoing situation or helps reveal a recurring pattern."
+    ) in prompt
     assert "occurred_at" in EXTRACTION_SYSTEM_PROMPT
     assert "never use an inferred basis for extraction" in " ".join(
         EXTRACTION_SYSTEM_PROMPT.split()
