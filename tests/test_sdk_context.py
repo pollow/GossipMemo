@@ -201,3 +201,42 @@ def test_hermes_formats_context_and_reuses_key_for_slow_turn():
     finally:
         release.set()
         provider.shutdown()
+
+
+def _goal_knob_handler(request: httpx.Request) -> httpx.Response:
+    if request.url.path.endswith("/context"):
+        params = dict(request.url.params)
+        assert params == {"goals": "0", "goal_seed": "conv-1"}
+        return httpx.Response(200, json={"version": "v1", "people": []})
+    assert request.url.path.endswith("/turns")
+    payload = request.read()
+    assert b'"goals":2' in payload
+    assert b'"goal_seed":"conv-1"' in payload
+    return httpx.Response(202, json={"status": "accepted", "message_ids": ["m"]})
+
+
+def test_goal_knobs_ride_along_on_context_and_turn_in_both_clients():
+    client = GossipMemo(
+        "http://test", client=httpx.Client(transport=httpx.MockTransport(_goal_knob_handler)))
+    assert client.context(goals=0, goal_seed="conv-1")["version"] == "v1"
+    assert client.turn("hi", goals=2, goal_seed="conv-1")["message_ids"] == ["m"]
+    # Defaults must not put either knob on the wire at all.
+    assert client._context_call() == ("GET", client._space_path("context"), None)
+    assert "goals" not in client.prepare_turn("hi")
+    try:
+        client.prepare_turn("hi", goals=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("a negative goal count must be rejected client-side")
+
+    async def scenario():
+        async with AsyncGossipMemo(
+            "http://test",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(_goal_knob_handler)),
+        ) as async_client:
+            assert (await async_client.context(goals=0, goal_seed="conv-1"))["version"] == "v1"
+            assert (await async_client.turn(
+                "hi", goals=2, goal_seed="conv-1"))["message_ids"] == ["m"]
+
+    asyncio.run(scenario())

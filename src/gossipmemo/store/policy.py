@@ -156,21 +156,39 @@ def rank_guidance(
 
 
 def sample_learning_goals(
-    goals: list[GuidanceItem], version: str, minimum: int, maximum: int
+    goals: list[GuidanceItem], seed_text: str, minimum: int, maximum: int,
+    count: int | None = None,
 ) -> list[GuidanceItem]:
     """Draw a deterministic sample of learning goals.
 
-    The sample is a function of the context bundle `version` and the
-    candidate pool: a local RNG is seeded from a hash of the two, so
-    identical version + identical pool always produce the identical
-    selection. This keeps the sample stable across repeated reads
-    (KV-cache-friendly for the agent-side prompt prefix) while still
-    rotating whenever the durable context or the pool actually changes.
+    The sample is a function of `seed_text` and the candidate pool: a local
+    RNG is seeded from a hash of the two, so identical seed + identical pool
+    always produce the identical selection. The pool ids stay in the seed
+    whatever the caller passes, so adding or answering a goal still rotates
+    the draw.
+
+    `seed_text` defaults, at the call sites, to the context bundle version,
+    which keeps the sample stable across repeated reads (KV-cache-friendly
+    for the agent-side prompt prefix) while rotating whenever the durable
+    context changes. That coupling is the problem a caller can now opt out
+    of: the version bumps on *any* durable context change, so with a pool
+    much larger than the sample the goals in the prompt reshuffle for
+    reasons unrelated to the conversation. A caller that knows better --
+    pinning per conversation, per day, or deliberately rotating -- passes
+    its own `seed_text`.
+
+    `count` is the sample size. `None` keeps the historical behavior, a
+    random `randint(minimum, maximum)` draw; `0` samples nothing; `n > 0`
+    draws exactly `min(n, len(goals))`. A negative `count` is a caller bug,
+    not a request for the random window, and raises `ValueError` rather
+    than falling through to it.
     """
 
+    if count is not None and count < 0:
+        raise ValueError("count must be None or non-negative")
     pool_ids = sorted(item.id for item in goals)
     seed = int(hashlib.sha256(
-        f"{version}|{','.join(pool_ids)}".encode()).hexdigest()[:16], 16)
+        f"{seed_text}|{','.join(pool_ids)}".encode()).hexdigest()[:16], 16)
     goal_rng = random.Random(seed)
-    sample_size = min(len(goals), goal_rng.randint(minimum, maximum))
-    return goal_rng.sample(goals, sample_size)
+    requested = goal_rng.randint(minimum, maximum) if count is None else count
+    return goal_rng.sample(goals, min(len(goals), requested))

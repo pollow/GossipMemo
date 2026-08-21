@@ -6,6 +6,8 @@ through SQL fixtures. They are exercised here on their own terms.
 
 from __future__ import annotations
 
+import pytest
+
 from gossipmemo.models import GuidanceItem
 from gossipmemo.store.policy import (
     RRF_K,
@@ -166,6 +168,28 @@ def test_changing_the_version_or_the_pool_rotates_the_sample():
     assert [item.id for item in sample_learning_goals(pool, "version-b", 3, 5)] != base
     grown = pool + [_goal("g_99")]
     assert [item.id for item in sample_learning_goals(grown, "version-a", 3, 5)] != base
+
+
+def test_an_explicit_count_replaces_the_random_window():
+    pool = _pool(12)
+    assert sample_learning_goals(pool, "v1", 3, 5, 0) == []
+    assert len(sample_learning_goals(pool, "v1", 3, 5, 7)) == 7
+    assert len(sample_learning_goals(_pool(2), "v1", 3, 5, 7)) == 2
+
+
+def test_a_negative_count_is_a_bug_not_a_request_for_the_random_window():
+    with pytest.raises(ValueError):
+        sample_learning_goals(_pool(12), "v1", 3, 5, -1)
+
+
+def test_a_pinned_seed_text_holds_the_sample_across_a_changing_version():
+    """The anti-jitter property: the caller's seed, not the version, decides."""
+    pool = _pool(12)
+    pinned = [item.id for item in sample_learning_goals(pool, "conversation-7", 3, 5)]
+    assert [item.id for item in sample_learning_goals(pool, "conversation-7", 3, 5)] == pinned
+    assert [item.id for item in sample_learning_goals(pool, "conversation-8", 3, 5)] != pinned
+    grown = pool + [_goal("g_99")]
+    assert [item.id for item in sample_learning_goals(grown, "conversation-7", 3, 5)] != pinned
 
 
 # --- reciprocal_rank_fusion --------------------------------------------

@@ -50,6 +50,11 @@ class TurnRequest(BaseModel):
     messages: list[MessageInput] = Field(min_length=1, max_length=100)
     context_version: str | None = None
     memory_limit: int = Field(default=5, ge=1, le=10)
+    # Learning-goal sampling knobs, both defaulting to the historical
+    # behavior: a random 3-5 goals seeded from the context version. See
+    # `SqliteWorldStore._guidance`.
+    goals: int | None = Field(default=None, ge=0, le=200)
+    goal_seed: str | None = None
 
 
 class TurnResponse(BaseModel):

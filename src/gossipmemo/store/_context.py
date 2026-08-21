@@ -107,6 +107,8 @@ class _ContextMixin(_ContinuityMixin):
         query: str = "",
         *,
         version: str,
+        goals: int | None = None,
+        goal_seed: str | None = None,
     ) -> GuidanceBundle:
         """Return a bounded set; coverage itself never leaves this method.
 
@@ -121,9 +123,23 @@ class _ContextMixin(_ContinuityMixin):
         pool is what makes the sample useful, and that is the planner's job
         (it fans out per coverage root).
 
-        The sample is a deterministic function of the context bundle
-        `version` and the candidate pool; see
-        `policy.sample_learning_goals`.
+        The sample is a deterministic function of a seed string and the
+        candidate pool; see `policy.sample_learning_goals`. The seed
+        defaults to the context bundle `version`, which is stable for as
+        long as the durable context is -- but no longer: a version bump
+        reshuffles the whole draw, so with a pool much larger than the
+        sample the goals in the prompt churn for reasons the conversation
+        cannot explain, and the agent's prompt prefix churns with them.
+
+        Only the caller knows the conversation's actual needs, so it can
+        override both halves. `goal_seed` replaces `version` in the seed
+        (pin it per conversation or per day to hold the sample still across
+        version bumps, or rotate it deliberately); the pool ids stay in the
+        seed either way, so adding or answering a goal still changes the
+        draw. `goals` fixes the sample size: `0` for hypotheses only, `n`
+        for exactly `min(n, len(pool))`. Both default to `None`, which is
+        exactly the behavior described above. This is also the seam a
+        continuity-based selection would replace the seeded draw at.
         """
         person_ids = tuple(dict.fromkeys(activated_person_ids))
         rows = self._open_hypothesis_rows(connection, space_id, person_ids)
@@ -132,13 +148,14 @@ class _ContextMixin(_ContinuityMixin):
             owner_kind=row['owner_kind'], owner_id=row['owner_id'], status=row['status'],
             confidence=row['confidence']) for row in rows]
         updated = {row['id']: row['updated_at'] for row in rows}
-        goals = self._open_learning_goal_rows(connection, space_id, person_ids)
+        goal_rows = self._open_learning_goal_rows(connection, space_id, person_ids)
         learning_goals = [GuidanceItem(id=row['id'], kind='learning_goal', content=row['prompt'],
                                        owner_kind=row['focus_kind'], owner_id=row['focus_id'],
-                                       status=row['status']) for row in goals]
+                                       status=row['status']) for row in goal_rows]
         selected = rank_guidance(hypotheses, updated, query)[:1]
         selected.extend(sample_learning_goals(
-            learning_goals, version, self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX))
+            learning_goals, version if goal_seed is None else goal_seed,
+            self.GUIDANCE_GOAL_MIN, self.GUIDANCE_GOAL_MAX, goals))
         selected.sort(key=lambda item: (item.kind, item.id))
         return GuidanceBundle(items=selected)
 
@@ -225,10 +242,17 @@ class _ContextMixin(_ContinuityMixin):
                 ) for row in rows)
         return items[:capped]
 
-    def context_bundle(self, space_id: str) -> ContextBundle:
+    def context_bundle(
+        self, space_id: str, *, goals: int | None = None, goal_seed: str | None = None,
+    ) -> ContextBundle:
+        """The passive bundle.
+
+        `goals` and `goal_seed` steer the learning-goal draw; see `_guidance`.
+        """
         with self._connect() as connection:
             user_view, continuity, people, version = self._context_state(connection, space_id)
-            guidance = self._guidance(connection, space_id, version=version)
+            guidance = self._guidance(
+                connection, space_id, version=version, goals=goals, goal_seed=goal_seed)
             return ContextBundle(
                 version=version, user_model=user_view, continuity=continuity,
                 people=people, guidance=guidance)
@@ -236,6 +260,9 @@ class _ContextMixin(_ContinuityMixin):
     def turn_view(
         self, space_id: str, text: str, memory_limit: int, known_version: str | None,
         query_vector: Sequence[float] | None = None,
+        *,
+        goals: int | None = None,
+        goal_seed: str | None = None,
     ) -> TurnView:
         """One connection, one `_context_state` call, for the whole turn read path.
 
@@ -258,7 +285,11 @@ class _ContextMixin(_ContinuityMixin):
         Guidance sampling is deliberately derived from the exact same
         `version` the (possibly returned) `ContextBundle` uses -- see
         `_guidance`'s docstring -- which holds because both come from the
-        single `_context_state` call below.
+        single `_context_state` call below. `goals` and `goal_seed` are
+        forwarded to both of those `_guidance` calls for the same reason:
+        a turn-derived bundle must be sampled exactly like the one
+        `context_bundle` would return for the same knobs, or the two read
+        paths disagree about what the caller pinned.
         """
         known_people: list[PersonView] = []
         memory_recall: list[MemoryView] = []
@@ -281,6 +312,7 @@ class _ContextMixin(_ContinuityMixin):
                 guidance = self._guidance(
                     connection, space_id,
                     [person.id for person in known_people], text, version=version,
+                    goals=goals, goal_seed=goal_seed,
                 )
                 guided = True
             except TURN_READ_ERRORS:
@@ -297,7 +329,9 @@ class _ContextMixin(_ContinuityMixin):
                 try:
                     user_view, continuity, people, version = state
                     if version != known_version:
-                        generic_guidance = self._guidance(connection, space_id, version=version)
+                        generic_guidance = self._guidance(
+                            connection, space_id, version=version,
+                            goals=goals, goal_seed=goal_seed)
                         context_update = ContextBundle(
                             version=version, user_model=user_view, continuity=continuity,
                             people=people, guidance=generic_guidance,

@@ -385,7 +385,7 @@ class SocialMemoryWorld:
             )
             view = self.store.turn_view(
                 space_id, last_message.content, request.memory_limit, request.context_version,
-                query_vector,
+                query_vector, goals=request.goals, goal_seed=request.goal_seed,
             )
         logger.info("turn_completed", extra={
             "space_id": space_id,

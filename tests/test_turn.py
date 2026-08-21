@@ -307,3 +307,54 @@ def test_turn_guidance_is_activated_and_generic_version_is_stable(tmp_path: Path
     before = store.context_bundle("s").version
     asyncio.run(scenario())
     assert store.context_bundle("s").version == before
+
+
+def test_goal_knobs_are_accepted_on_both_read_paths_and_reject_a_negative_count(tmp_path: Path):
+    """`GET /context` and `POST /turns` must honor the same knobs, or they disagree."""
+    async def scenario():
+        store = SqliteWorldStore(tmp_path / "goal-knobs.db")
+        store.initialize()
+        store.ensure_space("s")
+        with store._connect() as connection:
+            for index in range(10):
+                connection.execute(
+                    "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
+                    "created_at,updated_at) VALUES (?,'s',?,'context','[]','1','1')",
+                    (f"g{index:02d}", f"goal {index}"),
+                )
+        world = SocialMemoryWorld(store, _NoopModel(), extraction_batch_size=100)
+        app = create_app(
+            Settings(database_path=store.path, llm_base_url="http://llm.test/v1",
+                     llm_api_key="key", llm_model="model"),
+            world,
+        )
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                pinned = await client.get(
+                    "/v1/spaces/s/context", params={"goals": 3, "goal_seed": "conv-1"})
+                assert pinned.status_code == 200
+                selection = [item["id"] for item in pinned.json()["guidance"]["items"]]
+                assert len(selection) == 3
+
+                none_at_all = await client.get("/v1/spaces/s/context", params={"goals": 0})
+                assert none_at_all.json()["guidance"]["items"] == []
+
+                negative = await client.get("/v1/spaces/s/context", params={"goals": -1})
+                assert negative.status_code == 422
+
+                turn = await client.post(
+                    "/v1/spaces/s/turns",
+                    json={"messages": [{"author": "user", "content": "hi"}],
+                          "goals": 3, "goal_seed": "conv-1"},
+                )
+                assert turn.status_code == 202
+                assert [item["id"] for item in turn.json()["guidance"]["items"]] == selection
+
+                bad_turn = await client.post(
+                    "/v1/spaces/s/turns",
+                    json={"messages": [{"author": "user", "content": "hi"}], "goals": -1},
+                )
+                assert bad_turn.status_code == 422
+
+    asyncio.run(scenario())

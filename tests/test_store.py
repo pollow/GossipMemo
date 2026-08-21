@@ -1889,6 +1889,56 @@ def test_guidance_rotates_when_the_version_changes(tmp_path):
         item.id for item in before.guidance.items]
 
 
+def test_a_pinned_goal_seed_survives_a_version_bump(tmp_path):
+    """The knob exists because the version bumps for reasons goals do not care about."""
+    world = _seeded_store(tmp_path, 4, goal_count=30)
+    before = world.context_bundle("s", goal_seed="conversation-7")
+    world.overwrite_user_model("s", {"note": "mutated"})
+    after = world.context_bundle("s", goal_seed="conversation-7")
+    assert after.version != before.version
+    assert [item.id for item in after.guidance.items] == [
+        item.id for item in before.guidance.items]
+    rotated = world.context_bundle("s", goal_seed="conversation-8")
+    assert [item.id for item in rotated.guidance.items] != [
+        item.id for item in before.guidance.items]
+
+
+def test_a_pinned_goal_seed_still_rotates_when_the_pool_changes(tmp_path):
+    """Pinning holds the version out of the seed, not the pool."""
+    world = _seeded_store(tmp_path, 5, goal_count=30)
+    before = [item.id for item in world.context_bundle("s", goal_seed="pinned").guidance.items]
+    with world._connect() as connection:
+        connection.execute(
+            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
+            "created_at,updated_at) VALUES ('g99','s','one more','context','[]','1','1')")
+    after = [item.id for item in world.context_bundle("s", goal_seed="pinned").guidance.items]
+    assert after != before
+
+
+def test_zero_goals_leaves_the_hypothesis_in_the_bundle(tmp_path):
+    world = _seeded_store(tmp_path, 6, goal_count=30)
+    _insert_hypothesis(world, "h1", "s", "user", None, "User likes tea.")
+    bundle = world.context_bundle("s", goals=0)
+    assert [item.id for item in bundle.guidance.items] == ["h1"]
+
+
+def test_an_explicit_goal_count_is_exact_and_capped_by_the_pool(tmp_path):
+    large = _seeded_store(tmp_path, 7, goal_count=30)
+    assert len(large.context_bundle("s", goals=8).guidance.items) == 8
+    small = _seeded_store(tmp_path, 8, goal_count=2)
+    assert len(small.context_bundle("s", goals=8).guidance.items) == 2
+
+
+def test_the_default_bundle_is_unchanged_by_the_new_knobs(tmp_path):
+    """Passing neither knob must reproduce the pre-change selection exactly."""
+    world = _seeded_store(tmp_path, 9, goal_count=30)
+    default = [item.id for item in world.context_bundle("s").guidance.items]
+    explicit = [item.id for item in world.context_bundle(
+        "s", goal_seed=world.context_bundle("s").version).guidance.items]
+    assert explicit == default
+    assert 3 <= len(default) <= 5
+
+
 def test_guidance_route_is_protected_llm_free_supports_filters_and_caps_limit(store):
     pytest.importorskip("fastapi")
     httpx = pytest.importorskip("httpx")

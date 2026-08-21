@@ -181,8 +181,16 @@ def create_app(
         return await world.query(space_id, request)
 
     @app.get("/v1/spaces/{space_id}/context", dependencies=protected)
-    async def context_bundle(space_id: str) -> dict:
-        return world.store.context_bundle(space_id).model_dump()
+    async def context_bundle(
+        space_id: str,
+        goals: int | None = None,
+        goal_seed: str | None = None,
+    ) -> dict:
+        if goals is not None and goals < 0:
+            raise HTTPException(status_code=422, detail="goals must be zero or greater")
+        capped_goals = None if goals is None else min(goals, 200)
+        return world.store.context_bundle(
+            space_id, goals=capped_goals, goal_seed=goal_seed).model_dump()
 
     @app.get(
         "/v1/spaces/{space_id}/guidance",

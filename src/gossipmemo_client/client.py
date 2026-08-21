@@ -116,6 +116,31 @@ def _normalise_turn_messages(
     ]
 
 
+def _validate_goals(goals: int | None) -> None:
+    """Reject a negative or non-integer learning-goal count before the round trip.
+
+    `None` means "let the server draw its usual random three to five", so a
+    negative count is a caller bug rather than a way to ask for that.
+    """
+
+    if goals is None:
+        return
+    if not isinstance(goals, int) or isinstance(goals, bool) or goals < 0:
+        raise ValueError("goals must be a non-negative integer or None")
+
+
+def _goal_params(goals: int | None, goal_seed: str | None) -> list[tuple[str, str]]:
+    """Query parameters for the learning-goal knobs; empty when both are defaults."""
+
+    _validate_goals(goals)
+    params: list[tuple[str, str]] = []
+    if goals is not None:
+        params.append(("goals", str(goals)))
+    if goal_seed is not None:
+        params.append(("goal_seed", goal_seed))
+    return params
+
+
 def _response_detail(response: httpx.Response) -> str:
     """Get a useful, bounded error detail from a JSON or text response."""
 
@@ -214,10 +239,19 @@ class _ClientCommon:
 
         return "GET", "/health", None
 
-    def _context_call(self) -> Call:
-        """The latest context bundle, read without synthesizing an answer."""
+    def _context_call(
+        self, *, goals: int | None = None, goal_seed: str | None = None,
+    ) -> Call:
+        """The latest context bundle, read without synthesizing an answer.
 
-        return "GET", self._space_path("context"), None
+        `goals` and `goal_seed` steer the server's learning-goal sample; both
+        default to the server's own behavior (a random three to five goals,
+        seeded from the bundle version). See `prepare_turn`.
+        """
+
+        params = _goal_params(goals, goal_seed)
+        path = self._space_path("context")
+        return "GET", f"{path}?{urlencode(params)}" if params else path, None
 
     def prepare_turn(
         self,
@@ -227,6 +261,8 @@ class _ClientCommon:
         memory_limit: int = 5,
         source: Any = None,
         idempotency_key: str | None = None,
+        goals: int | None = None,
+        goal_seed: str | None = None,
     ) -> Json:
         """Build a validated turns payload from one message or a list of them.
 
@@ -234,18 +270,32 @@ class _ClientCommon:
         defaults to ``user``), matching the server's single write endpoint: a
         batch whose last message is not from the user is persisted without
         context/recall enrichment.
+
+        `goals` and `goal_seed` steer the learning-goal sample in the
+        returned guidance and context bundle. Both default to `None`, the
+        server's historical behavior: a random three to five goals, seeded
+        from the context bundle version -- which means they reshuffle on
+        every version bump. Pass `goals=0` for hypotheses only, `goals=n`
+        for exactly n, and a stable `goal_seed` (per conversation, per day)
+        to hold the selection still across version bumps.
         """
         if (not isinstance(memory_limit, int) or isinstance(memory_limit, bool)
                 or not 1 <= memory_limit <= 10):
             raise ValueError("memory_limit must be between 1 and 10")
         if context_version is not None and not str(context_version).strip():
             raise ValueError("context_version must be non-empty when provided")
-        return {
+        _validate_goals(goals)
+        payload: Json = {
             "messages": _normalise_turn_messages(
                 message, source=source, idempotency_key=idempotency_key),
             "context_version": context_version,
             "memory_limit": memory_limit,
         }
+        if goals is not None:
+            payload["goals"] = goals
+        if goal_seed is not None:
+            payload["goal_seed"] = goal_seed
+        return payload
 
     def _turn_call(self, message: Any, **kwargs: Any) -> Call:
         """Persist a turn batch and read back context/recall metadata."""
@@ -489,13 +539,18 @@ class GossipMemo(_ClientCommon):
 
         return self._request(*self._health_call())
 
-    def context(self) -> Any:
+    def context(
+        self, *, goals: int | None = None, goal_seed: str | None = None,
+    ) -> Any:
         """Read the latest context bundle without synthesizing an answer."""
 
-        return self._request(*self._context_call())
+        return self._request(*self._context_call(goals=goals, goal_seed=goal_seed))
 
     def turn(self, message: Any, **kwargs: Any) -> Any:
-        """Persist one turn batch and return context/recall metadata."""
+        """Persist one turn batch and return context/recall metadata.
+
+        Accepts `prepare_turn`'s keywords, including `goals`/`goal_seed`.
+        """
 
         return self._request(*self._turn_call(message, **kwargs))
 
@@ -688,13 +743,18 @@ class AsyncGossipMemo(_ClientCommon):
 
         return await self._request(*self._health_call())
 
-    async def context(self) -> Any:
+    async def context(
+        self, *, goals: int | None = None, goal_seed: str | None = None,
+    ) -> Any:
         """Read the latest context bundle without synthesizing an answer."""
 
-        return await self._request(*self._context_call())
+        return await self._request(*self._context_call(goals=goals, goal_seed=goal_seed))
 
     async def turn(self, message: Any, **kwargs: Any) -> Any:
-        """Persist one turn batch and return context/recall metadata."""
+        """Persist one turn batch and return context/recall metadata.
+
+        Accepts `prepare_turn`'s keywords, including `goals`/`goal_seed`.
+        """
 
         return await self._request(*self._turn_call(message, **kwargs))
 

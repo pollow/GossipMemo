@@ -420,6 +420,18 @@ Because goals are sampled fresh on every read, `guidance` is deliberately
 excluded from `version`: the version tracks the durable context state, so a
 warm caller is not invalidated every turn.
 
+By default the goal sample is seeded from that `version`, which means it
+reshuffles whenever *any* durable context changes — unrelated to the
+conversation, and it churns the agent's prompt prefix. Both the context read
+and `turns` therefore accept two optional knobs: `goals`, the sample size
+(`0` for hypotheses only, `n` for exactly `min(n, pool)`, omitted for the
+random three to five), and `goal_seed`, a caller-chosen seed used instead of
+the version — pin it per conversation or per day to hold the selection still,
+or rotate it deliberately. The goal pool stays in the seed either way, so
+adding or answering a goal still changes the draw. A negative `goals` is
+rejected with 422. Omitting both is exactly the behavior described above.
+`GET /v1/spaces/{space_id}/guidance` remains the unsampled escape hatch.
+
 An empty bundle is a valid cold-start result. The current session's raw messages
 carry continuity while long-term memory accumulates.
 
