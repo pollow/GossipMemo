@@ -79,6 +79,22 @@ preserve) an `X-Request-ID`; logs include only request metadata, identifiers,
 counts, status, and durations—not message bodies, bearer tokens, or LLM API
 keys.
 
+Set `GOSSIPMEMO_EXTRACTION_CLARIFICATION_PROBE` (accepts `1`/`true`/`yes`/`on`,
+default off) to have extraction additionally report questions it would have
+to ask the user before it can correctly interpret current evidence -- the
+motivating case is an unresolved reference to a concrete person. The probe is
+observation-only: nothing it reports is stored anywhere, and nothing reaches
+the agent or changes what extraction retains. Each clarification is written
+individually to the structured log as an `extraction_clarification` event
+with `space_id`, `batch_id`, `question_text`, `reason_text`, `blocked_by`, and
+`evidence_message_ids`; `extraction_completed` gains a `clarification_count`
+field so there is a denominator. These log lines are the only copy of this
+data -- ordinary log rotation destroys them, so an operator collecting this
+data must export or retain the log stream themselves. Turning the probe on
+means raw personal data leaves the database and enters the log stream:
+`question_text` and `reason_text` quote the user's own words and third-party
+names verbatim.
+
 The static prompt text ships in `src/gossipmemo/prompts/defaults.py`: the
 system prompts, the coverage rubric tables, and the instruction paragraphs the
 prompt builders assemble around rendered data. To change any of it without

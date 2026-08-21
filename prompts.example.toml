@@ -43,6 +43,7 @@ claim that anything was saved. Answer in the language of the question.
 # extraction_time_bound_rule = "..."
 # extraction_known_people_rule = "..."
 # extraction_comparison_rule = "..."
+# extraction_clarification_rule = "..."
 # owner_evidence_scope_rule = "..."
 # owner_evidence_digest_rule = "..."
 # continuity_rebuild_rule = "..."
