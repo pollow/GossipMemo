@@ -417,7 +417,7 @@ class _ClientCommon:
         kind: str | None = None,
         limit: int = 50,
     ) -> Call:
-        """Open hypotheses and open learning goals, shuffled on every call.
+        """Open hypotheses and open/partial learning goals, shuffled on every call.
 
         Unlike the small sample riding along in `context()`/`turn()`
         (deliberately KV-cache-friendly), this returns everything matching
@@ -644,7 +644,7 @@ class GossipMemo(_ClientCommon):
         kind: str | None = None,
         limit: int = 50,
     ) -> Any:
-        """Open hypotheses and open learning goals, shuffled on every call."""
+        """Open hypotheses and open/partial learning goals, shuffled on every call."""
 
         return self._request(*self._guidance_call(
             person_ids=person_ids, kind=kind, limit=limit))
@@ -848,7 +848,7 @@ class AsyncGossipMemo(_ClientCommon):
         kind: str | None = None,
         limit: int = 50,
     ) -> Any:
-        """Open hypotheses and open learning goals, shuffled on every call."""
+        """Open hypotheses and open/partial learning goals, shuffled on every call."""
 
         return await self._request(*self._guidance_call(
             person_ids=person_ids, kind=kind, limit=limit))

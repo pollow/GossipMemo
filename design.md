@@ -73,10 +73,8 @@ Memory
   └─ coverage audit (per root) → CoverageEntries → goal planning (per root)
 
 Context/turn reads select at most one open Hypothesis deterministically and
-sample three to five open LearningGoals at random; the request path does not
-call an LLM. `partial` goals are excluded everywhere an agent can see them:
-the goal already drew an answer, so re-offering it just circles the same
-ground.
+sample three to five open/partial LearningGoals at random; the request path
+does not call an LLM.
 ```
 
 ### 3.1 Retain
@@ -361,8 +359,8 @@ POST /v1/spaces/{space_id}/turns
 ```
 
 Context 返回带稳定 version 的 compact UserModel、rolling continuity、continuity-related
-Person cards，以及最多一条 user-owned open Hypothesis 和随机 3–5 条 open
-LearningGoal（`partial` 不再出现在任何 agent 可见的路径上）。Turn（见 5.1）先持久化整批 Message，当批次最后一条消息来自 user 时，
+Person cards，以及最多一条 user-owned open Hypothesis 和随机 3–5 条 open/partial
+LearningGoal。Turn（见 5.1）先持久化整批 Message，当批次最后一条消息来自 user 时，
 再用 deterministic alias matching、SQLite FTS 和该条消息文字选择相关 context；
 Person/Relationship guidance 只有 owner 被本轮激活时才返回。两条路径都不调用 LLM。
 

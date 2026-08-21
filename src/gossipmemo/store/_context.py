@@ -84,18 +84,18 @@ class _ContextMixin(_ContinuityMixin):
     def _open_learning_goal_rows(
         self, connection: sqlite3.Connection, space_id: str, person_ids: tuple[str, ...],
     ) -> list[sqlite3.Row]:
-        """Open learning goals reachable from `person_ids`.
+        """Open/partial learning goals reachable from `person_ids`.
 
-        Mirrors `_open_hypothesis_rows`, including its status filter: only
-        `open`. A `partial` goal has already drawn an answer, so re-offering
-        it is how an agent ends up circling the same ground -- and leaving it
-        in here made goals asymmetric with hypotheses, which were open-only
-        from the start.
+        Mirrors `_open_hypothesis_rows`. "Open" here means not closed:
+        `partial` stays in, deliberately. A part-answered goal is a thread
+        already underway, which is exactly what an agent asking for a
+        direction wants to be able to pick back up -- only `answered`,
+        `deferred`, and `retired` are excluded.
         """
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
         return connection.execute(
             "SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
-            "WHERE space_id = ? AND status = 'open' AND (focus_kind = 'user' "
+            "WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' "
             f"OR (focus_kind = 'person' AND focus_id IN ({placeholders})) "
             "OR (focus_kind = 'relationship' AND focus_id IN "
             f"(SELECT id FROM relationships WHERE space_id = ? "
@@ -220,7 +220,7 @@ class _ContextMixin(_ContinuityMixin):
         kind: str | None = None, limit: int = 50,
         rng: random.Random | None = None,
     ) -> list[GuidanceItem]:
-        """Return open hypotheses and open learning goals for a focus, shuffled.
+        """Return open hypotheses and open/partial learning goals for a focus, shuffled.
 
         Unlike `_guidance` (which draws a small, seed-stable set for the
         passive, KV-cache-friendly context bundle), this is for an agent that

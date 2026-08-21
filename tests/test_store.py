@@ -2102,13 +2102,12 @@ def test_list_guidance_reaches_relationship_owned_items_via_member_people(store)
     assert [item.id for item in reached] == ["hr"]
 
 
-def test_list_guidance_excludes_partial_goals(store):
-    """A partly-answered goal is not offered again.
+def test_list_guidance_includes_partial_goals(store):
+    """A part-answered goal stays available to an explicit ask.
 
-    This used to assert the opposite. `partial` means the goal already drew
-    an answer, so re-offering it is how an agent ends up asking around the
-    same ground repeatedly -- and it made goals asymmetric with hypotheses,
-    which `_open_hypothesis_rows` has restricted to `open` all along.
+    `partial` means the thread is underway, not closed, and an agent asking
+    for a direction should be able to pick it back up. Only `answered`,
+    `deferred`, and `retired` are excluded.
     """
     store.ensure_space("personal")
     with store._connect() as connection:
@@ -2117,13 +2116,8 @@ def test_list_guidance_excludes_partial_goals(store):
             "created_at, updated_at) VALUES ('gp', 'personal', 'Half answered', 'context', "
             "'[]', 'partial', '1', '1')"
         )
-        connection.execute(
-            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, status, "
-            "created_at, updated_at) VALUES ('go', 'personal', 'Still open', 'context', "
-            "'[]', 'open', '1', '1')"
-        )
     items = store.list_guidance("personal")
-    assert [(item.id, item.status) for item in items] == [("go", "open")]
+    assert [(item.id, item.status) for item in items] == [("gp", "partial")]
 
 
 def test_list_guidance_shuffles_so_repeated_asks_walk_the_pool(store):
