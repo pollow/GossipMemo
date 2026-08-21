@@ -63,6 +63,7 @@ class Settings:
     embedding_dim: int | None = None
     embedding_query_timeout_seconds: float = 2.0
     extraction_clarification_probe: bool = False
+    admin_password: str = ""
 
     def __post_init__(self) -> None:
         missing = [
@@ -135,6 +136,10 @@ class Settings:
             raise ConfigurationError("embedding_dim must be greater than zero")
         if self.embedding_query_timeout_seconds <= 0:
             raise ConfigurationError("embedding_query_timeout_seconds must be greater than zero")
+        if self.admin_password and len(self.admin_password) < 12:
+            raise ConfigurationError(
+                "admin_password must be empty (admin disabled) or at least 12 characters"
+            )
 
     @property
     def embedding_enabled(self) -> bool:
@@ -200,6 +205,7 @@ class Settings:
             embedding_query_timeout_seconds=float(
                 _env("GOSSIPMEMO_EMBEDDING_QUERY_TIMEOUT_SECONDS", "2")
             ),
+            admin_password=_env("GOSSIPMEMO_ADMIN_PASSWORD"),
         )
 
 

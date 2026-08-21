@@ -11,6 +11,7 @@ from typing import Annotated
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
+from .admin import create_admin_router
 from .config import Settings
 from .llm import create_llm
 from .logging import configure_logging, elapsed_ms, request_id_context
@@ -85,6 +86,15 @@ def create_app(
     )
     app.state.world = world
     app.state.settings = settings
+
+    admin_router = create_admin_router(settings, world)
+    if admin_router is not None:
+        app.include_router(admin_router)
+        if settings.host not in {"127.0.0.1", "::1", "localhost"}:
+            logger.warning(
+                "admin_ui_plaintext_non_local",
+                extra={"host": settings.host, "port": settings.port},
+            )
 
     @app.middleware("http")
     async def request_logging(request: Request, call_next):
