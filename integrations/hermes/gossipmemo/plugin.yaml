@@ -1,6 +1,6 @@
 name: gossipmemo
-version: 0.2.0
-description: "Provenance-aware social memory backed by an external GossipMemo server. Dual-mode: registers as a memory provider when loaded via Hermes' memory.provider path (unchanged legacy behavior), or as a standalone plugin with real tool_search-deferrable tools when loaded from plugins/."
+version: 0.3.0
+description: "Provenance-aware social memory backed by an external GossipMemo server. Loads as a standalone Hermes plugin (plugins.enabled: [gossipmemo]) with real tool_search-deferrable tools."
 author: Local
 kind: standalone
 provides_tools:

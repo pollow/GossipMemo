@@ -14,7 +14,7 @@ hedged and second-hand all the way to the prompt.
 
 It runs as one FastAPI process over a SQLite volume, with a single-permit
 priority gate in front of all outbound LLM provider requests, and ships with
-a Hermes memory-provider plugin.
+a Hermes plugin.
 
 ## Run with Docker
 
@@ -241,10 +241,11 @@ the client.
 ## Hermes integration
 
 The plugin under [`integrations/hermes/gossipmemo`](integrations/hermes/gossipmemo)
-implements Hermes' `MemoryProvider` interface. Install this project into the
-Hermes Python environment, copy or link that plugin directory into Hermes'
-memory plugin directory, and configure its server URL and Space as documented
-in the plugin README.
+loads as a standalone Hermes plugin (`plugins.enabled: [gossipmemo]`), not
+through Hermes' memory-provider path. Install this project into the Hermes
+Python environment, copy or link that plugin directory into Hermes' plugin
+directory, and configure its server URL and Space as documented in the
+plugin README.
 
 Hermes sessions are retained only as Message source coordinates. They do not
 partition GossipMemo's long-term memory.

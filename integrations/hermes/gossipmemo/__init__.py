@@ -1,8 +1,19 @@
-"""Hermes MemoryProvider integration for a GossipMemo server.
+"""Hermes plugin integration for a GossipMemo server.
 
 The plugin is intentionally self-contained.  Hermes is an optional runtime
 dependency, so importing this module while developing GossipMemo (or running
 its SDK tests) does not require Hermes to be installed.
+
+This registers as a standalone Hermes plugin (``plugins.enabled:
+[gossipmemo]``) -- tools, hooks, and (eventually) middleware, all wired
+through a real ``PluginContext`` so tools land in Hermes' tool registry and
+are ``tool_search``-deferrable. There is no ``memory.provider`` mode: it
+existed briefly and was dropped because it had exactly one consumer (the
+migration this plugin was built for) and duplicating the registration path
+for zero remaining users is exactly the abstraction this repo's AGENTS.md
+rules out. Do not set ``memory.provider: gossipmemo`` alongside
+``plugins.enabled: [gossipmemo]`` -- see the README for why that produces
+duplicate writes.
 """
 
 from __future__ import annotations
@@ -19,14 +30,6 @@ from pathlib import Path
 from typing import Any
 
 from gossipmemo_client import GossipMemo, GossipMemoError
-
-try:  # Hermes supplies the real ABC when the plugin is loaded by Hermes.
-    from agent.memory_provider import MemoryProvider
-except ImportError:  # pragma: no cover - exercised only outside Hermes.
-    class MemoryProvider:  # type: ignore[no-redef]
-        """Small import-time fallback for SDK/plugin development."""
-
-        pass
 
 try:  # Only available inside a running Hermes process; used to resolve the
     # profile-scoped config directory the same way memory_manager does when
@@ -107,8 +110,14 @@ def _schema(
     }
 
 
-class GossipMemoMemoryProvider(MemoryProvider):
-    """A thin, provenance-preserving bridge to the GossipMemo HTTP server."""
+class GossipMemoMemoryProvider:
+    """A thin, provenance-preserving bridge to the GossipMemo HTTP server.
+
+    Despite the name (kept for API/diff stability), this is now a plain
+    engine class -- it no longer subclasses any Hermes ABC. It is driven
+    entirely through the plugin adapter below (``_GossipMemoPluginAdapter``
+    and ``register()``).
+    """
 
     def __init__(
         self,
@@ -141,70 +150,21 @@ class GossipMemoMemoryProvider(MemoryProvider):
         # this unset, and the volatile-channel rendering keeps emitting the
         # stable half exactly as before -- never silently dropped.
         self._stable_delivered: dict[str, bool] = {}
-
-    @property
-    def name(self) -> str:
-        return "gossipmemo"
-
-    def is_available(self) -> bool:
-        """Check local configuration only; do not make a network request."""
-
-        config = _load_config(os.environ.get("HERMES_HOME"))
-        configured_url = _env_first(*_ENV_BASE_URL) or str(config.get("base_url", "")).strip()
-        # A local unauthenticated server is valid, but an unconfigured plugin
-        # should not activate merely because localhost is the SDK default.
-        configured = bool(configured_url or _env_first(_ENV_API_KEY))
-        space_id = _env_first(_ENV_SPACE_ID) or _string_config(
-            config, "space_id", _DEFAULT_SPACE_ID
-        )
-        return configured and bool(space_id)
-
-    def get_config_schema(self) -> list[dict[str, Any]]:
-        """Fields used by ``hermes memory setup``.
-
-        The API key is optional because a local GossipMemo server can be
-        intentionally unauthenticated.  If a key is used, setup writes it to
-        the environment rather than the profile JSON file.
-        """
-
-        return [
-            {
-                "key": "base_url",
-                "description": "GossipMemo server URL",
-                "default": _DEFAULT_BASE_URL,
-                "env_var": "GOSSIPMEMO_BASE_URL",
-            },
-            {
-                "key": "space_id",
-                "description": "GossipMemo memory space",
-                "default": _DEFAULT_SPACE_ID,
-                "env_var": "GOSSIPMEMO_SPACE_ID",
-            },
-            {
-                "key": "api_key",
-                "description": "GossipMemo API key (optional for local servers)",
-                "secret": True,
-                "required": False,
-                "env_var": _ENV_API_KEY,
-            },
-        ]
-
-    def save_config(self, values: Mapping[str, Any], hermes_home: str) -> None:
-        """Persist non-secret settings in the active Hermes profile.
-
-        Secrets are deliberately omitted even if a caller accidentally passes
-        them in ``values``; Hermes setup normally sends secrets separately to
-        its environment-file writer.
-        """
-
-        path = Path(hermes_home) / _CONFIG_FILENAME
-        path.parent.mkdir(parents=True, exist_ok=True)
-        existing = _load_config(hermes_home)
-        for key in ("base_url", "space_id"):
-            value = values.get(key)
-            if value is not None and str(value).strip():
-                existing[key] = str(value).strip()
-        path.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        # Conversation keys plugin-mode hooks have already treated as a
+        # "first turn" this session. Hermes announces the genuine first turn
+        # of a session via pre_llm_call's is_first_turn kwarg, but it does
+        # not re-announce a session_id rotation mid-conversation -- context
+        # compression, /resume, and /branch all silently swap the session_id
+        # a later hook call carries. Because every per-session dict here
+        # (_context_cache, _prefetch_cache, _current_turn, _stable_delivered)
+        # is keyed on that session_id, an unannounced rotation lands on a key
+        # none of them have seen, and relying solely on is_first_turn would
+        # mean the stable block is never fetched (and _stable_delivered never
+        # set) again for the rest of that conversation. _claim_first_turn
+        # treats "a key we have not seen before" as a first turn in its own
+        # right, independent of Hermes' flag, so rotation is covered without
+        # depending on any hook announcing it.
+        self._session_started_keys: set[str] = set()
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         hermes_home = str(kwargs.get("hermes_home", "") or "")
@@ -240,6 +200,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._context_cache.clear()
         self._current_turn.clear()
         self._stable_delivered.clear()
+        self._session_started_keys.clear()
         try:
             self._client = self._client_factory(
                 base_url=base_url,
@@ -271,17 +232,35 @@ class GossipMemoMemoryProvider(MemoryProvider):
             return f"{instructions}\n\n{stable}"
         return instructions
 
-    def _fetch_stable_block(self) -> str:
+    def _claim_first_turn(self, key: str) -> bool:
+        """Return ``True`` the first time ``key`` is seen this session.
+
+        Always call this (never short-circuit around it) so a key gets
+        registered on every call, whether or not the caller ends up treating
+        it as a first turn. See the ``_session_started_keys`` comment in
+        ``__init__`` for why an unseen key is treated as a first turn.
+        """
+
+        with self._prefetch_lock:
+            if key in self._session_started_keys:
+                return False
+            self._session_started_keys.add(key)
+            return True
+
+    def _fetch_stable_block(self, *, session_id: str = "") -> str:
         """Best-effort fetch of the slowly-changing (user-model/hypothesis) half.
 
         Hermes calls ``system_prompt_block`` once per session while assembling
         the (cached, never rebuilt mid-session) system prompt, so this must
         never raise and must never block that assembly for long -- a slow or
         dead GossipMemo server should just mean no stable block this session,
-        not a broken prompt.
+        not a broken prompt. ``session_id`` lets plugin-mode callers key this
+        fetch by the *current* per-call session_id (which may have rotated
+        since ``initialize()``) rather than always falling back to the
+        session_id captured at initialization.
         """
 
-        key = self._conversation_key() or "default"
+        key = self._conversation_key(session_id) or "default"
         with self._prefetch_lock:
             cached = self._context_cache.get(key)
         bundle: Any = cached if isinstance(cached, Mapping) and cached else None
@@ -1043,28 +1022,6 @@ class GossipMemoMemoryProvider(MemoryProvider):
             logger.warning("GossipMemo tool %s failed: %s", tool_name, exc)
             return _json_result({"error": str(exc)})
 
-    def on_memory_write(
-        self,
-        action: str,
-        target: str,
-        content: str,
-        metadata: Mapping[str, Any] | None = None,
-    ) -> None:
-        """Mirror a built-in Hermes memory write without blocking the turn."""
-
-        del target, metadata
-        client = self._client
-        if not self._write_enabled or action != "add" or not content or not client:
-            return
-
-        def _store() -> None:
-            try:
-                client.add_memory(content)
-            except Exception as exc:  # noqa: BLE001 - mirror is best effort.
-                logger.debug("GossipMemo built-in memory mirror failed: %s", exc)
-
-        threading.Thread(target=_store, name="gossipmemo-memory-write", daemon=True).start()
-
     def shutdown(self) -> None:
         queue_value = self._queue
         writer = self._writer
@@ -1093,16 +1050,16 @@ _CRON_SESSION_PREFIX = "cron_"
 
 
 def _is_primary_session(session_id: str) -> bool:
-    """Best-effort stand-in for the memory-provider path's ``agent_context`` guard.
+    """Guard against ingesting non-primary-user sessions as the user's memories.
 
-    The memory-provider ``initialize()`` kwarg ``agent_context`` (checked
-    against ``{"", "primary"}``) only flows through the memory-provider stub
-    context; plugin-mode hooks never receive it. Hermes names cron sessions
+    Hermes' ``MemoryProvider`` ABC (used by the now-removed memory-provider
+    path) received an explicit ``agent_context`` kwarg for this; plugin hooks
+    carry no such kwarg. Hermes names cron sessions
     ``cron_<job_id>_<timestamp>``, which is the only reliable textual signal
-    plugin-mode hooks carry for "this is not the primary interactive user" --
-    so that is what this reconstructs the guard from. It is not a full
-    equivalent (e.g. it has no signal for subagent sessions), but it preserves
-    the documented intent of not ingesting cron turns as the user's memories.
+    plugin hooks carry for "this is not the primary interactive user" -- so
+    that is what this guard is built from. It is not a full equivalent (e.g.
+    it has no signal for subagent sessions), but it preserves the intent of
+    not ingesting cron turns as the user's memories.
     """
 
     return not str(session_id or "").startswith(_CRON_SESSION_PREFIX)
@@ -1136,13 +1093,26 @@ class _GossipMemoPluginAdapter:
         session_id = str(kwargs.get("session_id") or "")
         user_message = str(kwargs.get("user_message") or "")
         parts: list[str] = []
-        if kwargs.get("is_first_turn"):
+        # Always claim the key, even when is_first_turn already makes the
+        # left side of the `or` True below -- short-circuiting around the
+        # claim would leave this key unregistered, and the very next turn
+        # (same key, is_first_turn now False) would then read as unseen and
+        # re-fetch the stable block again.
+        key = self._provider._conversation_key(session_id) or "default"
+        is_new_key = self._provider._claim_first_turn(key)
+        if kwargs.get("is_first_turn") or is_new_key:
             # system_prompt_block() has no hook equivalent in plugin mode
             # (that lands in slice 3b, via middleware). Prepend just the
             # stable (user-model/hypothesis) half here so it is not silently
             # lost; this also flips _stable_delivered so the volatile half
             # below stops repeating it, exactly as it would in provider mode.
-            stable = self._provider._fetch_stable_block()
+            # Treating an unseen key as a first turn (not just Hermes'
+            # is_first_turn flag) is what keeps this working across a
+            # mid-conversation session_id rotation -- context compression,
+            # /resume, and /branch all swap session_id without announcing it
+            # through any hook, so is_first_turn alone would never be True
+            # again for the rest of that conversation.
+            stable = self._provider._fetch_stable_block(session_id=session_id)
             if stable:
                 parts.append(stable)
         volatile = self._provider.prefetch(user_message, session_id=session_id)
@@ -1175,6 +1145,13 @@ def _make_tool_handler(
 
 
 def _register_as_plugin(ctx: Any, provider: GossipMemoMemoryProvider) -> None:
+    """Wire ``provider`` onto a real Hermes ``PluginContext``.
+
+    A standalone helper (rather than inlined into ``register()``) so tests
+    can drive the wiring against a fake context and a specific provider
+    instance without going through module-level plugin construction.
+    """
+
     adapter = _GossipMemoPluginAdapter(provider)
     for schema in provider.get_tool_schemas():
         ctx.register_tool(
@@ -1190,29 +1167,9 @@ def _register_as_plugin(ctx: Any, provider: GossipMemoMemoryProvider) -> None:
 
 
 def register(ctx: Any) -> None:
-    """Register this provider with Hermes' plugin context.
+    """Register this plugin's tools and hooks with Hermes' plugin context."""
 
-    Two disjoint capability shapes can reach this function, depending on how
-    the plugin is loaded:
-
-    - The memory-provider path's stub context (``plugins/memory/__init__.py``'s
-      ``_ProviderCollector``) exposes ``register_memory_provider`` and only
-      no-op ``register_tool``/``register_hook``, with no ``register_middleware``
-      at all.
-    - A real plugin context exposes ``register_tool``/``register_hook``/
-      ``register_middleware`` but has no ``register_memory_provider``.
-
-    Detected with ``hasattr`` rather than try/except, since the stub's no-op
-    methods would not raise and could leave partial registration state.
-    Provider mode must behave exactly as it always has -- this integration
-    ships to users still on that path.
-    """
-
-    provider = GossipMemoMemoryProvider()
-    if hasattr(ctx, "register_memory_provider"):
-        ctx.register_memory_provider(provider)
-        return
-    _register_as_plugin(ctx, provider)
+    _register_as_plugin(ctx, GossipMemoMemoryProvider())
 
 
 __all__ = [

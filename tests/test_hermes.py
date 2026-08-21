@@ -458,18 +458,12 @@ def test_hermes_keeps_one_turn_slot_per_conversation():
 
 
 # ---------------------------------------------------------------------------
-# Plugin-mode registration (dual-mode `register(ctx)`)
+# Plugin registration
 # ---------------------------------------------------------------------------
 
 
 class _FakePluginContext:
-    """Mirrors the real Hermes plugin context's capability shape.
-
-    Exposes ``register_tool``/``register_hook`` (both actually recording,
-    unlike the memory-provider stub below) and deliberately has no
-    ``register_memory_provider`` at all, since that is exactly the
-    disjoint-capability distinction ``register(ctx)`` must detect.
-    """
+    """Mirrors the real Hermes plugin context's ``register_tool``/``register_hook``."""
 
     def __init__(self):
         self.tools: dict[str, dict] = {}
@@ -482,40 +476,12 @@ class _FakePluginContext:
         self.hooks.setdefault(hook_name, []).append(callback)
 
 
-class _FakeMemoryProviderStubContext:
-    """Mirrors ``plugins/memory/__init__.py``'s ``_ProviderCollector``.
-
-    ``register_tool``/``register_hook``/``register_cli_command`` are no-ops
-    and there is no ``register_middleware`` at all; only
-    ``register_memory_provider`` actually captures anything.
-    """
-
-    def __init__(self):
-        self.provider = None
-
-    def register_memory_provider(self, provider):
-        self.provider = provider
-
-    def register_tool(self, *args, **kwargs):
-        pass
-
-    def register_hook(self, *args, **kwargs):
-        pass
-
-    def register_cli_command(self, *args, **kwargs):
-        pass
-
-
-def test_hermes_register_dispatches_by_context_capability_and_neither_raises():
-    provider_ctx = _FakeMemoryProviderStubContext()
-    register(provider_ctx)
-    assert isinstance(provider_ctx.provider, GossipMemoMemoryProvider)
-
-    plugin_ctx = _FakePluginContext()
-    register(plugin_ctx)  # Must not raise despite no register_memory_provider.
+def test_hermes_register_wires_all_tools_and_hooks_onto_a_plugin_context():
+    ctx = _FakePluginContext()
+    register(ctx)
     schema_names = {schema["name"] for schema in GossipMemoMemoryProvider().get_tool_schemas()}
-    assert set(plugin_ctx.tools) == schema_names
-    assert set(plugin_ctx.hooks) == {
+    assert set(ctx.tools) == schema_names
+    assert set(ctx.hooks) == {
         "on_session_start", "pre_llm_call", "post_llm_call", "on_session_finalize",
     }
 

@@ -29,7 +29,7 @@ Rolling continuity is a per-space projection generated asynchronously after abou
 - `POST /v1/spaces/{space_id}/turns` is the single write endpoint: it persists a batch of 1-100 messages of either author and schedules background intake. When (and only when) the batch's last message is from the user, it also returns a newer context bundle if the caller's version is stale, activates known People through deterministic alias matching, and recalls a small number of relevant active `about_user` Memories through SQLite FTS, using that last message's content. A batch ending in an assistant message still persists but skips this enrichment.
 - Alias matching, FTS recall, and context reads do not call an LLM. Extraction, profile induction, and continuity generation remain asynchronous.
 - The Python sync and async SDKs expose `context()` and `turn()`.
-- The Hermes provider caches the context bundle/version, uses the turn facade during prefetch, renders UserModel, continuity, activated Person cards, and recalled user Memories, then asynchronously ingests the assistant reply. User-message idempotency keys prevent duplicate writes across prefetch and completed-turn synchronization.
+- The Hermes plugin (`integrations/hermes/gossipmemo`, loaded via `plugins.enabled: [gossipmemo]`) caches the context bundle/version, uses the turn facade during prefetch, renders UserModel, continuity, activated Person cards, and recalled user Memories, then asynchronously ingests the assistant reply. User-message idempotency keys prevent duplicate writes across prefetch and completed-turn synchronization.
 
 An empty context bundle is a valid cold-start result. The current session's raw messages provide immediate continuity while long-term Memories and projections accumulate.
 

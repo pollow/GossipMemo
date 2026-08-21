@@ -4,34 +4,50 @@ This plugin connects Hermes to a running GossipMemo HTTP server. GossipMemo
 keeps the long-lived memory boundary at `space_id`; a Hermes `session_id` is
 only retained as the source conversation key on ingested messages.
 
-## Loading modes
+# Loading mode
 
-`register(ctx)` detects which kind of context Hermes hands it and adapts:
+This registers as a standalone Hermes plugin: copy or symlink this directory
+under Hermes' `plugins/` directory and set `plugins.enabled: [gossipmemo]`
+in the profile's `config.yaml`. `register(ctx)` wires the eight
+`gossipmemo_*` tools through `ctx.register_tool` (so they land in Hermes'
+tool registry and are `tool_search`-deferrable, unlike an always-eager
+memory-provider registration) and wires `on_session_start`/`pre_llm_call`/
+`post_llm_call`/`on_session_finalize` hooks to the underlying engine
+(`GossipMemoMemoryProvider`). One gap today: there is no hook equivalent of
+`system_prompt_block()`, so the stable (user-model/hypothesis) half only
+rides along on a session's first `pre_llm_call` instead of living in the
+system prompt; a later slice closes that gap via middleware.
 
-- **Memory-provider mode** (`plugins/memory/gossipmemo/`, selected via
-  `memory.provider: gossipmemo`): registers a `MemoryProvider`. Its eight
-  tool schemas are appended directly onto every request and are always
-  eager (not `tool_search`-deferrable), because the stub context Hermes
-  uses for this path has no tool registry to defer them from.
-- **Plugin mode** (`plugins/gossipmemo/`, opted into like any other
-  standalone plugin): registers the same tools through `ctx.register_tool`,
-  so they land in Hermes' tool registry and become `tool_search`-deferrable,
-  and wires `on_session_start`/`pre_llm_call`/`post_llm_call`/
-  `on_session_finalize` hooks to the same underlying engine. One gap today:
-  there is no hook equivalent of `system_prompt_block()`, so the stable
-  (user-model/hypothesis) half only rides along on a session's first
-  `pre_llm_call` instead of living in the system prompt; a later slice
-  closes that gap via middleware.
+There used to be a second loading mode, selected via `memory.provider:
+gossipmemo`, that registered this engine as a Hermes `MemoryProvider`
+instead. It has been removed: it had exactly one consumer on this host, and
+duplicating the registration path for zero remaining users is exactly the
+abstraction this repo's `AGENTS.md` rules out. Rolling back to it, if ever
+needed, is `git checkout <sha> -- integrations/hermes/gossipmemo` from
+before its removal, plus a gateway restart -- not a reason to keep it live.
+One real casualty of the removal: `on_memory_write`, a `MemoryProvider` ABC
+method Hermes calls directly on a registered provider object (not reachable
+through `ctx.register_hook`), mirrored writes from Hermes' *built-in* memory
+tool into GossipMemo. It has no plugin-mode equivalent and is gone along
+with the provider path. In practice this cost nothing on the migrated
+profile: its only trigger, `notify_memory_tool_write`, fires only when
+Hermes' built-in memory tool writes, and that tool is disabled
+(`memory.memory_enabled: false`) there -- but a deployment that still
+relies on the built-in memory tool would need another way to mirror it.
 
-Both modes share one engine (`GossipMemoMemoryProvider`) and are functionally
-equivalent otherwise, including the non-primary-session write guard below.
+**Never set `memory.provider: gossipmemo` and `plugins.enabled:
+[gossipmemo]` at the same time on a Hermes build that still has the old
+provider path available.** Hermes would import this module under two
+different module names for the two paths, producing two independent engine
+instances that do not share `_prefetch_cache`/`_context_cache`, so every
+turn gets written to GossipMemo twice.
 
 ## Install and configure
 
-Install the GossipMemo SDK in the Hermes environment, then copy this directory
-to `plugins/memory/gossipmemo/` for memory-provider mode, or to
-`plugins/gossipmemo/` for plugin mode (or install it using the normal Hermes
-plugin manager). Configure the server with environment variables:
+Install the GossipMemo SDK in the Hermes environment, then copy or symlink
+this directory to `plugins/gossipmemo/` (or install it using the normal
+Hermes plugin manager), and set `plugins.enabled: [gossipmemo]`. Configure
+the server with environment variables:
 
 ```shell
 export GOSSIPMEMO_BASE_URL=http://127.0.0.1:8765
@@ -41,12 +57,12 @@ export GOSSIPMEMO_API_KEY=change-me
 ```
 
 `GOSSIPMEMO_URL` is accepted as a compatibility alias for
-`GOSSIPMEMO_BASE_URL`. The Hermes setup wizard can also save `base_url` and
-`space_id` to `$HERMES_HOME/gossipmemo.json`; API keys remain environment-only.
+`GOSSIPMEMO_BASE_URL`. `base_url` and `space_id` can also be set by hand in
+`$HERMES_HOME/gossipmemo.json`; API keys remain environment-only.
 
-The provider does not probe the network from `is_available()`. Start the
-server before using its tools; request failures are returned as clear tool
-errors and do not crash the agent.
+The plugin does not probe the network at load time. Start the server before
+using its tools; request failures are returned as clear tool errors and do
+not crash the agent.
 
 ## Tools
 
