@@ -13,7 +13,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from ...store.sqlite import SqliteWorldStore
-from . import coverage, goals, hypotheses, people, relationships, spaces
+from . import coverage, goals, hypotheses, people, relationships, spaces, tables
 
 
 def register_admin_views(router: APIRouter, require_session, store: SqliteWorldStore) -> None:
@@ -29,6 +29,7 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
     goals.register(router, require_session, store)
     hypotheses.register(router, require_session, store)
     coverage.register(router, require_session, store)
+    tables.register(router, require_session, store)
 
 
 __all__ = ["register_admin_views"]

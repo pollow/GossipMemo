@@ -520,6 +520,40 @@ Before pulling a v2+ image onto a running v1 deployment:
    `.gossipmemo.db.pre-migration-v1.*.bak` file in the data directory can be
    archived elsewhere or deleted.
 
+### Admin UI
+
+Set `GOSSIPMEMO_ADMIN_PASSWORD` to a value of at least 12 characters to enable
+a read-only, server-rendered admin UI at `/admin`. Leaving it empty (the
+default) is a legitimate, permanent configuration: the admin routes are never
+registered, so `/admin` is a plain 404, not a login prompt. A non-empty value
+under 12 characters is a startup error rather than a weak password silently
+accepted.
+
+The admin UI is **read-only**: every route is a `GET`, there is no template
+engine and no JavaScript, and it cannot write, retract, or delete anything in
+the database. It exists to browse spaces, messages, memories, people,
+relationships, learning goals, hypotheses, coverage, continuity history, and
+a few whitelisted operational tables (`schema_migrations`,
+`extraction_batches`, `embeddings`) without a `sqlite3` shell.
+
+Logging in sets a signed, `HttpOnly` browser-session cookie with a 12-hour
+absolute expiry, distinct from `GOSSIPMEMO_API_KEY` — the two credentials
+protect different things and are never interchangeable. The signing secret
+is generated fresh in memory each time the process starts, so **restarting
+the server logs every admin session out**; there is no persisted session
+store.
+
+**Plaintext warning.** The admin UI is served over plain HTTP, the same as
+the rest of the API. As long as `GOSSIPMEMO_HOST` stays loopback (the
+default, `127.0.0.1`), that traffic never leaves the machine. If
+`GOSSIPMEMO_HOST` is set to anything else, the admin password and every
+memory the admin UI renders — including third-party names and quoted
+message content — cross the network unencrypted, and the server logs an
+`admin_ui_plaintext_non_local` startup `WARNING` to say so. If you want the
+admin UI reachable beyond a trusted home network, put TLS in front of it
+(a reverse proxy is the simplest option); GossipMemo does not terminate TLS
+itself.
+
 ### Code layout
 
 The provider seam is deliberately narrow. `transport.py` is a leaf module —

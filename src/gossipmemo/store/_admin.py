@@ -9,11 +9,13 @@ this module writes.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass, field
 
-from .policy import load_json
 from ._base import _BaseStore
+from ._vectors import unpack_vector
+from .policy import load_json
 
 #: Space-wide message/memory/people counts used on both the space list and
 #: a single space's overview page.
@@ -165,6 +167,27 @@ class CoverageEntryRow:
     status: str
     created_at: str
     updated_at: str
+
+
+@dataclass
+class ContinuityHistoryRow:
+    text: str
+    related_people: list[LinkedPerson]
+    through_message: MessageRow | None
+    updated_at: str
+
+
+#: The strict whitelist for `/admin/tables/{name}`. These are the only
+#: operational tables with no domain view of their own; any other name is
+#: a 404. `_AdminReadMixin.admin_list_raw_table` maps each entry here to a
+#: hardcoded query -- the table name is never interpolated into SQL.
+ADMIN_RAW_TABLES = ("schema_migrations", "extraction_batches", "embeddings")
+
+
+@dataclass
+class RawTablePage:
+    headers: list[str]
+    rows: list[list[object]]
 
 
 #: Every kind is capped at this many hits; one extra row is fetched to
@@ -816,6 +839,146 @@ class _AdminReadMixin(_BaseStore):
                 for row in rows
             ]
 
+    def admin_count_continuities(self, space_id: str) -> int:
+        # The current schema keeps exactly one continuity row per space
+        # (`continuities.space_id` is its primary key) -- there is no
+        # retained history of earlier continuity snapshots. This returns
+        # 0 or 1 today; it is written generically so the admin history
+        # view (and this query) keep working unchanged if that ever
+        # becomes a real multi-row history.
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM continuities WHERE space_id = ?", (space_id,)
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_continuities(
+        self, space_id: str, offset: int, limit: int
+    ) -> list[ContinuityHistoryRow]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT text, related_person_ids, through_message_id, updated_at
+                FROM continuities WHERE space_id = ?
+                ORDER BY updated_at DESC LIMIT ? OFFSET ?
+                """,
+                (space_id, limit, offset),
+            ).fetchall()
+            results: list[ContinuityHistoryRow] = []
+            for row in rows:
+                person_ids = load_json(row["related_person_ids"], [])
+                related_people: list[LinkedPerson] = []
+                if person_ids:
+                    placeholders = ",".join("?" for _ in person_ids)
+                    person_rows = connection.execute(
+                        f"""
+                        SELECT id, display_name FROM people
+                        WHERE space_id = ? AND id IN ({placeholders})
+                        ORDER BY display_name, id
+                        """,
+                        (space_id, *person_ids),
+                    ).fetchall()
+                    related_people = [
+                        LinkedPerson(id=r["id"], display_name=r["display_name"])
+                        for r in person_rows
+                    ]
+                through_message: MessageRow | None = None
+                if row["through_message_id"]:
+                    message = connection.execute(
+                        "SELECT * FROM messages WHERE space_id = ? AND id = ?",
+                        (space_id, row["through_message_id"]),
+                    ).fetchone()
+                    if message:
+                        through_message = _message_row(message)
+                results.append(
+                    ContinuityHistoryRow(
+                        text=row["text"],
+                        related_people=related_people,
+                        through_message=through_message,
+                        updated_at=row["updated_at"],
+                    )
+                )
+            return results
+
+    def admin_count_raw_table(self, table: str) -> int:
+        if table not in ADMIN_RAW_TABLES:
+            raise ValueError(f"unknown admin table: {table!r}")
+        with self._connect() as connection:
+            if table == "schema_migrations":
+                row = connection.execute("SELECT COUNT(*) AS n FROM schema_migrations").fetchone()
+            elif table == "extraction_batches":
+                row = connection.execute("SELECT COUNT(*) AS n FROM extraction_batches").fetchone()
+            else:
+                row = connection.execute("SELECT COUNT(*) AS n FROM embeddings").fetchone()
+            return row["n"]
+
+    def admin_list_raw_table(self, table: str, offset: int, limit: int) -> RawTablePage:
+        """Dump one whitelisted operational table, paginated.
+
+        Every branch below is a hardcoded query string; `table` only ever
+        selects which literal branch runs; it is never interpolated into
+        SQL text. `embeddings.vector` is a packed float32 blob -- this
+        renders only its dimension and L2 norm, never the raw floats.
+        """
+
+        if table not in ADMIN_RAW_TABLES:
+            raise ValueError(f"unknown admin table: {table!r}")
+        with self._connect() as connection:
+            if table == "schema_migrations":
+                headers = ["Version", "Applied at", "Description", "Checksum"]
+                rows = connection.execute(
+                    """
+                    SELECT version, applied_at, description, checksum
+                    FROM schema_migrations ORDER BY version DESC LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ).fetchall()
+                body = [
+                    [row["version"], row["applied_at"], row["description"], row["checksum"]]
+                    for row in rows
+                ]
+            elif table == "extraction_batches":
+                headers = ["ID", "Space ID", "Created at", "Completed at"]
+                rows = connection.execute(
+                    """
+                    SELECT id, space_id, created_at, completed_at
+                    FROM extraction_batches ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ).fetchall()
+                body = [
+                    [row["id"], row["space_id"], row["created_at"], row["completed_at"] or "-"]
+                    for row in rows
+                ]
+            else:
+                headers = [
+                    "Space ID", "Owner kind", "Owner ID", "Model",
+                    "Dim", "L2 norm", "Content hash", "Created at",
+                ]
+                rows = connection.execute(
+                    """
+                    SELECT space_id, owner_kind, owner_id, model, dim, vector,
+                           content_hash, created_at
+                    FROM embeddings ORDER BY created_at DESC, owner_kind, owner_id LIMIT ? OFFSET ?
+                    """,
+                    (limit, offset),
+                ).fetchall()
+                body = []
+                for row in rows:
+                    dim = row["dim"]
+                    try:
+                        values = unpack_vector(row["vector"], dim)
+                        norm_display = f"{math.sqrt(sum(v * v for v in values)):.6f}"
+                    except Exception:
+                        norm_display = "(unreadable)"
+                    body.append(
+                        [
+                            row["space_id"], row["owner_kind"], row["owner_id"], row["model"],
+                            dim, norm_display, row["content_hash"], row["created_at"],
+                        ]
+                    )
+            return RawTablePage(headers=headers, rows=body)
+
     def admin_search(self, space_id: str, keyword: str) -> SearchResults:
         """One keyword, scanned across seven kinds within one space.
 
@@ -989,6 +1152,8 @@ def _memory_filter_clauses(
 
 
 __all__ = [
+    "ADMIN_RAW_TABLES",
+    "ContinuityHistoryRow",
     "CoverageEntryRow",
     "CoverageEntrySearchHit",
     "CoverageRootRow",
@@ -1008,6 +1173,7 @@ __all__ = [
     "MessageSearchHit",
     "PersonListRow",
     "PersonSearchHit",
+    "RawTablePage",
     "RelationshipListRow",
     "SearchGroup",
     "SearchResults",
