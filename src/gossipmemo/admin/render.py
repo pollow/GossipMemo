@@ -65,19 +65,32 @@ def table_component(
     total: int,
     base_path: str,
     extra_params: dict[str, str] | None = None,
+    row_hrefs: list[str | None] | None = None,
 ) -> str:
     """Render a table plus an offset/limit prev/next pagination footer.
 
     `extra_params` carries filters (e.g. a search query) that must survive
     into the prev/next links alongside the offset/limit pair.
+
+    `row_hrefs`, when given, is one URL (or None) per row in `rows`: the
+    row's first cell is wrapped in a link to it, so a list page can link
+    each row into its detail page without any view writing raw HTML of its
+    own. The href itself is escaped like any other interpolated value.
     """
 
     extra_params = extra_params or {}
     head_html = "".join(f"<th>{esc(header)}</th>" for header in headers)
-    body_html = "".join(
-        "<tr>" + "".join(f"<td>{esc(cell)}</td>" for cell in row) + "</tr>"
-        for row in rows
-    )
+    body_rows: list[str] = []
+    for index, row in enumerate(rows):
+        href = row_hrefs[index] if row_hrefs else None
+        cells_html: list[str] = []
+        for column, cell in enumerate(row):
+            if column == 0 and href is not None:
+                cells_html.append(f'<td><a href="{esc(href)}">{esc(cell)}</a></td>')
+            else:
+                cells_html.append(f"<td>{esc(cell)}</td>")
+        body_rows.append("<tr>" + "".join(cells_html) + "</tr>")
+    body_html = "".join(body_rows)
     if not rows:
         body_html = f'<tr><td colspan="{len(headers)}">No results.</td></tr>'
 

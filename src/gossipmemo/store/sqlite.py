@@ -24,6 +24,7 @@ from ..models import (
     UserModelReasoningResult,
     UserModelView,
 )
+from ._admin import _AdminReadMixin
 from ._context import _ContextMixin
 from ._messages import DEFAULT_EXTRACTION_COMPARISON_LIMIT, PendingExtraction
 
@@ -148,8 +149,13 @@ class WorldStore(Protocol):
     ) -> bool: ...
 
 
-class SqliteWorldStore(_ContextMixin):
-    """SQLite Adapter. Each method owns its short atomic write internally."""
+class SqliteWorldStore(_ContextMixin, _AdminReadMixin):
+    """SQLite Adapter. Each method owns its short atomic write internally.
+
+    `_AdminReadMixin` is composed in for the admin UI only; it is
+    deliberately not part of the `WorldStore` protocol above (see its
+    module docstring).
+    """
 
 
 __all__ = [

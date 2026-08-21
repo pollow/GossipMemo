@@ -112,7 +112,7 @@ def test_landing_page_reachable_after_login(tmp_path: Path):
         assert login.status_code == 303
         landing = await client.get("/admin")
         assert landing.status_code == 200
-        assert "under construction" in landing.text
+        assert "No results" in landing.text
 
     asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
 
