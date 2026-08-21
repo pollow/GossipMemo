@@ -430,7 +430,10 @@ the version — pin it per conversation or per day to hold the selection still,
 or rotate it deliberately. The goal pool stays in the seed either way, so
 adding or answering a goal still changes the draw. A negative `goals` is
 rejected with 422. Omitting both is exactly the behavior described above.
-`GET /v1/spaces/{space_id}/guidance` remains the unsampled escape hatch.
+`GET /v1/spaces/{space_id}/guidance` remains the escape hatch for an explicit
+ask. It is not sampled, but it is shuffled on every call, so an agent that asks
+for one goal walks the pool instead of getting the same most-recently-touched
+one each time.
 
 An empty bundle is a valid cold-start result. The current session's raw messages
 carry continuity while long-term memory accumulates.

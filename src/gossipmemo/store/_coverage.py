@@ -167,10 +167,11 @@ class _CoverageMixin(_ReasoningMixin):
             goals = connection.execute(
                 "SELECT * FROM learning_goals WHERE space_id = ? ORDER BY updated_at DESC",
                 (space_id,)).fetchall()
-            # `partial` is still served to the agent by guidance_bundle
-            # (status IN ('open', 'partial')), so it belongs with the open
-            # bucket here too -- otherwise the planner treats a goal the
-            # agent is still actively pursuing as settled history.
+            # `partial` is no longer served to the agent -- both guidance
+            # paths are open-only now -- but it stays in the open bucket
+            # here, which is about what the planner may still transition.
+            # Moving it to the history bucket would freeze a part-answered
+            # goal in `partial` forever, since nothing else advances it.
             open_statuses = {"open", "partial"}
             return (
                 revision,

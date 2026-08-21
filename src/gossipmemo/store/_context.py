@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import random
 import sqlite3
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -83,14 +84,18 @@ class _ContextMixin(_ContinuityMixin):
     def _open_learning_goal_rows(
         self, connection: sqlite3.Connection, space_id: str, person_ids: tuple[str, ...],
     ) -> list[sqlite3.Row]:
-        """Open/partial learning goals reachable from `person_ids`.
+        """Open learning goals reachable from `person_ids`.
 
-        Mirrors `_open_hypothesis_rows`.
+        Mirrors `_open_hypothesis_rows`, including its status filter: only
+        `open`. A `partial` goal has already drawn an answer, so re-offering
+        it is how an agent ends up circling the same ground -- and leaving it
+        in here made goals asymmetric with hypotheses, which were open-only
+        from the start.
         """
         placeholders = ','.join('?' for _ in person_ids) or 'NULL'
         return connection.execute(
             "SELECT id, focus_kind, focus_id, prompt, status, updated_at FROM learning_goals "
-            "WHERE space_id = ? AND status IN ('open', 'partial') AND (focus_kind = 'user' "
+            "WHERE space_id = ? AND status = 'open' AND (focus_kind = 'user' "
             f"OR (focus_kind = 'person' AND focus_id IN ({placeholders})) "
             "OR (focus_kind = 'relationship' AND focus_id IN "
             f"(SELECT id FROM relationships WHERE space_id = ? "
@@ -213,15 +218,26 @@ class _ContextMixin(_ContinuityMixin):
     def list_guidance(
         self, space_id: str, person_ids: Iterable[str] = (),
         kind: str | None = None, limit: int = 50,
+        rng: random.Random | None = None,
     ) -> list[GuidanceItem]:
-        """Return the full set of open hypotheses and open/partial learning goals for a focus.
+        """Return open hypotheses and open learning goals for a focus, shuffled.
 
-        Unlike `_guidance` (which samples a small, version-stable set for the
+        Unlike `_guidance` (which draws a small, seed-stable set for the
         passive, KV-cache-friendly context bundle), this is for an agent that
-        explicitly asks: it returns everything matching the owner/focus
-        filter, unsampled and not ranked by anything but recency. It shares
-        the exact filtering SQL with `_guidance` via `_open_hypothesis_rows`
-        and `_open_learning_goal_rows` so the two paths cannot drift apart.
+        explicitly asks. It shares the exact filtering SQL with `_guidance`
+        via `_open_hypothesis_rows` and `_open_learning_goal_rows`, so the two
+        paths cannot drift apart on what is reachable.
+
+        The order is random on every call, deliberately. Both row helpers end
+        in `ORDER BY updated_at DESC, id`, so an agent asking for one goal got
+        the same most-recently-touched goal every time, and anything past
+        `limit` was unreachable in practice. Shuffling makes repeated asks
+        walk the pool instead of circling its head.
+
+        That is the opposite of what `_guidance` needs -- its selection has to
+        stay stable for a given seed or the prompt prefix churns and the KV
+        cache misses. The two do not share it: shuffling happens after the
+        SQL, on the way out of this method only.
         """
         ids = tuple(dict.fromkeys(person_ids))
         capped = max(0, limit)
@@ -240,6 +256,7 @@ class _ContextMixin(_ContinuityMixin):
                     id=row['id'], kind='learning_goal', content=row['prompt'],
                     owner_kind=row['focus_kind'], owner_id=row['focus_id'], status=row['status'],
                 ) for row in rows)
+        (rng or random).shuffle(items)
         return items[:capped]
 
     def context_bundle(

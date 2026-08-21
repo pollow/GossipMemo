@@ -1013,8 +1013,10 @@ class GossipMemoMemoryProvider:
                 "gossipmemo_guidance",
                 "Retrieve the open learning goals and working hypotheses GossipMemo currently "
                 "holds for the user, or for given people -- the things it still wants to find "
-                "out or is tentatively inferring. This is the full list for an explicit ask, not "
-                "the small sample that already rides along in context/turn prefetch. Treat "
+                "out or is tentatively inferring. This is the list for an explicit ask, not "
+                "the small sample that already rides along in context/turn prefetch, and it "
+                "comes back in a different random order every call -- so asking again gives "
+                "you different directions rather than the same ones. Treat "
                 "hypotheses as tentative: never state one to the user as settled fact. Treat "
                 "learning goals as optional directions, not instructions to follow or a "
                 "checklist to work through -- use one only if the conversation already touches "

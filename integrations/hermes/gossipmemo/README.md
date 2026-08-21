@@ -75,8 +75,10 @@ every request's tool array.
 - `gossipmemo_dossier` reads a person or relationship projection without an
   open-ended synthesis query.
 - `gossipmemo_people` lists or searches known Person records.
-- `gossipmemo_guidance` lists open hypotheses and learning goals in full,
-  unsampled -- the passive context bundle only carries a small sample.
+- `gossipmemo_guidance` lists open hypotheses and open learning goals for an
+  explicit ask, shuffled on every call so repeated asks walk the pool rather
+  than circling its most-recently-touched head. The passive context bundle
+  carries only a small, seed-stable sample by contrast.
 - `gossipmemo_store` creates an explicit manual memory, including person role
   links such as `subject`, `asserter`, or `reporter`.
 - `gossipmemo_retract` retracts a memory while preserving its provenance.

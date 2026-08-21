@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from gossipmemo.models import (
     UserModelReasoningResult,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
+from gossipmemo.store import _context as _context_module
 
 
 @pytest.fixture
@@ -2100,7 +2102,14 @@ def test_list_guidance_reaches_relationship_owned_items_via_member_people(store)
     assert [item.id for item in reached] == ["hr"]
 
 
-def test_list_guidance_includes_partial_goals(store):
+def test_list_guidance_excludes_partial_goals(store):
+    """A partly-answered goal is not offered again.
+
+    This used to assert the opposite. `partial` means the goal already drew
+    an answer, so re-offering it is how an agent ends up asking around the
+    same ground repeatedly -- and it made goals asymmetric with hypotheses,
+    which `_open_hypothesis_rows` has restricted to `open` all along.
+    """
     store.ensure_space("personal")
     with store._connect() as connection:
         connection.execute(
@@ -2108,8 +2117,66 @@ def test_list_guidance_includes_partial_goals(store):
             "created_at, updated_at) VALUES ('gp', 'personal', 'Half answered', 'context', "
             "'[]', 'partial', '1', '1')"
         )
+        connection.execute(
+            "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, status, "
+            "created_at, updated_at) VALUES ('go', 'personal', 'Still open', 'context', "
+            "'[]', 'open', '1', '1')"
+        )
     items = store.list_guidance("personal")
-    assert [(item.id, item.status) for item in items] == [("gp", "partial")]
+    assert [(item.id, item.status) for item in items] == [("go", "open")]
+
+
+def test_list_guidance_shuffles_so_repeated_asks_walk_the_pool(store):
+    """Order is randomized per call, not `updated_at DESC`.
+
+    An agent that asks for one goal should not keep receiving the same
+    most-recently-touched goal, and goals past `limit` must not be
+    permanently unreachable.
+    """
+    store.ensure_space("personal")
+    with store._connect() as connection:
+        for index in range(12):
+            connection.execute(
+                "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
+                "status, created_at, updated_at) VALUES (?, 'personal', ?, 'context', "
+                "'[]', 'open', '1', ?)",
+                (f"g{index:02d}", f"Goal {index}", f"{index:02d}"),
+            )
+
+    # Seeded, so the assertion is on the shuffling itself rather than on luck.
+    ordered = [item.id for item in store.list_guidance("personal", rng=random.Random(0))]
+    assert sorted(ordered) == [f"g{index:02d}" for index in range(12)]
+    assert ordered != sorted(ordered, reverse=True)  # not updated_at DESC
+
+    # Two draws of one goal each, from different RNG states, can differ --
+    # under the old ordering both were always "g11".
+    firsts = {
+        store.list_guidance("personal", limit=1, rng=random.Random(seed))[0].id
+        for seed in range(20)
+    }
+    assert len(firsts) > 1
+
+
+def test_list_guidance_shuffle_defaults_to_module_random(store, monkeypatch):
+    """No `rng` argument still shuffles; the parameter exists for tests."""
+    store.ensure_space("personal")
+    with store._connect() as connection:
+        for index in range(5):
+            connection.execute(
+                "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
+                "status, created_at, updated_at) VALUES (?, 'personal', ?, 'context', "
+                "'[]', 'open', '1', ?)",
+                (f"g{index}", f"Goal {index}", str(index)),
+            )
+    calls: list[int] = []
+    original = _context_module.random.shuffle
+    monkeypatch.setattr(
+        _context_module.random, "shuffle",
+        lambda seq: (calls.append(len(seq)), original(seq))[1],
+    )
+    items = store.list_guidance("personal")
+    assert calls == [5]
+    assert len(items) == 5
 
 
 def test_list_guidance_excludes_closed_and_resolved_items(store):
