@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from datetime import datetime
 
@@ -15,6 +16,8 @@ from gossipmemo.config import Settings
 from gossipmemo.context_budget import ContextBudget
 from gossipmemo.llm import OpenAICompatibleAdapter
 from gossipmemo.models import (
+    ExtractedClarification,
+    ExtractedClarificationResult,
     ExtractedMemory,
     ExtractedPerson,
     ExtractedRelationship,
@@ -723,6 +726,137 @@ def test_openai_compatible_adapter_validates_structured_output():
             assert result.memories[0].basis == "stated"
 
     asyncio.run(scenario())
+
+
+def _clarification_message() -> ModelMessage:
+    return ModelMessage(
+        id="message_1",
+        space_id="personal",
+        author="user",
+        content="Bob likes tea.",
+        occurred_at="2026-08-09T12:00:00+00:00",
+        source_provider="test",
+    )
+
+
+class _SchemaCapturingModel(FakeModel):
+    """Records the system prompt and returns a fixed structured response."""
+
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.system_content: str | None = None
+
+    async def complete(self, request: ChatCompletionRequest) -> str:
+        self.system_content = str(request.messages[0].content)
+        return json.dumps(self.response)
+
+
+def test_extract_probe_off_requests_the_unchanged_base_schema():
+    model = _SchemaCapturingModel({"people": [], "memories": []})
+
+    result = asyncio.run(_extract(model, REASONING, [_clarification_message()]))
+
+    assert "clarifications" not in model.system_content
+    assert type(result) is ExtractionResult
+
+
+def test_extract_probe_on_requests_the_clarification_schema():
+    settings = ReasoningSettings(extraction_clarification_probe=True)
+    model = _SchemaCapturingModel(
+        {
+            "people": [],
+            "memories": [],
+            "clarifications": [
+                {
+                    "question": "Which Bob?",
+                    "reason": "Two people named Bob are known.",
+                    "blocked_by": "ambiguous reference",
+                    "evidence_message_ids": ["message_1"],
+                }
+            ],
+        }
+    )
+
+    result = asyncio.run(_extract(model, settings, [_clarification_message()]))
+
+    assert "clarifications" in model.system_content
+    assert isinstance(result, ExtractedClarificationResult)
+    assert result.clarifications[0].question == "Which Bob?"
+
+
+def test_clarifications_never_change_what_apply_extraction_persists(tmp_path):
+    """The probe is observation-only: a result carrying clarifications must
+    persist exactly the same people/memories as one without."""
+
+    store = _store(tmp_path / "a")
+    message_id = store.record_messages(
+        "personal", [MessageInput(author="user", content="Bob likes tea.")],
+    )[0]
+    plain_batch = store.create_extraction_batch("personal", [message_id])
+    assert plain_batch is not None
+
+    base_kwargs = dict(
+        people=[ExtractedPerson(ref="bob", display_name="Bob")],
+        memories=[
+            ExtractedMemory(content="Bob likes tea.", basis="stated", people=["bob"])
+        ],
+    )
+    store.apply_extraction("personal", plain_batch, ExtractionResult(**base_kwargs), set())
+    with store._connect() as connection:
+        plain_memories = sorted(
+            row["content"] for row in connection.execute(
+                "SELECT content FROM memories WHERE space_id = ?", ("personal",)
+            ).fetchall()
+        )
+
+    store2 = _store(tmp_path / "b")
+    message_id_2 = store2.record_messages(
+        "personal", [MessageInput(author="user", content="Bob likes tea.")],
+    )[0]
+    annotated_batch = store2.create_extraction_batch("personal", [message_id_2])
+    assert annotated_batch is not None
+    annotated_result = ExtractedClarificationResult(
+        **base_kwargs,
+        clarifications=[
+            ExtractedClarification(
+                question="Which Bob?",
+                reason="Two people named Bob are known.",
+                blocked_by="ambiguous reference",
+                evidence_message_ids=[message_id_2],
+            )
+        ],
+    )
+    store2.apply_extraction("personal", annotated_batch, annotated_result, set())
+    with store2._connect() as connection:
+        annotated_memories = sorted(
+            row["content"] for row in connection.execute(
+                "SELECT content FROM memories WHERE space_id = ?", ("personal",)
+            ).fetchall()
+        )
+
+    assert plain_memories == annotated_memories
+
+
+def test_extraction_clarification_log_fields_survive_structured_formatter():
+    from gossipmemo.logging import StructuredFormatter
+
+    record = logging.getLogger("test").makeRecord(
+        "test", logging.INFO, __file__, 1, "extraction_clarification", (), None,
+        extra={
+            "space_id": "personal",
+            "batch_id": "batch_1",
+            "question_text": "Which Bob is this?",
+            "reason_text": "Two people named Bob are known.",
+            "blocked_by": "ambiguous reference",
+            "evidence_message_ids": ["message_1"],
+        },
+    )
+    payload = json.loads(StructuredFormatter().format(record))
+
+    assert payload["question_text"] == "Which Bob is this?"
+    assert payload["reason_text"] == "Two people named Bob are known."
+    assert payload["blocked_by"] == "ambiguous reference"
+    assert payload["evidence_message_ids"] == ["message_1"]
 
 
 def test_owner_reasoning_uses_an_identical_prefix_for_both_stages():

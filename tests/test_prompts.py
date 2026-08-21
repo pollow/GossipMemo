@@ -102,6 +102,22 @@ def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
     assert "never save their restatements, summaries, analyses, or advice" in prompt
 
 
+def test_extraction_prompt_clarification_probe_off_is_byte_identical():
+    without_kwarg = extraction_prompt([message("m-1"), message("m-2")], prompts=PROMPTS)
+    with_flag_off = extraction_prompt(
+        [message("m-1"), message("m-2")], prompts=PROMPTS, clarification_probe=False,
+    )
+    assert without_kwarg == with_flag_off
+    assert PROMPTS.extraction_clarification_rule not in without_kwarg
+
+
+def test_extraction_prompt_clarification_probe_on_appends_rule():
+    prompt = extraction_prompt(
+        [message("m-1"), message("m-2")], prompts=PROMPTS, clarification_probe=True,
+    )
+    assert prompt.endswith(PROMPTS.extraction_clarification_rule)
+
+
 def test_extraction_prompt_requires_stable_specific_person_identity():
     prompt = extraction_prompt([message("identity")], user_name="Deus", prompts=PROMPTS)
 

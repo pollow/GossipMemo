@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from typing import Any
 
 from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient, embed_query_vector
-from ..models import ExtractionResult, MemoryView, ModelMessage
+from ..models import ExtractedClarificationResult, ExtractionResult, MemoryView, ModelMessage
 from ..priority import TIER_FRESHNESS, current_call_label, current_call_tier, llm_call_tier
 from ..prompts import PromptLibrary, schema_instruction
 from ..prompts.render import _json, fill
@@ -59,19 +59,25 @@ def extraction_prompt(
     user_name: str = "CurrentUser",
     comparison_memories: list[MemoryView] | tuple[MemoryView, ...] = (),
     *, prompts: PromptLibrary,
+    clarification_probe: bool = False,
 ) -> str:
     """Build the user prompt for :class:`~models.ExtractionResult`.
 
     The instruction paragraphs come from the library; which messages count as
     evidence, and how each section is rendered, stays here -- that split is
     what keeps an override from reshaping the request.
+
+    `clarification_probe` appends `extraction_clarification_rule` only when
+    on; with it off, the returned string is byte-for-byte what it was before
+    the probe existed, which is what makes probe-off runs a usable control
+    group.
     """
 
     evidence_messages = [message for message in messages if message.author == "user"]
     assistant_messages = [
         message for message in messages if message.author == "assistant"
     ]
-    return (
+    prompt = (
         prompts.extraction_retention_rule
         + "\n"
         + fill(prompts.extraction_user_evidence_rule, quoted_user_name=repr(user_name))
@@ -96,6 +102,9 @@ def extraction_prompt(
         + "\n"
         + prompts.extraction_comparison_rule
     )
+    if clarification_probe:
+        prompt += "\n" + prompts.extraction_clarification_rule
+    return prompt
 
 
 async def _extract(
@@ -106,12 +115,22 @@ async def _extract(
     known_people: Sequence[dict[str, Any]] = (),
     comparison_memories: Sequence[MemoryView] = (),
 ) -> ExtractionResult:
+    # `ExtractedClarificationResult` is a strict superset schema
+    # (`ExtractionResult` plus `clarifications`); using it for both the
+    # schema shown to the model and the parsed type only when the probe is
+    # on keeps the probe-off path -- schema and parsing alike -- identical
+    # to before the probe existed.
+    result_type = (
+        ExtractedClarificationResult
+        if settings.extraction_clarification_probe
+        else ExtractionResult
+    )
     request = transport.prepare(
         [
             ChatMessage(
                 role="system",
                 content=settings.prompts.extraction_system + "\n\n"
-                + schema_instruction(ExtractionResult),
+                + schema_instruction(result_type),
             ),
             ChatMessage(
                 role="user",
@@ -119,13 +138,14 @@ async def _extract(
                     list(messages), list(context), list(known_people),
                     settings.user_name, list(comparison_memories),
                     prompts=settings.prompts,
+                    clarification_probe=settings.extraction_clarification_probe,
                 ),
             ),
         ],
         structured=True,
     )
     _, result = await structured(
-        transport, request.messages, ExtractionResult,
+        transport, request.messages, result_type,
         tier=current_call_tier(), label=current_call_label(),
     )
     return result
@@ -215,12 +235,36 @@ class _ExtractionReasoner(AttemptLoop):
                 space_id, batch_id, result,
                 {memory.id for memory in comparisons},
             )
+            # `apply_extraction` above never reads `clarifications` -- it is
+            # only present on `ExtractedClarificationResult` and takes the
+            # base `ExtractionResult` type there, so a probe-off result
+            # simply has none. This log line is the only consumer.
+            clarifications = getattr(result, "clarifications", [])
+            for clarification in clarifications:
+                logger.info(
+                    "extraction_clarification",
+                    extra={
+                        "space_id": space_id,
+                        "batch_id": batch_id,
+                        # Field names are picked to survive
+                        # `StructuredFormatter._sensitive`, which drops any
+                        # extra key containing "content", "prompt", "body",
+                        # "token", "secret", etc. -- "question"/"reason"
+                        # alone are fine, but name them explicitly to avoid
+                        # future collisions with that filter.
+                        "question_text": clarification.question,
+                        "reason_text": clarification.reason,
+                        "blocked_by": clarification.blocked_by,
+                        "evidence_message_ids": clarification.evidence_message_ids,
+                    },
+                )
             logger.info(
                 "extraction_completed",
                 extra={
                     "space_id": space_id,
                     "batch_id": batch_id,
                     "message_count": len(messages),
+                    "clarification_count": len(clarifications),
                     "duration_ms": round(
                         (asyncio.get_running_loop().time() - started) * 1000, 2
                     ),
