@@ -532,7 +532,7 @@ accepted.
 The admin UI is **read-only**: every route is a `GET`, there is no template
 engine and no JavaScript, and it cannot write, retract, or delete anything in
 the database. It exists to browse spaces, messages, memories, people,
-relationships, learning goals, hypotheses, coverage, continuity history, and
+relationships, learning goals, hypotheses, coverage, continuity, and
 a few whitelisted operational tables (`schema_migrations`,
 `extraction_batches`, `embeddings`) without a `sqlite3` shell.
 

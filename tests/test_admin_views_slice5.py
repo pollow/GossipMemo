@@ -135,13 +135,17 @@ async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None
             await scenario(client, fixtures)
 
 
-# --- continuity history -----------------------------------------------------
+# --- continuity on the space overview ----------------------------------------
 
 
-def test_continuity_history_renders_text_message_and_linked_people(tmp_path: Path):
+def test_space_overview_renders_continuity_text_message_and_linked_people(tmp_path: Path):
+    """`continuities` keys on `space_id`, so a space holds exactly one row
+    that reasoning overwrites in place. There is no history to page through,
+    and the overview is the only place continuity is shown."""
+
     async def scenario(client, fixtures):
         person_id = fixtures["space1"]["person_id"]
-        response = await client.get("/admin/spaces/space1/continuities")
+        response = await client.get("/admin/spaces/space1")
         assert response.status_code == 200
         assert "Ongoing thread about Alice birthday" in response.text
         assert "Message content about Alice birthday plans" in response.text
@@ -152,32 +156,12 @@ def test_continuity_history_renders_text_message_and_linked_people(tmp_path: Pat
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_continuity_history_paginates(tmp_path: Path):
-    async def scenario(client, fixtures):
-        first = await client.get("/admin/spaces/space1/continuities?offset=0&limit=1")
-        assert first.status_code == 200
-        assert "1-1 of 1" in first.text
-
-        second = await client.get("/admin/spaces/space1/continuities?offset=1&limit=1")
-        assert second.status_code == 200
-        assert "No continuities recorded yet." in second.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_continuity_history_linked_from_space_overview(tmp_path: Path):
+def test_space_overview_has_no_continuity_history_link(tmp_path: Path):
     async def scenario(client, fixtures):
         response = await client.get("/admin/spaces/space1")
-        assert response.status_code == 200
-        assert '/admin/spaces/space1/continuities"' in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_continuity_history_unknown_space_returns_404(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/does-not-exist/continuities")
-        assert response.status_code == 404
+        assert "/admin/spaces/space1/continuities" not in response.text
+        gone = await client.get("/admin/spaces/space1/continuities")
+        assert gone.status_code == 404
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
@@ -274,7 +258,7 @@ def test_admin_tables_sql_injection_shaped_name_returns_404_and_does_not_execute
 @pytest.mark.parametrize(
     "path",
     [
-        "/admin/spaces/space1/continuities",
+        "/admin/spaces/space1",
         "/admin/tables",
         "/admin/tables/schema_migrations",
         "/admin/tables/extraction_batches",
@@ -299,7 +283,7 @@ def test_every_slice5_view_requires_a_session(tmp_path: Path, path):
 @pytest.mark.parametrize(
     "path",
     [
-        "/admin/spaces/space1/continuities",
+        "/admin/spaces/space1",
         "/admin/tables",
         "/admin/tables/schema_migrations",
         "/admin/tables/extraction_batches",

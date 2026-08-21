@@ -108,13 +108,22 @@ def _render_relationship_detail(
         if memories
         else "<p>None linked.</p>"
     )
+
+    def _person_link(person_id: str, name: str) -> str:
+        return (
+            f'<a href="/admin/spaces/{esc(space_id)}/people/{esc(person_id)}">'
+            f"{esc(name)}</a>"
+        )
+
+    person_a_link = _person_link(relationship.person_a_id, person_a_name)
+    person_b_link = _person_link(relationship.person_b_id, person_b_name)
     return f"""
 <section>
 <h2>Relationship</h2>
 <ul>
 <li>Id: {esc(relationship.id)}</li>
-<li>Person A: <a href="/admin/spaces/{esc(space_id)}/people/{esc(relationship.person_a_id)}">{esc(person_a_name)}</a></li>
-<li>Person B: <a href="/admin/spaces/{esc(space_id)}/people/{esc(relationship.person_b_id)}">{esc(person_b_name)}</a></li>
+<li>Person A: {person_a_link}</li>
+<li>Person B: {person_b_link}</li>
 <li>Status: {esc(relationship.status)}</li>
 <li>Closeness: {esc(relationship.closeness or "-")}</li>
 <li>Tone: {esc(relationship.tone or "-")}</li>

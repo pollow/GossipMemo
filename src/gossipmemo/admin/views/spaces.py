@@ -12,10 +12,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ...store._admin import ContinuityHistoryRow, MemoryDetail, MessageRow
+from ...store._admin import MemoryDetail, MessageRow
 from ...store.sqlite import SqliteWorldStore
 from ..render import esc, html_response, page, table_component
-from ._common import clamp_limit, clamp_offset, clean_bool, clean_choice, require_space, space_breadcrumbs
+from ._common import (
+    clamp_limit,
+    clamp_offset,
+    clean_bool,
+    clean_choice,
+    require_space,
+    space_breadcrumbs,
+)
 
 _MEMORY_STATES = ("active", "retracted", "superseded")
 _MEMORY_KINDS = ("fact", "event", "preference", "plan", "situation", "impression")
@@ -59,14 +66,16 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
 <section>
 <h2>Counts</h2>
 <ul>
-<li>Messages: {esc(overview.message_count)} (<a href="/admin/spaces/{esc(space_id)}/messages">view</a>)</li>
-<li>Memories: {esc(overview.memory_count)} (<a href="/admin/spaces/{esc(space_id)}/memories">view</a>)</li>
-<li>People: {esc(overview.people_count)} (<a href="/admin/spaces/{esc(space_id)}/people">view</a>)</li>
+<li>Messages: {esc(overview.message_count)}
+(<a href="/admin/spaces/{esc(space_id)}/messages">view</a>)</li>
+<li>Memories: {esc(overview.memory_count)}
+(<a href="/admin/spaces/{esc(space_id)}/memories">view</a>)</li>
+<li>People: {esc(overview.people_count)}
+(<a href="/admin/spaces/{esc(space_id)}/people">view</a>)</li>
 <li>Relationships: (<a href="/admin/spaces/{esc(space_id)}/relationships">view</a>)</li>
 <li>Learning goals: (<a href="/admin/spaces/{esc(space_id)}/goals">view</a>)</li>
 <li>Hypotheses: (<a href="/admin/spaces/{esc(space_id)}/hypotheses">view</a>)</li>
 <li>Coverage: (<a href="/admin/spaces/{esc(space_id)}/coverage">view</a>)</li>
-<li>Continuity history: (<a href="/admin/spaces/{esc(space_id)}/continuities">view</a>)</li>
 </ul>
 </section>
 <section>
@@ -75,10 +84,13 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
 <pre>{esc(overview.user_model_profile_card)}</pre>
 </section>
 <section>
-<h2>Latest continuity</h2>
+<h2>Continuity</h2>
 <p>Updated: {esc(overview.continuity_updated_at or "never")}</p>
 <p>{esc(overview.continuity_text or "(empty)")}</p>
-<p>Related people: {esc(", ".join(overview.continuity_related_person_ids) or "none")}</p>
+<h3>Related people</h3>
+{_render_continuity_people(space_id, overview.continuity_related_people)}
+<h3>Last covered message</h3>
+{_render_continuity_message(overview.continuity_through_message)}
 </section>
 """
         return html_response(
@@ -203,36 +215,6 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
             page(title=f"Memory {memory_id}", breadcrumbs=breadcrumbs, body=body)
         )
 
-    @router.get("/spaces/{space_id}/continuities", include_in_schema=False)
-    async def continuities_view(
-        space_id: str, request: Request, _: None = Depends(require_session)
-    ) -> HTMLResponse:
-        overview = require_space(store, space_id)
-        if isinstance(overview, HTMLResponse):
-            return overview
-        query = request.query_params
-        offset = clamp_offset(query.get("offset"))
-        limit = clamp_limit(query.get("limit"))
-        base_path = f"/admin/spaces/{space_id}/continuities"
-        total = store.admin_count_continuities(space_id)
-        entries = store.admin_list_continuities(space_id, offset, limit)
-        entries_html = (
-            "".join(_render_continuity_entry(space_id, entry) for entry in entries)
-            if entries
-            else "<p>No continuities recorded yet.</p>"
-        )
-        body = entries_html + _continuity_pagination(offset, limit, total, base_path)
-        breadcrumbs = space_breadcrumbs(space_id, overview.name) + [
-            ("Continuity history", base_path)
-        ]
-        return html_response(
-            page(
-                title=f"Continuity history: {overview.name}",
-                breadcrumbs=breadcrumbs,
-                body=body,
-            )
-        )
-
 
 def _render_space_list(spaces) -> str:
     table_html = table_component(
@@ -252,59 +234,22 @@ def _render_space_list(spaces) -> str:
     )
 
 
-def _render_continuity_entry(space_id: str, entry: ContinuityHistoryRow) -> str:
-    people_html = (
-        "<ul>" + "".join(
-            f'<li><a href="/admin/spaces/{esc(space_id)}/people/{esc(p.id)}">'
-            f"{esc(p.display_name)}</a></li>"
-            for p in entry.related_people
-        ) + "</ul>"
-        if entry.related_people
-        else "<p>None linked.</p>"
-    )
-    message_html = (
-        f"<p>[{esc(entry.through_message.occurred_at)}] "
-        f"{esc(entry.through_message.author)}: {esc(entry.through_message.content)}</p>"
-        if entry.through_message
-        else "<p>None.</p>"
-    )
-    return f"""
-<article>
-<h2>Updated {esc(entry.updated_at)}</h2>
-<p>{esc(entry.text or "(empty)")}</p>
-<h3>Related people</h3>
-{people_html}
-<h3>Last covered message</h3>
-{message_html}
-</article>
-"""
+def _render_continuity_people(space_id: str, people) -> str:
+    if not people:
+        return "<p>None linked.</p>"
+    return "<ul>" + "".join(
+        f'<li><a href="/admin/spaces/{esc(space_id)}/people/{esc(person.id)}">'
+        f"{esc(person.display_name)}</a></li>"
+        for person in people
+    ) + "</ul>"
 
 
-def _continuity_pagination(offset: int, limit: int, total: int, base_path: str) -> str:
-    """A standalone prev/next footer matching `table_component`'s, for the
-    continuity history page, which renders entries as cards rather than
-    table rows (each entry needs multiple linked people, which a single
-    table cell can't hold)."""
-
-    def _link(new_offset: int) -> str:
-        return f"{esc(base_path)}?offset={new_offset}&limit={limit}"
-
-    prev_html = (
-        f'<a href="{_link(max(0, offset - limit))}">Previous</a>'
-        if offset > 0
-        else "<span>Previous</span>"
-    )
-    next_offset = offset + limit
-    next_html = (
-        f'<a href="{_link(next_offset)}">Next</a>'
-        if next_offset < total
-        else "<span>Next</span>"
-    )
-    range_start = 0 if total == 0 else offset + 1
-    range_end = min(offset + limit, total)
+def _render_continuity_message(message: MessageRow | None) -> str:
+    if message is None:
+        return "<p>None.</p>"
     return (
-        f'<p class="pagination">{prev_html} | {next_html} '
-        f"&mdash; {range_start}-{range_end} of {total}</p>"
+        f"<p>[{esc(message.occurred_at)}] {esc(message.author)}: "
+        f"{esc(message.content)}</p>"
     )
 
 

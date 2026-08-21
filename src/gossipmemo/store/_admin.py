@@ -49,7 +49,8 @@ class SpaceOverview:
     user_model_updated_at: str | None
     continuity_text: str
     continuity_updated_at: str | None
-    continuity_related_person_ids: list[str]
+    continuity_related_people: list[LinkedPerson]
+    continuity_through_message: MessageRow | None
 
 
 @dataclass
@@ -166,14 +167,6 @@ class CoverageEntryRow:
     content: str
     status: str
     created_at: str
-    updated_at: str
-
-
-@dataclass
-class ContinuityHistoryRow:
-    text: str
-    related_people: list[LinkedPerson]
-    through_message: MessageRow | None
     updated_at: str
 
 
@@ -340,10 +333,22 @@ class _AdminReadMixin(_BaseStore):
                 (space_id,),
             ).fetchone()
             continuity = connection.execute(
-                "SELECT text, related_person_ids, updated_at FROM continuities "
-                "WHERE space_id = ?",
+                "SELECT text, related_person_ids, through_message_id, updated_at "
+                "FROM continuities WHERE space_id = ?",
                 (space_id,),
             ).fetchone()
+            continuity_people = (
+                self._resolve_people(
+                    connection, space_id, load_json(continuity["related_person_ids"], [])
+                )
+                if continuity
+                else []
+            )
+            continuity_message = (
+                self._fetch_message(connection, space_id, continuity["through_message_id"])
+                if continuity
+                else None
+            )
             return SpaceOverview(
                 id=space["id"],
                 name=space["name"],
@@ -354,9 +359,8 @@ class _AdminReadMixin(_BaseStore):
                 user_model_updated_at=(user_model["profile_updated_at"] if user_model else None),
                 continuity_text=(continuity["text"] if continuity else ""),
                 continuity_updated_at=(continuity["updated_at"] if continuity else None),
-                continuity_related_person_ids=(
-                    load_json(continuity["related_person_ids"], []) if continuity else []
-                ),
+                continuity_related_people=continuity_people,
+                continuity_through_message=continuity_message,
             )
 
     def admin_count_messages(self, space_id: str) -> int:
@@ -839,66 +843,38 @@ class _AdminReadMixin(_BaseStore):
                 for row in rows
             ]
 
-    def admin_count_continuities(self, space_id: str) -> int:
-        # The current schema keeps exactly one continuity row per space
-        # (`continuities.space_id` is its primary key) -- there is no
-        # retained history of earlier continuity snapshots. This returns
-        # 0 or 1 today; it is written generically so the admin history
-        # view (and this query) keep working unchanged if that ever
-        # becomes a real multi-row history.
-        with self._connect() as connection:
-            row = connection.execute(
-                "SELECT COUNT(*) AS n FROM continuities WHERE space_id = ?", (space_id,)
-            ).fetchone()
-            return row["n"]
+    def _resolve_people(
+        self, connection, space_id: str, person_ids: list[str]
+    ) -> list[LinkedPerson]:
+        """Turn stored person IDs into names the admin page can link.
 
-    def admin_list_continuities(
-        self, space_id: str, offset: int, limit: int
-    ) -> list[ContinuityHistoryRow]:
-        with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT text, related_person_ids, through_message_id, updated_at
-                FROM continuities WHERE space_id = ?
-                ORDER BY updated_at DESC LIMIT ? OFFSET ?
-                """,
-                (space_id, limit, offset),
-            ).fetchall()
-            results: list[ContinuityHistoryRow] = []
-            for row in rows:
-                person_ids = load_json(row["related_person_ids"], [])
-                related_people: list[LinkedPerson] = []
-                if person_ids:
-                    placeholders = ",".join("?" for _ in person_ids)
-                    person_rows = connection.execute(
-                        f"""
-                        SELECT id, display_name FROM people
-                        WHERE space_id = ? AND id IN ({placeholders})
-                        ORDER BY display_name, id
-                        """,
-                        (space_id, *person_ids),
-                    ).fetchall()
-                    related_people = [
-                        LinkedPerson(id=r["id"], display_name=r["display_name"])
-                        for r in person_rows
-                    ]
-                through_message: MessageRow | None = None
-                if row["through_message_id"]:
-                    message = connection.execute(
-                        "SELECT * FROM messages WHERE space_id = ? AND id = ?",
-                        (space_id, row["through_message_id"]),
-                    ).fetchone()
-                    if message:
-                        through_message = _message_row(message)
-                results.append(
-                    ContinuityHistoryRow(
-                        text=row["text"],
-                        related_people=related_people,
-                        through_message=through_message,
-                        updated_at=row["updated_at"],
-                    )
-                )
-            return results
+        `continuities.related_person_ids` is a JSON array of IDs, and a raw
+        ID tells a human reading the page nothing.
+        """
+
+        if not person_ids:
+            return []
+        placeholders = ",".join("?" for _ in person_ids)
+        rows = connection.execute(
+            f"""
+            SELECT id, display_name FROM people
+            WHERE space_id = ? AND id IN ({placeholders})
+            ORDER BY display_name, id
+            """,
+            (space_id, *person_ids),
+        ).fetchall()
+        return [LinkedPerson(id=r["id"], display_name=r["display_name"]) for r in rows]
+
+    def _fetch_message(
+        self, connection, space_id: str, message_id: str | None
+    ) -> MessageRow | None:
+        if not message_id:
+            return None
+        row = connection.execute(
+            "SELECT * FROM messages WHERE space_id = ? AND id = ?",
+            (space_id, message_id),
+        ).fetchone()
+        return _message_row(row) if row else None
 
     def admin_count_raw_table(self, table: str) -> int:
         if table not in ADMIN_RAW_TABLES:
@@ -1153,7 +1129,6 @@ def _memory_filter_clauses(
 
 __all__ = [
     "ADMIN_RAW_TABLES",
-    "ContinuityHistoryRow",
     "CoverageEntryRow",
     "CoverageEntrySearchHit",
     "CoverageRootRow",

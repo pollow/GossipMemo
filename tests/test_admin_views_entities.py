@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -401,7 +401,7 @@ def test_coverage_root_list_shows_all_roots_with_counts(tmp_path: Path):
 def test_coverage_drill_down_from_root_list_to_entries(tmp_path: Path):
     async def scenario(client, fixtures):
         roots = await client.get("/admin/spaces/space1/coverage")
-        assert f'/admin/spaces/space1/coverage/M1"' in roots.text
+        assert '/admin/spaces/space1/coverage/M1"' in roots.text
 
         entries = await client.get("/admin/spaces/space1/coverage/M1")
         assert entries.status_code == 200

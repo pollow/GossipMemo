@@ -9,8 +9,6 @@ other.
 
 from __future__ import annotations
 
-from fastapi.responses import HTMLResponse
-
 from ...store.sqlite import SqliteWorldStore
 from ..render import DEFAULT_PAGE_SIZE, html_response, page
 

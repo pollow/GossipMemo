@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
-import pytest
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
@@ -183,7 +182,13 @@ async def _login(client: httpx.AsyncClient) -> None:
     assert response.status_code == 303
 
 
-async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None, seed_cap: bool = False):
+async def _run(
+    tmp_path: Path,
+    scenario,
+    *,
+    seed_spaces: list[str] | None = None,
+    seed_cap: bool = False,
+):
     store = SqliteWorldStore(tmp_path / "world.db")
     world = SocialMemoryWorld(store, _NoopModel())
     app = create_app(_settings(tmp_path), world)
