@@ -302,6 +302,133 @@ def test_hermes_resends_the_user_message_with_its_key_when_prefetch_failed():
         provider.shutdown()
 
 
+_STABLE_BUNDLE = {
+    "version": "v1",
+    "user_model": {"profile_card": {"preferences": {"items": ["likes tea"]}}},
+    "continuity": {"text": "ongoing project chat"},
+    "guidance": {
+        "items": [
+            {"id": "h1", "kind": "hypothesis", "content": "maybe allergic to nuts"},
+            {"id": "g1", "kind": "learning_goal", "content": "ask about weekend plans"},
+        ]
+    },
+    "people": [],
+}
+
+
+class _ContextClient:
+    """A fake SDK client exposing both ``context()`` and ``turn()``.
+
+    Covers the ``system_prompt_block`` stable-block fetch alongside the
+    existing per-turn ``turn()`` path used by prefetch/sync.
+    """
+
+    def __init__(self, *, context_result=None, context_error=None, turn_result=None):
+        self.context_result = context_result
+        self.context_error = context_error
+        self.turn_result = turn_result if turn_result is not None else {}
+        self.context_calls = 0
+        self.turn_calls: list[tuple] = []
+
+    def context(self):
+        self.context_calls += 1
+        if self.context_error is not None:
+            raise self.context_error
+        return self.context_result
+
+    def turn(self, message, **kwargs):
+        if isinstance(message, list):
+            return {"status": "accepted"}
+        self.turn_calls.append((message, kwargs))
+        return self.turn_result
+
+    def close(self):
+        return None
+
+
+def test_hermes_system_prompt_block_carries_stable_half_and_keeps_instructions():
+    client = _ContextClient(context_result=_STABLE_BUNDLE)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-stable")
+    try:
+        block = provider.system_prompt_block()
+        # The static instructions paragraph survives untouched.
+        assert block.startswith("# GossipMemo memory\n")
+        assert "gossipmemo_retract to correct a memory." in block
+        # The stable half (user model + hypotheses) rides along, using the
+        # same line shapes as the volatile channel.
+        assert "User model — preferences: likes tea" in block
+        assert "Tentative hypothesis: maybe allergic to nuts" in block
+        # Learning goals and continuity are the volatile half's job, not this
+        # channel's.
+        assert "learning goal" not in block
+        assert "Continuity:" not in block
+        assert client.context_calls == 1
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_prefetch_omits_stable_lines_once_delivered_by_system_prompt_block():
+    turn_result = {
+        "message_ids": ["m1"],
+        "known_people": [],
+        "memory_recall": [{"content": "had a scare with peanuts", "basis": "fts"}],
+        "guidance": {
+            "items": [
+                {"id": "h1", "kind": "hypothesis", "content": "maybe allergic to nuts"},
+            ]
+        },
+        "context_update": _STABLE_BUNDLE,
+    }
+    client = _ContextClient(context_result=_STABLE_BUNDLE, turn_result=turn_result)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-stable-prefetch")
+    try:
+        # Deliver the stable half once, as Hermes would during prompt assembly.
+        provider.system_prompt_block()
+        formatted = provider.prefetch("What's new with peanuts?")
+        assert "User model —" not in formatted
+        assert "Tentative hypothesis:" not in formatted
+        # The volatile half is unaffected either way.
+        assert "Continuity: ongoing project chat" in formatted
+        assert "Memory (fts): had a scare with peanuts" in formatted
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_prefetch_keeps_stable_lines_when_context_fetch_failed():
+    turn_result = {
+        "message_ids": ["m1"],
+        "known_people": [],
+        "memory_recall": [{"content": "had a scare with peanuts", "basis": "fts"}],
+        "guidance": {
+            "items": [
+                {"id": "h1", "kind": "hypothesis", "content": "maybe allergic to nuts"},
+            ]
+        },
+        "context_update": _STABLE_BUNDLE,
+    }
+    client = _ContextClient(context_error=RuntimeError("server down"), turn_result=turn_result)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-stable-fallback")
+    try:
+        block = provider.system_prompt_block()
+        # A dead server still yields the static instructions, just no stable
+        # half, and must not raise out of prompt assembly.
+        assert block.startswith("# GossipMemo memory\n")
+        assert "User model" not in block
+        assert provider._stable_delivered == {}
+        formatted = provider.prefetch("What's new with peanuts?")
+        # Never having delivered the stable half, prefetch keeps emitting it
+        # exactly as it did before this split existed.
+        assert "User model — preferences: likes tea" in formatted
+        assert "Tentative hypothesis: maybe allergic to nuts" in formatted
+        assert "Continuity: ongoing project chat" in formatted
+        assert "Memory (fts): had a scare with peanuts" in formatted
+    finally:
+        provider.shutdown()
+
+
 def test_hermes_keeps_one_turn_slot_per_conversation():
     client = _TurnClient(turn_result={"message_ids": ["message_1"]})
     provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)

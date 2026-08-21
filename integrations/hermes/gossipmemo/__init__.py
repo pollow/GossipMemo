@@ -127,6 +127,13 @@ class GossipMemoMemoryProvider(MemoryProvider):
         # per conversation: a single slot, not a list that can only grow.
         self._current_turn: dict[str, dict[str, Any]] = {}
         self._prefetch_threads: list[threading.Thread] = []
+        # Set once system_prompt_block() has actually delivered the stable
+        # (user-model/hypothesis) half for a conversation, so prefetch/
+        # _format_context knows it can stop repeating that half per turn. A
+        # dead server or a session predating system_prompt_block() leaves
+        # this unset, and the volatile-channel rendering keeps emitting the
+        # stable half exactly as before -- never silently dropped.
+        self._stable_delivered: dict[str, bool] = {}
 
     @property
     def name(self) -> str:
@@ -225,6 +232,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._prefetch_cache.clear()
         self._context_cache.clear()
         self._current_turn.clear()
+        self._stable_delivered.clear()
         try:
             self._client = self._client_factory(
                 base_url=base_url,
@@ -244,13 +252,134 @@ class GossipMemoMemoryProvider(MemoryProvider):
         self._writer.start()
 
     def system_prompt_block(self) -> str:
-        return (
+        instructions = (
             "# GossipMemo memory\n"
             "GossipMemo keeps provenance-aware memories about people and relationships. "
             "Use gossipmemo_query before relying on social context, gossipmemo_store "
             "for explicit durable facts, gossipmemo_dossier for a person's current "
             "profile, and gossipmemo_retract to correct a memory."
         )
+        stable = self._fetch_stable_block()
+        if stable:
+            return f"{instructions}\n\n{stable}"
+        return instructions
+
+    def _fetch_stable_block(self) -> str:
+        """Best-effort fetch of the slowly-changing (user-model/hypothesis) half.
+
+        Hermes calls ``system_prompt_block`` once per session while assembling
+        the (cached, never rebuilt mid-session) system prompt, so this must
+        never raise and must never block that assembly for long -- a slow or
+        dead GossipMemo server should just mean no stable block this session,
+        not a broken prompt.
+        """
+
+        key = self._conversation_key() or "default"
+        with self._prefetch_lock:
+            cached = self._context_cache.get(key)
+        bundle: Any = cached if isinstance(cached, Mapping) and cached else None
+        if bundle is None:
+            client = self._client
+            if client is None:
+                return ""
+            fetched: list[Any] = []
+
+            def _fetch() -> None:
+                try:
+                    value = client.context()
+                except Exception as exc:  # noqa: BLE001 - must never break prompt assembly.
+                    logger.debug("GossipMemo system_prompt_block context fetch failed: %s", exc)
+                    return
+                if isinstance(value, Mapping):
+                    fetched.append(value)
+
+            thread = threading.Thread(
+                target=_fetch, name="gossipmemo-system-prompt-context", daemon=True)
+            thread.start()
+            thread.join(timeout=0.5)
+            if not fetched:
+                return ""
+            bundle = fetched[0]
+            with self._prefetch_lock:
+                self._context_cache.setdefault(key, dict(bundle))
+        lines = self._render_stable_lines(bundle)
+        if not lines:
+            return ""
+        self._stable_delivered[key] = True
+        return "\n".join(lines)
+
+    @staticmethod
+    def _render_stable_lines(bundle: Any) -> list[str]:
+        """Render just the slowly-changing half: user model + hypotheses.
+
+        Mirrors the corresponding fragments of ``_format_context`` so the
+        line shapes (``User model — ``, ``Tentative hypothesis: ``) stay
+        byte-identical between the two channels.
+        """
+
+        if not isinstance(bundle, Mapping):
+            return []
+        lines: list[str] = []
+        user_model = bundle.get("user_model")
+        if user_model:
+            card = user_model.get("profile_card") if isinstance(
+                user_model, Mapping) else user_model
+            if card:
+                lines.extend(GossipMemoMemoryProvider._render_user_model(card))
+        guidance = bundle.get("guidance")
+        guidance_items = guidance.get("items", []) if isinstance(guidance, Mapping) else []
+        if isinstance(guidance_items, list):
+            seen_guidance: set[str] = set()
+            for item in guidance_items[:8]:
+                if not isinstance(item, Mapping) or item.get("kind") != "hypothesis":
+                    continue
+                item_id = str(item.get("id") or item.get("content") or "")
+                content = _compact(item.get("content"), 420)
+                if not content or item_id in seen_guidance:
+                    continue
+                seen_guidance.add(item_id)
+                lines.append(f"Tentative hypothesis: {content}")
+        return lines
+
+    def _context_for_volatile_render(
+        self, merged: Mapping[str, Any], key: str
+    ) -> Mapping[str, Any]:
+        """Strip the stable half out of a turn result before static rendering.
+
+        Only takes effect once ``system_prompt_block`` has actually delivered
+        the stable block for this conversation (tracked in
+        ``self._stable_delivered``); otherwise the input passes through
+        unchanged and ``_format_context`` keeps emitting everything, exactly
+        as it did before this split existed.
+        """
+
+        if not self._stable_delivered.get(key):
+            return merged
+
+        def _without_hypotheses(guidance: Any) -> Any:
+            if not isinstance(guidance, Mapping):
+                return guidance
+            items = guidance.get("items")
+            if not isinstance(items, list):
+                return guidance
+            filtered = dict(guidance)
+            filtered["items"] = [
+                item for item in items
+                if not (isinstance(item, Mapping) and item.get("kind") == "hypothesis")
+            ]
+            return filtered
+
+        result = dict(merged)
+        bundle = result.get("bundle")
+        if isinstance(bundle, Mapping):
+            bundle = dict(bundle)
+            bundle.pop("user_model", None)
+            if "guidance" in bundle:
+                bundle["guidance"] = _without_hypotheses(bundle["guidance"])
+            result["bundle"] = bundle
+        if "guidance" in result:
+            result["guidance"] = _without_hypotheses(result["guidance"])
+        return result
 
     def _conversation_key(self, session_id: str = "") -> str | None:
         value = session_id or self._session_id
@@ -425,7 +554,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
             "memory_recall": result.get("memory_recall", []),
             "guidance": result.get("guidance", {}),
         }
-        formatted = self._format_context(merged)
+        formatted = self._format_context(self._context_for_volatile_render(merged, key))
         with self._prefetch_lock:
             entry["formatted"] = formatted
             entry["event"].set()
