@@ -557,6 +557,20 @@ def test_hermes_plugin_mode_pre_llm_call_matches_provider_prefetch():
     adapter = _GossipMemoPluginAdapter(provider)
     provider.initialize("s-pre-llm")
     try:
+        # A genuine first turn primes the key (claims it and delivers the
+        # stable block) so the two calls under test, below, both land on the
+        # "already seen" branch and are directly comparable.
+        adapter.pre_llm_call(
+            session_id="s-pre-llm",
+            task_id="t0",
+            turn_id="turn0",
+            user_message="What's new?",
+            conversation_history=[],
+            is_first_turn=True,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
         # Same session key and query text both times: the first call performs
         # the fetch, the second (via the adapter) rides the same in-flight
         # turn slot and returns the identical formatted content -- proving
@@ -575,6 +589,73 @@ def test_hermes_plugin_mode_pre_llm_call_matches_provider_prefetch():
         )
         assert isinstance(result, dict)
         assert result["context"] == expected
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_pre_llm_call_delivers_stable_block_after_session_key_rotation():
+    """A session_id rotation mid-conversation must not silence the stable block.
+
+    Context compression, /resume, and /branch all swap the session_id a
+    later pre_llm_call carries without Hermes ever re-announcing it as a
+    first turn (is_first_turn stays False). Since every per-session cache
+    here is keyed on session_id, an unannounced rotation lands on a key
+    none of them have seen; the stable (user-model/hypothesis) block must
+    still reach that key's first turn, and must not repeat on the next one.
+    """
+
+    client = _ContextClient(context_result=_STABLE_BUNDLE, turn_result={
+        "message_ids": ["m1"],
+        "known_people": [],
+        "memory_recall": [],
+        "guidance": {},
+        "context_update": _STABLE_BUNDLE,
+    })
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    provider.initialize("s-original")
+    try:
+        first = adapter.pre_llm_call(
+            session_id="s-original",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="Hi",
+            conversation_history=[],
+            is_first_turn=True,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
+        assert "User model" in first["context"]
+
+        # Compression rotates the session_id; Hermes does not flag this turn
+        # as a first turn even though this key has never been seen before.
+        rotated = adapter.pre_llm_call(
+            session_id="s-rotated",
+            task_id="t2",
+            turn_id="turn2",
+            user_message="Still there?",
+            conversation_history=[],
+            is_first_turn=False,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
+        assert "User model" in rotated["context"]
+
+        # A second turn under the same rotated key must not repeat it.
+        again = adapter.pre_llm_call(
+            session_id="s-rotated",
+            task_id="t3",
+            turn_id="turn3",
+            user_message="One more.",
+            conversation_history=[],
+            is_first_turn=False,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
+        assert "User model" not in again["context"]
     finally:
         provider.shutdown()
 

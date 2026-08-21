@@ -84,3 +84,27 @@ Completed user/assistant turns are queued to a daemon writer, so
 `sync_turn()` does not wait for HTTP or server-side extraction. Writes from
 non-primary Hermes contexts (for example, cron prompts or subagents) are
 skipped to avoid polluting the primary person's social world.
+
+## Known gaps
+
+- **Non-primary session detection is a heuristic, not a real signal.**
+  Provider mode received an explicit `agent_context` kwarg Hermes used to
+  flag cron/subagent sessions; plugin hooks carry no such kwarg. `_is_primary_session`
+  reconstructs the guard from Hermes' `cron_<job_id>_<timestamp>` session-id
+  naming convention, which catches cron sessions but has no signal at all
+  for subagent sessions -- a subagent's turns can still be ingested as the
+  primary user's memories.
+- **Session-id rotation is inferred, not announced.** Hermes silently swaps
+  the `session_id` a hook call carries when context compression rotates it
+  mid-conversation (and on `/resume` and `/branch`), with no hook telling
+  this plugin it happened. Because `_context_cache`, `_prefetch_cache`,
+  `_current_turn`, and `_stable_delivered` are all keyed on `session_id`,
+  relying only on Hermes' `is_first_turn` flag to decide when to (re-)deliver
+  the stable (user-model/hypothesis) block would mean an unannounced
+  rotation's new key never gets it for the rest of that conversation --
+  Hermes never sets `is_first_turn` again once a session is underway. The
+  fix is defensive rather than a recovered hook: `pre_llm_call` treats any
+  session key it has not seen this session as a first turn in its own
+  right (`GossipMemoMemoryProvider._claim_first_turn`), independent of
+  `is_first_turn`, so compression, `/resume`, and `/branch` are all covered
+  the same way without depending on any of them being announced.
