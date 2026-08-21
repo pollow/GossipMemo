@@ -49,6 +49,14 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
             return overview
         body = f"""
 <section>
+<h2>Search</h2>
+<form method="get" action="/admin/spaces/{esc(space_id)}/search">
+<label for="q">Search this space</label>
+<input type="text" id="q" name="q">
+<button type="submit">Search</button>
+</form>
+</section>
+<section>
 <h2>Counts</h2>
 <ul>
 <li>Messages: {esc(overview.message_count)} (<a href="/admin/spaces/{esc(space_id)}/messages">view</a>)</li>

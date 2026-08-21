@@ -167,6 +167,81 @@ class CoverageEntryRow:
     updated_at: str
 
 
+#: Every kind is capped at this many hits; one extra row is fetched to
+#: detect (without a COUNT) whether the cap actually truncated something.
+_SEARCH_LIMIT = 20
+
+
+@dataclass
+class MemorySearchHit:
+    id: str
+    content: str
+
+
+@dataclass
+class MessageSearchHit:
+    id: str
+    content: str
+    occurred_at: str
+
+
+@dataclass
+class PersonSearchHit:
+    id: str
+    display_name: str
+
+
+@dataclass
+class LearningGoalSearchHit:
+    id: str
+    prompt: str
+
+
+@dataclass
+class HypothesisSearchHit:
+    id: str
+    content: str
+
+
+@dataclass
+class CoverageEntrySearchHit:
+    id: str
+    root: str
+    path: str
+    content: str
+
+
+@dataclass
+class ContinuitySearchHit:
+    text: str
+
+
+@dataclass
+class SearchGroup:
+    hits: list
+    truncated: bool
+
+
+@dataclass
+class SearchResults:
+    memories: SearchGroup
+    messages: SearchGroup
+    people: SearchGroup
+    learning_goals: SearchGroup
+    hypotheses: SearchGroup
+    coverage_entries: SearchGroup
+    continuities: SearchGroup
+
+
+def _escape_like(keyword: str) -> str:
+    """Escape `%`, `_`, and the escape character itself for a `LIKE ...
+    ESCAPE '\\'` clause. Callers must always pair this with `ESCAPE '\\'`
+    in the SQL and bind the result as a parameter -- never interpolate the
+    keyword into SQL text."""
+
+    return keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 @dataclass
 class MemoryDetail:
     id: str
@@ -741,6 +816,131 @@ class _AdminReadMixin(_BaseStore):
                 for row in rows
             ]
 
+    def admin_search(self, space_id: str, keyword: str) -> SearchResults:
+        """One keyword, scanned across seven kinds within one space.
+
+        Each kind is a separate plain `LIKE ... ESCAPE '\\' COLLATE
+        NOCASE` query, bound-parameter only, capped at `_SEARCH_LIMIT`
+        rows (one extra row is fetched per kind to detect truncation
+        without a second COUNT query).
+        """
+
+        escaped = _escape_like(keyword)
+        pattern = f"%{escaped}%"
+        fetch_limit = _SEARCH_LIMIT + 1
+        with self._connect() as connection:
+            memory_rows = connection.execute(
+                """
+                SELECT id, content FROM memories
+                WHERE space_id = ? AND content LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            memories = [MemorySearchHit(id=row["id"], content=row["content"])
+                        for row in memory_rows]
+
+            message_rows = connection.execute(
+                """
+                SELECT id, content, occurred_at FROM messages
+                WHERE space_id = ? AND content LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            messages = [
+                MessageSearchHit(id=row["id"], content=row["content"],
+                                 occurred_at=row["occurred_at"])
+                for row in message_rows
+            ]
+
+            person_rows = connection.execute(
+                """
+                SELECT DISTINCT p.id, p.display_name
+                FROM people p
+                LEFT JOIN person_aliases a ON a.person_id = p.id
+                WHERE p.space_id = ? AND p.status = 'active'
+                  AND (p.display_name LIKE ? ESCAPE '\\' COLLATE NOCASE
+                       OR a.value LIKE ? ESCAPE '\\' COLLATE NOCASE)
+                ORDER BY p.display_name, p.id
+                LIMIT ?
+                """,
+                (space_id, pattern, pattern, fetch_limit),
+            ).fetchall()
+            people = [PersonSearchHit(id=row["id"], display_name=row["display_name"])
+                      for row in person_rows]
+
+            goal_rows = connection.execute(
+                """
+                SELECT id, prompt FROM learning_goals
+                WHERE space_id = ? AND prompt LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            learning_goals = [
+                LearningGoalSearchHit(id=row["id"], prompt=row["prompt"])
+                for row in goal_rows
+            ]
+
+            hypothesis_rows = connection.execute(
+                """
+                SELECT id, content FROM hypotheses
+                WHERE space_id = ? AND content LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            hypotheses = [
+                HypothesisSearchHit(id=row["id"], content=row["content"])
+                for row in hypothesis_rows
+            ]
+
+            coverage_rows = connection.execute(
+                """
+                SELECT id, root, path, content FROM coverage_entries
+                WHERE space_id = ? AND status = 'active'
+                  AND content LIKE ? ESCAPE '\\' COLLATE NOCASE
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            coverage_entries = [
+                CoverageEntrySearchHit(
+                    id=row["id"], root=row["root"], path=row["path"], content=row["content"]
+                )
+                for row in coverage_rows
+            ]
+
+            continuity_rows = connection.execute(
+                """
+                SELECT text FROM continuities
+                WHERE space_id = ? AND text LIKE ? ESCAPE '\\' COLLATE NOCASE
+                LIMIT ?
+                """,
+                (space_id, pattern, fetch_limit),
+            ).fetchall()
+            continuities = [ContinuitySearchHit(text=row["text"]) for row in continuity_rows]
+
+        def _cap(items: list) -> SearchGroup:
+            truncated = len(items) > _SEARCH_LIMIT
+            return SearchGroup(hits=items[:_SEARCH_LIMIT], truncated=truncated)
+
+        return SearchResults(
+            memories=_cap(memories),
+            messages=_cap(messages),
+            people=_cap(people),
+            learning_goals=_cap(learning_goals),
+            hypotheses=_cap(hypotheses),
+            coverage_entries=_cap(coverage_entries),
+            continuities=_cap(continuities),
+        )
+
 
 def _learning_goal_filter_clauses(
     space_id: str, root: str | None, status: str | None
@@ -790,18 +990,27 @@ def _memory_filter_clauses(
 
 __all__ = [
     "CoverageEntryRow",
+    "CoverageEntrySearchHit",
     "CoverageRootRow",
+    "ContinuitySearchHit",
     "DerivationLink",
     "HypothesisEvidenceRef",
     "HypothesisRow",
+    "HypothesisSearchHit",
     "LearningGoalRow",
+    "LearningGoalSearchHit",
     "LinkedPerson",
     "LinkedRelationship",
     "MemoryDetail",
     "MemoryRow",
+    "MemorySearchHit",
     "MessageRow",
+    "MessageSearchHit",
     "PersonListRow",
+    "PersonSearchHit",
     "RelationshipListRow",
+    "SearchGroup",
+    "SearchResults",
     "SpaceOverview",
     "SpaceSummary",
     "_AdminReadMixin",

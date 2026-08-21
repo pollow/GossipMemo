@@ -19,6 +19,7 @@ from ..config import Settings
 from ..world import SocialMemoryWorld
 from .auth import AdminAuth
 from .render import CONTENT_SECURITY_POLICY
+from .search import register as register_search_view
 from .views import register_admin_views
 
 _STATIC_DIR = Path(__file__).parent / "static"
@@ -53,6 +54,7 @@ def create_admin_router(settings: Settings, world: SocialMemoryWorld) -> APIRout
     router.include_router(auth.router())
 
     register_admin_views(router, auth.require_session, world.store)
+    register_search_view(router, auth.require_session, world.store)
 
     return router
 
