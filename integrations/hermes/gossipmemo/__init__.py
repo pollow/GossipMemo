@@ -38,6 +38,13 @@ _ENV_BASE_URL = ("GOSSIPMEMO_BASE_URL", "GOSSIPMEMO_URL")
 _ENV_API_KEY = "GOSSIPMEMO_API_KEY"
 _ENV_SPACE_ID = "GOSSIPMEMO_SPACE_ID"
 
+# User-model rendering: per-item and per-category budgets, and the
+# bookkeeping keys that a Mapping-shaped category carries alongside its
+# actual content (never rendered as items themselves).
+_USER_MODEL_ITEM_LIMIT = 240
+_USER_MODEL_CATEGORY_LIMIT = 700
+_USER_MODEL_BOOKKEEPING_KEYS = {"valid_from", "valid_to", "items"}
+
 
 def _env_first(*names: str) -> str:
     for name in names:
@@ -487,6 +494,66 @@ class GossipMemoMemoryProvider(MemoryProvider):
         return ""
 
     @staticmethod
+    def _render_user_model(card: Any) -> list[str]:
+        """Render a UserModel profile card as one line per category.
+
+        ``card`` is LLM-produced free-form JSON, nominally shaped as
+        ``{category: {"valid_from": ..., "valid_to": ..., "items": [...]}}``.
+        This renders readable text (never a raw dict repr, never
+        ``valid_to``), truncating on item boundaries with an explicit
+        ``(+N more)`` marker rather than cutting mid-item.
+        """
+
+        if not isinstance(card, Mapping):
+            compacted = _compact(card, 900)
+            return [f"User model: {compacted}"] if compacted else []
+        lines: list[str] = []
+        for key, value in card.items():
+            label = str(key).replace("_", " ")
+            valid_from: Any = None
+            if isinstance(value, Mapping):
+                valid_from = value.get("valid_from")
+                raw_items = value.get("items")
+                if isinstance(raw_items, list):
+                    items: list[Any] = raw_items
+                elif raw_items is not None:
+                    items = [raw_items]
+                else:
+                    items = [
+                        item_value
+                        for item_key, item_value in value.items()
+                        if item_key not in _USER_MODEL_BOOKKEEPING_KEYS and item_value is not None
+                    ]
+            elif isinstance(value, list):
+                items = value
+            elif value is not None:
+                items = [value]
+            else:
+                items = []
+            rendered_items = [
+                text for item in items if (text := _compact(item, _USER_MODEL_ITEM_LIMIT))
+            ]
+            if not rendered_items:
+                continue
+            kept: list[str] = []
+            used = 0
+            for text in rendered_items:
+                added_cost = len(text) + (2 if kept else 0)  # "; " separator
+                if kept and used + added_cost > _USER_MODEL_CATEGORY_LIMIT:
+                    break
+                kept.append(text)
+                used += added_cost
+            dropped = len(rendered_items) - len(kept)
+            body = "; ".join(kept)
+            if dropped:
+                body += f" (+{dropped} more)"
+            prefix = f"User model — {label}"
+            if valid_from:
+                prefix += f" (since {_compact(valid_from, 40)})"
+            lines.append(f"{prefix}: {body}")
+        return lines
+
+    @staticmethod
     def _format_context(result: Any) -> str:
         if not isinstance(result, Mapping):
             return ""
@@ -496,7 +563,7 @@ class GossipMemoMemoryProvider(MemoryProvider):
         if user_model:
             card = user_model.get("profile_card") if isinstance(user_model, Mapping) else user_model
             if card:
-                lines.append(f"User model: {_compact(card, 900)}")
+                lines.extend(GossipMemoMemoryProvider._render_user_model(card))
         continuity = bundle.get("continuity") if isinstance(bundle, Mapping) else None
         if continuity:
             text = continuity.get("text") if isinstance(continuity, Mapping) else continuity

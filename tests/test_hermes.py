@@ -166,6 +166,62 @@ def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
     assert "About the optional learning goals" not in hypothesis_only
 
 
+def test_hermes_renders_one_user_model_line_per_category_with_since_marker():
+    card = {
+        "preferences": {
+            "valid_from": "2026-07-28",
+            "valid_to": None,
+            "items": ["Likes coffee", "Dislikes early mornings"],
+        },
+        "goals": {"items": ["Ship the plugin slice"]},
+    }
+    formatted = GossipMemoMemoryProvider._format_context({"user_model": {"profile_card": card}})
+    lines = [line for line in formatted.splitlines() if line.startswith("User model")]
+    assert len(lines) == 2
+    preferences_line = next(line for line in lines if "preferences" in line)
+    assert preferences_line.startswith("User model — preferences (since 2026-07-28): ")
+    assert "Likes coffee; Dislikes early mornings" in preferences_line
+    goals_line = next(line for line in lines if "goals" in line)
+    assert goals_line.startswith("User model — goals: Ship the plugin slice")
+    # No dict repr or bookkeeping leaks into the rendered text.
+    assert "{" not in formatted and "'" not in formatted and "valid_to" not in formatted
+
+
+def test_hermes_user_model_truncates_on_item_boundaries_not_mid_word():
+    items = [f"Preference item number {i} with some descriptive detail here" for i in range(20)]
+    card = {"preferences": {"items": items}}
+    formatted = GossipMemoMemoryProvider._format_context({"user_model": {"profile_card": card}})
+    line = next(line for line in formatted.splitlines() if line.startswith("User model"))
+    assert "(+" in line and "more)" in line
+    # Every item that made it into the line is present in full; nothing is
+    # cut mid-word, and the dropped count is truthful.
+    kept_count = line.count("Preference item number")
+    dropped = int(line.rsplit("(+", 1)[1].split(" more)")[0])
+    assert kept_count + dropped == len(items)
+    for item in items[:kept_count]:
+        assert item in line
+    assert "Preference item number 0 with some descriptive detail her " not in line
+
+
+def test_hermes_user_model_keeps_at_least_one_oversized_item():
+    huge_item = "x" * 1000
+    card = {"notes": {"items": [huge_item]}}
+    formatted = GossipMemoMemoryProvider._format_context({"user_model": {"profile_card": card}})
+    line = next(line for line in formatted.splitlines() if line.startswith("User model"))
+    # The item cap applies before the category budget, so a single item is
+    # capped at the per-item limit but never dropped outright.
+    assert "(+" not in line
+    assert "x" * 200 in line
+
+
+def test_hermes_user_model_falls_back_to_single_line_for_non_mapping_card():
+    formatted = GossipMemoMemoryProvider._format_context(
+        {"user_model": {"profile_card": "just a free-form string card"}}
+    )
+    lines = [line for line in formatted.splitlines() if line.startswith("User model")]
+    assert lines == ["User model: just a free-form string card"]
+
+
 class _TurnClient:
     """A fake SDK client that records single-message turns and batch writes."""
 
