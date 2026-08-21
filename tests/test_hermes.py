@@ -660,6 +660,95 @@ def test_hermes_plugin_mode_pre_llm_call_delivers_stable_block_after_session_key
         provider.shutdown()
 
 
+def test_hermes_plugin_mode_pre_llm_call_lazily_initializes_a_restored_session():
+    """Pins the gateway-restart regression: a restored session must still get context.
+
+    Hermes restores pre-existing sessions after a restart without re-firing
+    on_session_start for them, so in the new process the adapter's provider
+    never had initialize() called and self._client stayed None. prefetch()
+    short-circuits on "not self._client" and returns "" forever for that
+    session -- pre_llm_call must lazily initialize on first use so a session
+    that skipped on_session_start still gets injected context.
+    """
+
+    client = _ContextClient(context_result=_STABLE_BUNDLE, turn_result={
+        "message_ids": ["m1"],
+        "known_people": [],
+        "memory_recall": [],
+        "guidance": {},
+        "context_update": _STABLE_BUNDLE,
+    })
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    # Deliberately no provider.initialize()/adapter.on_session_start() call:
+    # this reproduces a session restored after a gateway restart, which
+    # never gets on_session_start in the new process.
+    assert provider._client is None
+    try:
+        result = adapter.pre_llm_call(
+            session_id="s-restored",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="Still there?",
+            conversation_history=[],
+            is_first_turn=False,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
+        assert provider._client is not None
+        assert "User model" in result["context"]
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_post_llm_call_lazily_initializes_a_restored_session():
+    client = _TurnClient(turn_result={"message_ids": ["message_1"]})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    assert provider._client is None
+    try:
+        adapter.post_llm_call(
+            session_id="s-restored-post",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="Alice called.",
+            assistant_response="Noted.",
+            conversation_history=[],
+            model="test-model",
+            platform="telegram",
+        )
+        assert provider._client is not None
+        assert client.received.wait(2)
+        batch = client.ingested[0]
+        assert [message["author"] for message in batch] == ["user", "assistant"]
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_ensure_initialized_is_harmless_when_called_twice():
+    client = _ContextClient(context_result=_STABLE_BUNDLE)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-eager")
+    try:
+        first_client = provider._client
+        provider.ensure_initialized("s-eager")
+        # ensure_initialized must not rebuild the client (or clear caches)
+        # once the eager on_session_start path has already run.
+        assert provider._client is first_client
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_on_session_finalize_does_not_resurrect_an_uninitialized_engine():
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: (_ for _ in ()).throw(
+        AssertionError("client_factory must not be called")))
+    adapter = _GossipMemoPluginAdapter(provider)
+    assert provider._client is None
+    adapter.on_session_finalize(session_id="s-never-started")
+    assert provider._client is None
+
+
 def test_hermes_plugin_mode_on_session_start_suppresses_writes_for_cron_sessions():
     assert _is_primary_session("hermes-session-7") is True
     assert _is_primary_session("cron_job42_20260101T000000") is False

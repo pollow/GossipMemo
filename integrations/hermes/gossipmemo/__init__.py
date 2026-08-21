@@ -137,6 +137,10 @@ class GossipMemoMemoryProvider:
         self._writer: threading.Thread | None = None
         self._stop_requested = False
         self._prefetch_lock = threading.Lock()
+        # Guards lazy (re)construction of self._client from ensure_initialized,
+        # separately from _prefetch_lock so a slow client build never blocks
+        # unrelated prefetch bookkeeping for other sessions.
+        self._init_lock = threading.Lock()
         self._prefetch_cache: dict[str, dict[str, Any]] = {}
         self._context_cache: dict[str, dict[str, Any]] = {}
         # A conversation is strictly serial, so at most one turn is in flight
@@ -218,6 +222,32 @@ class GossipMemoMemoryProvider:
             daemon=True,
         )
         self._writer.start()
+
+    def ensure_initialized(self, session_id: str, **kwargs: Any) -> None:
+        """Lazily build the client if nothing has initialized it yet.
+
+        A gateway restart restores pre-existing sessions without re-firing
+        ``on_session_start`` for them, so a plugin hook can be handed a
+        session whose ``self._client`` was never built in this process --
+        ``initialize()`` only ever ran (if at all) in the process that died.
+        Every hook that touches the client must call this first as a safety
+        net; ``on_session_start`` remains the eager path and is left alone.
+
+        Safe to call from concurrently-firing hooks for different sessions:
+        the outside-the-lock check keeps the (overwhelmingly common)
+        already-initialized case free of any locking, and the second check
+        inside ``_init_lock`` makes sure that if several sessions race in
+        as the *first* touch after a restart, exactly one of them builds
+        the client and the rest simply observe it already set -- never two
+        threads each building (and one leaking) their own.
+        """
+
+        if self._client is not None:
+            return
+        with self._init_lock:
+            if self._client is not None:
+                return
+            self.initialize(session_id, **kwargs)
 
     def system_prompt_block(self) -> str:
         instructions = (
@@ -1076,21 +1106,30 @@ class _GossipMemoPluginAdapter:
     def __init__(self, provider: GossipMemoMemoryProvider) -> None:
         self._provider = provider
 
-    def on_session_start(self, **kwargs: Any) -> None:
-        session_id = str(kwargs.get("session_id") or "")
+    @staticmethod
+    def _resolve_init_kwargs() -> dict[str, Any]:
         init_kwargs: dict[str, Any] = {}
         if _hermes_get_hermes_home is not None:
             try:
                 init_kwargs["hermes_home"] = str(_hermes_get_hermes_home())
             except Exception as exc:  # noqa: BLE001 - initialize must not raise.
                 logger.debug("GossipMemo could not resolve hermes_home: %s", exc)
-        self._provider.initialize(session_id, **init_kwargs)
+        return init_kwargs
+
+    def on_session_start(self, **kwargs: Any) -> None:
+        session_id = str(kwargs.get("session_id") or "")
+        self._provider.initialize(session_id, **self._resolve_init_kwargs())
         # initialize() defaults _write_enabled to True (no agent_context kwarg
         # is available here); override with the reconstructed guard.
         self._provider._write_enabled = _is_primary_session(session_id)
 
     def pre_llm_call(self, **kwargs: Any) -> dict[str, Any]:
         session_id = str(kwargs.get("session_id") or "")
+        # Safety net for sessions restored by a gateway restart, which never
+        # get an on_session_start call in the new process -- without this,
+        # self._provider._client stays None forever and prefetch() below
+        # short-circuits to "" on every single turn for that session's life.
+        self._provider.ensure_initialized(session_id, **self._resolve_init_kwargs())
         user_message = str(kwargs.get("user_message") or "")
         parts: list[str] = []
         # Always claim the key, even when is_first_turn already makes the
@@ -1126,6 +1165,9 @@ class _GossipMemoPluginAdapter:
         assistant_response = kwargs.get("assistant_response")
         if not user_message or not assistant_response:
             return
+        # Same safety net as pre_llm_call: a restored session may reach here
+        # without ever having had on_session_start fire in this process.
+        self._provider.ensure_initialized(session_id, **self._resolve_init_kwargs())
         self._provider.sync_turn(
             str(user_message), str(assistant_response), session_id=session_id
         )
