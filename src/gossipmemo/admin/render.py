@@ -9,6 +9,7 @@ will reuse (table, pagination, breadcrumbs).
 from __future__ import annotations
 
 import html
+import json
 
 from fastapi.responses import HTMLResponse
 
@@ -24,6 +25,27 @@ def esc(value: object) -> str:
     """Escape a value for safe interpolation into HTML text or attributes."""
 
     return html.escape(str(value), quote=True)
+
+
+def json_block(raw: object) -> str:
+    """Render a stored JSON blob as an indented `<pre>` block.
+
+    Cards and other JSON columns are stored compact, so a raw dump is one
+    unreadable line. This re-indents it server-side -- the admin UI has no
+    JavaScript, so the formatting has to happen here. Anything that is not
+    parseable JSON (or is not a string at all) is shown verbatim rather
+    than swallowed: the point of this view is to see what is actually in
+    the database.
+    """
+
+    text = "" if raw is None else str(raw)
+    try:
+        parsed = json.loads(text)
+    except (TypeError, ValueError):
+        pretty = text
+    else:
+        pretty = json.dumps(parsed, indent=2, ensure_ascii=False, sort_keys=True)
+    return f'<pre>{esc(pretty)}</pre>'
 
 
 def add_security_headers(response):
@@ -152,6 +174,7 @@ __all__ = [
     "breadcrumbs_component",
     "esc",
     "html_response",
+    "json_block",
     "page",
     "table_component",
 ]

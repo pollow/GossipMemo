@@ -393,3 +393,47 @@ def test_every_view_carries_csp_header(tmp_path: Path, path):
 
     asyncio.run(_run(tmp_path, lambda client, fixtures: scenario(client, fixtures),
                      seed_spaces=["space1"]))
+
+
+def test_user_model_card_is_pretty_printed(tmp_path: Path):
+    """The stored card is compact JSON; the overview must indent it."""
+
+    async def scenario(store, client):
+        response = await client.get("/admin/spaces/space1")
+        assert response.status_code == 200
+        # `esc()` turns the JSON quotes into entities; the browser renders
+        # them back, so assert on the escaped form the page actually serves.
+        assert "&quot;summary&quot;: &quot;loves coffee&quot;" in response.text
+        assert "\n    &quot;espresso&quot;" in response.text
+        # The compact one-line form must be gone.
+        assert "{&quot;summary&quot;" not in response.text
+
+    async def run():
+        store = SqliteWorldStore(tmp_path / "world.db")
+        world = SocialMemoryWorld(store, _NoopModel())
+        app = create_app(_settings(tmp_path), world)
+        async with app.router.lifespan_context(app):
+            async with _client(app) as client:
+                _seed_space(store, "space1", "Space space1")
+                store.overwrite_user_model(
+                    "space1", {"summary": "loves coffee", "likes": ["espresso"]}
+                )
+                await _login(client)
+                await scenario(store, client)
+
+    asyncio.run(run())
+
+
+def test_json_block_indents_escapes_and_passes_through_non_json():
+    from gossipmemo.admin.render import json_block
+
+    assert json_block('{"b":1,"a":2}') == (
+        "<pre>{\n  &quot;a&quot;: 2,\n  &quot;b&quot;: 1\n}</pre>"
+    )
+    # Non-JSON is shown verbatim rather than swallowed.
+    assert json_block("not json at all") == "<pre>not json at all</pre>"
+    assert json_block(None) == "<pre></pre>"
+    # Escaping still applies to values coming out of the database.
+    assert "&lt;script&gt;" in json_block('{"x": "<script>alert(1)</script>"}')
+    # Non-ASCII stays readable instead of turning into \\uXXXX escapes.
+    assert "中文" in json_block('{"x": "\\u4e2d\\u6587"}')

@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ...store._admin import MemoryDetail, MessageRow
 from ...store.sqlite import SqliteWorldStore
-from ..render import esc, html_response, page, table_component
+from ..render import esc, html_response, json_block, page, table_component
 from ._common import (
     clamp_limit,
     clamp_offset,
@@ -81,7 +81,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
 <section>
 <h2>User model</h2>
 <p>Updated: {esc(overview.user_model_updated_at or "never")}</p>
-<pre>{esc(overview.user_model_profile_card)}</pre>
+{json_block(overview.user_model_profile_card)}
 </section>
 <section>
 <h2>Continuity</h2>

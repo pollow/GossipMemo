@@ -536,6 +536,11 @@ relationships, learning goals, hypotheses, coverage, continuity, and
 a few whitelisted operational tables (`schema_migrations`,
 `extraction_batches`, `embeddings`) without a `sqlite3` shell.
 
+JSON columns (the user model and person profile cards) are stored compact but
+re-indented on the server before rendering, so they read as a formatted block
+rather than one long line. A value that does not parse as JSON is shown
+verbatim, so a malformed card stays visible instead of disappearing.
+
 Logging in sets a signed, `HttpOnly` browser-session cookie with a 12-hour
 absolute expiry, distinct from `GOSSIPMEMO_API_KEY` — the two credentials
 protect different things and are never interchangeable. The signing secret

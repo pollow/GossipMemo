@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 
 from ...store.sqlite import SqliteWorldStore
-from ..render import esc, html_response, page, table_component
+from ..render import esc, html_response, json_block, page, table_component
 from ._common import clamp_limit, clamp_offset, require_space, space_breadcrumbs
 
 
@@ -101,7 +101,7 @@ def _render_person_detail(space_id: str, person, aliases: list[str], memories, w
 <li>Profile updated: {esc(person.profile_updated_at or "never")}</li>
 <li>Source watermark: {esc(watermark or "none")}</li>
 </ul>
-<pre>{esc(person.profile_card)}</pre>
+{json_block(person.profile_card)}
 </section>
 <section>
 <h2>Aliases</h2>
