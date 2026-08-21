@@ -4,11 +4,34 @@ This plugin connects Hermes to a running GossipMemo HTTP server. GossipMemo
 keeps the long-lived memory boundary at `space_id`; a Hermes `session_id` is
 only retained as the source conversation key on ingested messages.
 
+## Loading modes
+
+`register(ctx)` detects which kind of context Hermes hands it and adapts:
+
+- **Memory-provider mode** (`plugins/memory/gossipmemo/`, selected via
+  `memory.provider: gossipmemo`): registers a `MemoryProvider`. Its eight
+  tool schemas are appended directly onto every request and are always
+  eager (not `tool_search`-deferrable), because the stub context Hermes
+  uses for this path has no tool registry to defer them from.
+- **Plugin mode** (`plugins/gossipmemo/`, opted into like any other
+  standalone plugin): registers the same tools through `ctx.register_tool`,
+  so they land in Hermes' tool registry and become `tool_search`-deferrable,
+  and wires `on_session_start`/`pre_llm_call`/`post_llm_call`/
+  `on_session_finalize` hooks to the same underlying engine. One gap today:
+  there is no hook equivalent of `system_prompt_block()`, so the stable
+  (user-model/hypothesis) half only rides along on a session's first
+  `pre_llm_call` instead of living in the system prompt; a later slice
+  closes that gap via middleware.
+
+Both modes share one engine (`GossipMemoMemoryProvider`) and are functionally
+equivalent otherwise, including the non-primary-session write guard below.
+
 ## Install and configure
 
 Install the GossipMemo SDK in the Hermes environment, then copy this directory
-to `plugins/memory/gossipmemo/` (or install it using the normal Hermes plugin
-manager). Configure the server with environment variables:
+to `plugins/memory/gossipmemo/` for memory-provider mode, or to
+`plugins/gossipmemo/` for plugin mode (or install it using the normal Hermes
+plugin manager). Configure the server with environment variables:
 
 ```shell
 export GOSSIPMEMO_BASE_URL=http://127.0.0.1:8765

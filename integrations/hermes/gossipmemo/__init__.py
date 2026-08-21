@@ -28,6 +28,13 @@ except ImportError:  # pragma: no cover - exercised only outside Hermes.
 
         pass
 
+try:  # Only available inside a running Hermes process; used to resolve the
+    # profile-scoped config directory the same way memory_manager does when
+    # it auto-injects ``hermes_home`` ahead of ``initialize()``.
+    from hermes_constants import get_hermes_home as _hermes_get_hermes_home
+except ImportError:  # pragma: no cover - exercised only outside Hermes.
+    _hermes_get_hermes_home = None
+
 
 logger = logging.getLogger(__name__)
 
@@ -1081,11 +1088,131 @@ class GossipMemoMemoryProvider(MemoryProvider):
 # Both spellings are useful to plugin authors and preserve a simple public API.
 GossipMemoProvider = GossipMemoMemoryProvider
 
+_TOOLSET = "gossipmemo"
+_CRON_SESSION_PREFIX = "cron_"
+
+
+def _is_primary_session(session_id: str) -> bool:
+    """Best-effort stand-in for the memory-provider path's ``agent_context`` guard.
+
+    The memory-provider ``initialize()`` kwarg ``agent_context`` (checked
+    against ``{"", "primary"}``) only flows through the memory-provider stub
+    context; plugin-mode hooks never receive it. Hermes names cron sessions
+    ``cron_<job_id>_<timestamp>``, which is the only reliable textual signal
+    plugin-mode hooks carry for "this is not the primary interactive user" --
+    so that is what this reconstructs the guard from. It is not a full
+    equivalent (e.g. it has no signal for subagent sessions), but it preserves
+    the documented intent of not ingesting cron turns as the user's memories.
+    """
+
+    return not str(session_id or "").startswith(_CRON_SESSION_PREFIX)
+
+
+class _GossipMemoPluginAdapter:
+    """Adapts :class:`GossipMemoMemoryProvider` onto a real Hermes plugin context.
+
+    Owns only the wiring between Hermes' hook kwargs and the provider's
+    existing methods; all behavior (client lifecycle, prefetch caching,
+    idempotency, formatting) stays in ``GossipMemoMemoryProvider`` unchanged.
+    """
+
+    def __init__(self, provider: GossipMemoMemoryProvider) -> None:
+        self._provider = provider
+
+    def on_session_start(self, **kwargs: Any) -> None:
+        session_id = str(kwargs.get("session_id") or "")
+        init_kwargs: dict[str, Any] = {}
+        if _hermes_get_hermes_home is not None:
+            try:
+                init_kwargs["hermes_home"] = str(_hermes_get_hermes_home())
+            except Exception as exc:  # noqa: BLE001 - initialize must not raise.
+                logger.debug("GossipMemo could not resolve hermes_home: %s", exc)
+        self._provider.initialize(session_id, **init_kwargs)
+        # initialize() defaults _write_enabled to True (no agent_context kwarg
+        # is available here); override with the reconstructed guard.
+        self._provider._write_enabled = _is_primary_session(session_id)
+
+    def pre_llm_call(self, **kwargs: Any) -> dict[str, Any]:
+        session_id = str(kwargs.get("session_id") or "")
+        user_message = str(kwargs.get("user_message") or "")
+        parts: list[str] = []
+        if kwargs.get("is_first_turn"):
+            # system_prompt_block() has no hook equivalent in plugin mode
+            # (that lands in slice 3b, via middleware). Prepend just the
+            # stable (user-model/hypothesis) half here so it is not silently
+            # lost; this also flips _stable_delivered so the volatile half
+            # below stops repeating it, exactly as it would in provider mode.
+            stable = self._provider._fetch_stable_block()
+            if stable:
+                parts.append(stable)
+        volatile = self._provider.prefetch(user_message, session_id=session_id)
+        if volatile:
+            parts.append(volatile)
+        return {"context": "\n\n".join(parts)}
+
+    def post_llm_call(self, **kwargs: Any) -> None:
+        session_id = str(kwargs.get("session_id") or "")
+        user_message = kwargs.get("user_message")
+        assistant_response = kwargs.get("assistant_response")
+        if not user_message or not assistant_response:
+            return
+        self._provider.sync_turn(
+            str(user_message), str(assistant_response), session_id=session_id
+        )
+
+    def on_session_finalize(self, **kwargs: Any) -> None:
+        del kwargs
+        self._provider.shutdown()
+
+
+def _make_tool_handler(
+    provider: GossipMemoMemoryProvider, tool_name: str
+) -> Callable[..., str]:
+    def _handler(args: dict[str, Any], **kwargs: Any) -> str:
+        return provider.handle_tool_call(tool_name, args, **kwargs)
+
+    return _handler
+
+
+def _register_as_plugin(ctx: Any, provider: GossipMemoMemoryProvider) -> None:
+    adapter = _GossipMemoPluginAdapter(provider)
+    for schema in provider.get_tool_schemas():
+        ctx.register_tool(
+            name=schema["name"],
+            toolset=_TOOLSET,
+            schema=schema,
+            handler=_make_tool_handler(provider, schema["name"]),
+        )
+    ctx.register_hook("on_session_start", adapter.on_session_start)
+    ctx.register_hook("pre_llm_call", adapter.pre_llm_call)
+    ctx.register_hook("post_llm_call", adapter.post_llm_call)
+    ctx.register_hook("on_session_finalize", adapter.on_session_finalize)
+
 
 def register(ctx: Any) -> None:
-    """Register this provider with Hermes' plugin context."""
+    """Register this provider with Hermes' plugin context.
 
-    ctx.register_memory_provider(GossipMemoMemoryProvider())
+    Two disjoint capability shapes can reach this function, depending on how
+    the plugin is loaded:
+
+    - The memory-provider path's stub context (``plugins/memory/__init__.py``'s
+      ``_ProviderCollector``) exposes ``register_memory_provider`` and only
+      no-op ``register_tool``/``register_hook``, with no ``register_middleware``
+      at all.
+    - A real plugin context exposes ``register_tool``/``register_hook``/
+      ``register_middleware`` but has no ``register_memory_provider``.
+
+    Detected with ``hasattr`` rather than try/except, since the stub's no-op
+    methods would not raise and could leave partial registration state.
+    Provider mode must behave exactly as it always has -- this integration
+    ships to users still on that path.
+    """
+
+    provider = GossipMemoMemoryProvider()
+    if hasattr(ctx, "register_memory_provider"):
+        ctx.register_memory_provider(provider)
+        return
+    _register_as_plugin(ctx, provider)
 
 
 __all__ = [

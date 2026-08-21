@@ -1,5 +1,19 @@
 name: gossipmemo
-version: 0.1.0
-description: "Provenance-aware social memory backed by an external GossipMemo server."
-hooks:
-  - on_memory_write
+version: 0.2.0
+description: "Provenance-aware social memory backed by an external GossipMemo server. Dual-mode: registers as a memory provider when loaded via Hermes' memory.provider path (unchanged legacy behavior), or as a standalone plugin with real tool_search-deferrable tools when loaded from plugins/."
+author: Local
+kind: standalone
+provides_tools:
+  - gossipmemo_query
+  - gossipmemo_recall
+  - gossipmemo_store
+  - gossipmemo_dossier
+  - gossipmemo_retract
+  - gossipmemo_people
+  - gossipmemo_guidance
+  - gossipmemo_merge_people
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_llm_call
+  - on_session_finalize

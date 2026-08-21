@@ -3,7 +3,13 @@ from __future__ import annotations
 import threading
 import time
 
-from integrations.hermes.gossipmemo import GossipMemoMemoryProvider
+from integrations.hermes.gossipmemo import (
+    GossipMemoMemoryProvider,
+    _GossipMemoPluginAdapter,
+    _is_primary_session,
+    _register_as_plugin,
+    register,
+)
 
 
 def test_hermes_provider_keeps_session_as_source_coordinate():
@@ -449,3 +455,196 @@ def test_hermes_keeps_one_turn_slot_per_conversation():
         assert provider._current_turn == {}
     finally:
         provider.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Plugin-mode registration (dual-mode `register(ctx)`)
+# ---------------------------------------------------------------------------
+
+
+class _FakePluginContext:
+    """Mirrors the real Hermes plugin context's capability shape.
+
+    Exposes ``register_tool``/``register_hook`` (both actually recording,
+    unlike the memory-provider stub below) and deliberately has no
+    ``register_memory_provider`` at all, since that is exactly the
+    disjoint-capability distinction ``register(ctx)`` must detect.
+    """
+
+    def __init__(self):
+        self.tools: dict[str, dict] = {}
+        self.hooks: dict[str, list] = {}
+
+    def register_tool(self, *, name, toolset, schema, handler, **kwargs):
+        self.tools[name] = {"toolset": toolset, "schema": schema, "handler": handler}
+
+    def register_hook(self, hook_name, callback):
+        self.hooks.setdefault(hook_name, []).append(callback)
+
+
+class _FakeMemoryProviderStubContext:
+    """Mirrors ``plugins/memory/__init__.py``'s ``_ProviderCollector``.
+
+    ``register_tool``/``register_hook``/``register_cli_command`` are no-ops
+    and there is no ``register_middleware`` at all; only
+    ``register_memory_provider`` actually captures anything.
+    """
+
+    def __init__(self):
+        self.provider = None
+
+    def register_memory_provider(self, provider):
+        self.provider = provider
+
+    def register_tool(self, *args, **kwargs):
+        pass
+
+    def register_hook(self, *args, **kwargs):
+        pass
+
+    def register_cli_command(self, *args, **kwargs):
+        pass
+
+
+def test_hermes_register_dispatches_by_context_capability_and_neither_raises():
+    provider_ctx = _FakeMemoryProviderStubContext()
+    register(provider_ctx)
+    assert isinstance(provider_ctx.provider, GossipMemoMemoryProvider)
+
+    plugin_ctx = _FakePluginContext()
+    register(plugin_ctx)  # Must not raise despite no register_memory_provider.
+    schema_names = {schema["name"] for schema in GossipMemoMemoryProvider().get_tool_schemas()}
+    assert set(plugin_ctx.tools) == schema_names
+    assert set(plugin_ctx.hooks) == {
+        "on_session_start", "pre_llm_call", "post_llm_call", "on_session_finalize",
+    }
+
+
+def test_hermes_plugin_mode_tools_register_under_gossipmemo_toolset_and_dispatch():
+    provider = GossipMemoMemoryProvider(
+        client_factory=lambda **_: FakeQueryClient())
+    ctx = _FakePluginContext()
+    _register_as_plugin(ctx, provider)
+
+    schemas = provider.get_tool_schemas()
+    assert set(ctx.tools) == {schema["name"] for schema in schemas}
+    for name, entry in ctx.tools.items():
+        assert entry["toolset"] == "gossipmemo"
+        assert entry["schema"]["name"] == name
+
+    provider.initialize("s-plugin-tools")
+    try:
+        result = ctx.tools["gossipmemo_query"]["handler"]({"query": "Bob"})
+        assert "answer for Bob" in result
+    finally:
+        provider.shutdown()
+
+
+class FakeQueryClient:
+    def query(self, question, **kwargs):
+        return {"answer": f"answer for {question}", "people": [], "relationships": [],
+                "memories": []}
+
+    def turn(self, message, **kwargs):
+        if isinstance(message, list):
+            return {"status": "accepted"}
+        return {}
+
+    def close(self):
+        return None
+
+
+def test_hermes_plugin_mode_post_llm_call_drives_a_turn_write():
+    client = _TurnClient(turn_result={"message_ids": ["message_1"]})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    provider.initialize("s-post-llm")
+    try:
+        adapter.post_llm_call(
+            session_id="s-post-llm",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="Alice called.",
+            assistant_response="Noted.",
+            conversation_history=[],
+            model="test-model",
+            platform="telegram",
+        )
+        assert client.received.wait(2)
+        batch = client.ingested[0]
+        assert [message["author"] for message in batch] == ["user", "assistant"]
+        assert batch[0]["content"] == "Alice called."
+        assert batch[1]["content"] == "Noted."
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_pre_llm_call_matches_provider_prefetch():
+    client = _ContextClient(context_result=_STABLE_BUNDLE, turn_result={
+        "message_ids": ["m1"],
+        "known_people": [],
+        "memory_recall": [],
+        "guidance": {},
+        "context_update": _STABLE_BUNDLE,
+    })
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    provider.initialize("s-pre-llm")
+    try:
+        # Same session key and query text both times: the first call performs
+        # the fetch, the second (via the adapter) rides the same in-flight
+        # turn slot and returns the identical formatted content -- proving
+        # pre_llm_call's context is exactly what prefetch() would return.
+        expected = provider.prefetch("What's new?", session_id="s-pre-llm")
+        result = adapter.pre_llm_call(
+            session_id="s-pre-llm",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="What's new?",
+            conversation_history=[],
+            is_first_turn=False,
+            model="test-model",
+            platform="telegram",
+            sender_id="user-1",
+        )
+        assert isinstance(result, dict)
+        assert result["context"] == expected
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_plugin_mode_on_session_start_suppresses_writes_for_cron_sessions():
+    assert _is_primary_session("hermes-session-7") is True
+    assert _is_primary_session("cron_job42_20260101T000000") is False
+
+    client = _TurnClient(turn_result={"message_ids": ["message_1"]})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    adapter.on_session_start(
+        session_id="cron_job42_20260101T000000", model="test-model", platform="cron")
+    try:
+        assert provider._write_enabled is False
+        adapter.post_llm_call(
+            session_id="cron_job42_20260101T000000",
+            task_id="t1",
+            turn_id="turn1",
+            user_message="Do the thing.",
+            assistant_response="Done.",
+            conversation_history=[],
+            model="test-model",
+            platform="cron",
+        )
+        # sync_turn() no-ops when _write_enabled is False, so nothing queues.
+        assert client.ingested == []
+        assert client.received.wait(0.2) is False
+    finally:
+        provider.shutdown()
+
+    # A primary interactive session keeps writing.
+    provider2 = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter2 = _GossipMemoPluginAdapter(provider2)
+    adapter2.on_session_start(session_id="hermes-session-7", platform="telegram")
+    try:
+        assert provider2._write_enabled is True
+    finally:
+        provider2.shutdown()
