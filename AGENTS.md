@@ -32,3 +32,13 @@ Rolling continuity is a per-space projection generated asynchronously after abou
 - The Hermes provider caches the context bundle/version, uses the turn facade during prefetch, renders UserModel, continuity, activated Person cards, and recalled user Memories, then asynchronously ingests the assistant reply. User-message idempotency keys prevent duplicate writes across prefetch and completed-turn synchronization.
 
 An empty context bundle is a valid cold-start result. The current session's raw messages provide immediate continuity while long-term Memories and projections accumulate.
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).
