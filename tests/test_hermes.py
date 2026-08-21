@@ -128,6 +128,24 @@ def test_hermes_tool_schemas_offer_recall_as_the_cheap_default():
     assert "gossipmemo_recall" in schemas["gossipmemo_query"]["description"]
 
 
+def test_hermes_instruction_block_points_at_recall_not_query():
+    """The always-injected block must lead with the cheap tool.
+
+    Tool descriptions only reach the model when it inspects the tool list,
+    but this paragraph is in the prompt on every single turn -- so whichever
+    tool it names first is the one that actually gets reached for. It used
+    to open with "Use gossipmemo_query before relying on social context",
+    which steered every routine lookup into an LLM synthesis call.
+    """
+    provider = GossipMemoMemoryProvider()
+    block = provider.system_prompt_block()
+    recall_at = block.index("gossipmemo_recall")
+    query_at = block.index("gossipmemo_query")
+    assert recall_at < query_at
+    # And query is explicitly marked as the costly exception, not an alias.
+    assert "LLM" in block[query_at:]
+
+
 def test_hermes_guidance_tool_frames_hypotheses_and_goals_as_the_context_bundle_does():
     schemas = {schema["name"]: schema for schema in GossipMemoMemoryProvider().get_tool_schemas()}
     assert "gossipmemo_guidance" in schemas

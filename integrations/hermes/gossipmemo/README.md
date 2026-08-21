@@ -66,19 +66,28 @@ not crash the agent.
 
 ## Tools
 
-The provider exposes five OpenAI-style tools:
+The plugin exposes eight OpenAI-style tools. All of them are deferrable, so
+their schemas reach the model through `tool_search` rather than sitting in
+every request's tool array.
 
-- `gossipmemo_query` asks a question and returns a synthesized answer over
-  people, relationships, memories, and optional evidence. This calls an LLM
-  to synthesize the answer, so it is reserved for genuine questions rather
-  than routine lookups.
-- `gossipmemo_store` creates an explicit manual memory, including person role
-  links such as `subject`, `asserter`, or `reporter`.
+- `gossipmemo_recall` is the default lookup: LLM-free keyword (FTS) search
+  over stored memories. Reach for this first.
 - `gossipmemo_dossier` reads a person or relationship projection without an
   open-ended synthesis query.
+- `gossipmemo_people` lists or searches known Person records.
+- `gossipmemo_guidance` lists open hypotheses and learning goals in full,
+  unsampled -- the passive context bundle only carries a small sample.
+- `gossipmemo_store` creates an explicit manual memory, including person role
+  links such as `subject`, `asserter`, or `reporter`.
 - `gossipmemo_retract` retracts a memory while preserving its provenance.
 - `gossipmemo_merge_people` merges two confirmed Person records after the user
   has confirmed that they represent the same person.
+- `gossipmemo_query` asks a question and returns a synthesized answer over
+  people, relationships, memories, and optional evidence. **This calls an LLM
+  to synthesize the answer**, so it is the expensive exception, not the entry
+  point: reserve it for genuine questions a plain `gossipmemo_recall` cannot
+  answer. The always-injected instruction block and both tool descriptions
+  point at `gossipmemo_recall` first for this reason.
 
 Completed user/assistant turns are queued to a daemon writer, so
 `sync_turn()` does not wait for HTTP or server-side extraction. Writes from
@@ -97,7 +106,7 @@ skipped to avoid polluting the primary person's social world.
 - **Session-id rotation is inferred, not announced.** Hermes silently swaps
   the `session_id` a hook call carries when context compression rotates it
   mid-conversation (and on `/resume` and `/branch`), with no hook telling
-  this plugin it happened. Because `_context_cache`, `_prefetch_cache`,
+  this plugin it happened. Because `_prefetch_cache`,
   `_current_turn`, and `_stable_delivered` are all keyed on `session_id`,
   relying only on Hermes' `is_first_turn` flag to decide when to (re-)deliver
   the stable (user-model/hypothesis) block would mean an unannounced

@@ -298,9 +298,12 @@ class GossipMemoMemoryProvider:
         instructions = (
             "# GossipMemo memory\n"
             "GossipMemo keeps provenance-aware memories about people and relationships. "
-            "Use gossipmemo_query before relying on social context, gossipmemo_store "
-            "for explicit durable facts, gossipmemo_dossier for a person's current "
-            "profile, and gossipmemo_retract to correct a memory."
+            "Use gossipmemo_recall to look something up before relying on social "
+            "context, gossipmemo_store for explicit durable facts, gossipmemo_dossier "
+            "for a person's current profile, and gossipmemo_retract to correct a "
+            "memory. gossipmemo_query is the expensive exception: it runs an LLM "
+            "synthesis call, so reach for it only when a plain lookup genuinely "
+            "cannot answer the question."
         )
         stable = self._fetch_stable_block()
         if stable:
