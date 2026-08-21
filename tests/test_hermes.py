@@ -164,11 +164,31 @@ def test_hermes_people_tool_precedes_merge_and_guardrail_survives():
     assert "only call this after the user" in merge_description.lower()
 
 
-def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
-    """Several goals at once read as an interview script without this framing.
+def test_hermes_requests_zero_goals_on_the_passive_read_paths():
+    """The plugin asks the server not to compute goals it will not render."""
+    client = _ContextClient(context_result=_STABLE_BUNDLE)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-nogoals")
+    try:
+        provider.system_prompt_block()
+        assert client.context_kwargs.get("goals") == 0
+    finally:
+        provider.shutdown()
 
-    This also covers the item labels themselves: guidance renders as
-    "Tentative hypothesis"/"Optional learning goal", never as a Memory.
+
+def test_hermes_drops_learning_goals_from_the_passive_context():
+    """Goals are not injected per turn at all; hypotheses still are.
+
+    A goal is a random draw from long-term directions, not something chosen
+    for this moment, so injecting a handful of them per turn meant also
+    shipping a disclaimer telling the model to ignore them by default. Both
+    are gone. The agent pulls a direction with `gossipmemo_guidance` instead.
+
+    Dropping them at render time is belt-and-braces with the `goals=0` the
+    plugin requests: a server predating that parameter still sends goals.
+
+    This also covers the surviving label: guidance renders as "Tentative
+    hypothesis", never as a Memory.
     """
     formatted = GossipMemoMemoryProvider._format_context({
         "guidance": {"items": [
@@ -177,15 +197,11 @@ def test_hermes_frames_learning_goals_as_ignorable_rather_than_a_checklist():
             {"id": "g2", "kind": "learning_goal", "content": "Second"},
         ]}
     })
-    lines = formatted.splitlines()
-    note = next(line for line in lines if line.startswith("About the optional learning goals"))
-    assert "Ignore them by default" in note
-    assert "not questions to ask" in note
-    assert "interview" in note
-    # The note must precede the goals it frames, and must not appear when the
-    # bundle carries hypotheses only.
-    assert lines.index(note) < lines.index("Optional learning goal: First")
-    assert lines.index("Tentative hypothesis: Maybe true") < lines.index(note)
+    assert "Tentative hypothesis: Maybe true" in formatted
+    assert "First" not in formatted
+    assert "Second" not in formatted
+    assert "learning goal" not in formatted.lower()
+    assert "Ignore them by default" not in formatted
     assert "Memory" not in formatted
     hypothesis_only = GossipMemoMemoryProvider._format_context({
         "guidance": {"items": [{"id": "h", "kind": "hypothesis", "content": "Maybe true"}]}
@@ -357,8 +373,9 @@ class _ContextClient:
         self.context_calls = 0
         self.turn_calls: list[tuple] = []
 
-    def context(self):
+    def context(self, **kwargs):
         self.context_calls += 1
+        self.context_kwargs = kwargs
         if self.context_error is not None:
             raise self.context_error
         return self.context_result

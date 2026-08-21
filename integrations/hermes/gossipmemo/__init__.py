@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 # AGENTS.md / the Hermes operator notes for the intended usage.
 _LOG_TAG = "[gossipmemo]"
 
+# Learning goals are not injected into the passive per-turn context at all.
+# They are a random sample of long-term directions rather than anything
+# chosen for the current moment, so injecting them meant shipping several
+# goal lines plus a disclaimer telling the model to ignore them by default --
+# pure per-turn cost for something that was, by its own instructions, usually
+# irrelevant. The agent pulls a direction with `gossipmemo_guidance` when it
+# actually wants one; that path is shuffled per call so repeated asks walk
+# the pool. Hypotheses are different and stay: there is at most one, it is
+# about the person currently in view, and it is a claim the agent may be
+# able to confirm in passing.
+_PASSIVE_GOAL_COUNT = 0
+
 _DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 _DEFAULT_SPACE_ID = "personal"
 _CONFIG_FILENAME = "gossipmemo.json"
@@ -350,7 +362,7 @@ class GossipMemoMemoryProvider:
 
             def _fetch() -> None:
                 try:
-                    value = client.context()
+                    value = client.context(goals=_PASSIVE_GOAL_COUNT)
                 except Exception as exc:  # noqa: BLE001 - must never break prompt assembly.
                     # WARNING, not debug: a failed stable-block fetch means the
                     # agent loses the user-model/hypothesis half of context for
@@ -630,6 +642,7 @@ class GossipMemoMemoryProvider:
                 memory_limit=5,
                 idempotency_key=idem,
                 source={"provider": self._source_provider, "conversation_key": key},
+                goals=_PASSIVE_GOAL_COUNT,
             )
         except Exception:
             with self._prefetch_lock:
@@ -846,31 +859,19 @@ class GossipMemoMemoryProvider:
         guidance_items = guidance.get("items", []) if isinstance(guidance, Mapping) else []
         if isinstance(guidance_items, list):
             seen_guidance: set[str] = set()
-            goal_lines: list[str] = []
             for item in guidance_items[:8]:
-                if not isinstance(item, Mapping):
+                # Hypotheses only. Learning goals are dropped here as well as
+                # requested off via _PASSIVE_GOAL_COUNT, because the plugin
+                # can be pointed at a server predating the `goals` parameter,
+                # which would keep sending them.
+                if not isinstance(item, Mapping) or item.get("kind") != "hypothesis":
                     continue
                 item_id = str(item.get("id") or item.get("content") or "")
                 content = _compact(item.get("content"), 420)
                 if not content or item_id in seen_guidance:
                     continue
                 seen_guidance.add(item_id)
-                if item.get("kind") == "hypothesis":
-                    lines.append(f"Tentative hypothesis: {content}")
-                else:
-                    goal_lines.append(f"Optional learning goal: {content}")
-            if goal_lines:
-                # Several goals arrive at once and they are a random sample of
-                # open directions, not a shortlist chosen for this moment. Say
-                # so, or the natural reading is a checklist to work through.
-                lines.append(
-                    "About the optional learning goals below: they are a random sample of "
-                    "long-term directions, not questions to ask and not a checklist. Ignore "
-                    "them by default. Use one only if the conversation already touches it, "
-                    "and then in your own words — confirm, follow up, keep observing, or let "
-                    "it go, as the moment warrants. Never walk through them in turn; that "
-                    "turns the conversation into an interview.")
-                lines.extend(goal_lines)
+                lines.append(f"Tentative hypothesis: {content}")
         people = bundle.get("people", []) if isinstance(bundle, Mapping) else []
         people = list(people) + list(result.get("known_people", []))
         seen_people: set[str] = set()

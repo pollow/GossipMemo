@@ -455,7 +455,7 @@ POST /v1/spaces/{space_id}/reason
 - Coverage audit 按 root 扇出增量更新，操作面只有 add 与 modify；entry 只写「知道什么」，找缺口是 goal planning 的创造性工作。
 - Coverage catch up 后单独规划 LearningGoals，同样按 root 扇出，只读 entries，沿纵向、横向、时间纵深和 entry 中出现的人四个方向扩展；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
 - Planner 忠实维护包括私密与敏感内容在内的未知方向；现在是否问、怎样问由消费 agent 决定。goal 是可拒绝的邀请，禁止直接病理诊断。
-- Hermes 每轮最多消费一条 Hypothesis 和随机 3–5 条 LearningGoal，并被明确告知默认忽略这些方向，不在请求路径增加 LLM latency。
+- Hermes 每轮最多被动消费一条 Hypothesis；LearningGoal **不再注入被动 context**（插件传 `goals=0`，并在渲染侧再丢一次以兼容旧 server）。随机采样的方向本来就不是为当下这一轮选的，注入它们等于每轮还要附一段「默认忽略」的说明——纯成本。需要方向时由 agent 主动调 `gossipmemo_guidance` 取，那条路每次调用重新洗牌。两条路都不在请求路径增加 LLM latency。
 - Coverage 深度刻度与 goal 排序这两块规格上的取舍，以及 `declined` 边界目前无处安放的问题，记在 `docs/coverage-and-planner-gaps.md`。
 
 ### Query
