@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -10,6 +11,8 @@ from integrations.hermes.gossipmemo import (
     _register_as_plugin,
     register,
 )
+
+_LOGGER_NAME = "integrations.hermes.gossipmemo"
 
 
 def test_hermes_provider_keeps_session_as_source_coordinate():
@@ -784,3 +787,145 @@ def test_hermes_plugin_mode_on_session_start_suppresses_writes_for_cron_sessions
         assert provider2._write_enabled is True
     finally:
         provider2.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Operator-facing logging: greppable "is it working" records in agent.log.
+# ---------------------------------------------------------------------------
+
+
+def test_hermes_engine_init_logs_distinguish_eager_from_lazy_path(caplog):
+    """The eager on_session_start path and the lazy restored-session safety net
+    must be distinguishable in the emitted record, not just in prose -- this is
+    exactly the distinction that was invisible when a restored session's engine
+    silently never got initialized.
+    """
+
+    client = _ContextClient(context_result=_STABLE_BUNDLE)
+    eager_provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        eager_provider.initialize("s-eager-path", base_url="http://eager.test", space_id="sp-e")
+    try:
+        init_records = [r for r in caplog.records if getattr(r, "gm_event", None) == "engine_init"]
+        assert len(init_records) == 1
+        assert init_records[0].gm_init_path == "eager"
+        assert init_records[0].gm_session_id == "s-eager-path"
+        assert init_records[0].gm_base_url == "http://eager.test"
+        assert init_records[0].gm_space_id == "sp-e"
+    finally:
+        eager_provider.shutdown()
+
+    caplog.clear()
+    lazy_provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    # No provider.initialize()/on_session_start() call: reproduces a session
+    # restored after a gateway restart, whose engine only ever gets built via
+    # the ensure_initialized() safety net.
+    assert lazy_provider._client is None
+    with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+        lazy_provider.ensure_initialized("s-lazy-path")
+    try:
+        init_records = [r for r in caplog.records if getattr(r, "gm_event", None) == "engine_init"]
+        assert len(init_records) == 1
+        assert init_records[0].gm_init_path == "lazy"
+        assert init_records[0].gm_session_id == "s-lazy-path"
+    finally:
+        lazy_provider.shutdown()
+
+
+def test_hermes_pre_llm_call_logs_a_reason_when_nothing_is_injected(caplog):
+    """A silent empty return is the exact failure mode this logging exists to
+    prevent -- pre_llm_call's own record must carry a reason whenever nothing
+    got injected, not merely a zero count.
+    """
+
+    client = _ContextClient(context_result=_STABLE_BUNDLE, turn_result={"message_ids": ["m1"]})
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    provider.initialize("s-empty-inject")
+    try:
+        # Claim the first-turn key with a real message first, so the call
+        # under test lands on the "already seen" branch and only the
+        # empty-query behavior of the volatile half is exercised.
+        adapter.pre_llm_call(
+            session_id="s-empty-inject", task_id="t0", turn_id="turn0",
+            user_message="hi", conversation_history=[], is_first_turn=True,
+            model="test-model", platform="telegram", sender_id="user-1",
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger=_LOGGER_NAME):
+            result = adapter.pre_llm_call(
+                session_id="s-empty-inject", task_id="t1", turn_id="turn1",
+                user_message="   ", conversation_history=[], is_first_turn=False,
+                model="test-model", platform="telegram", sender_id="user-1",
+            )
+        assert result["context"] == ""
+        pre_llm_records = [
+            r for r in caplog.records if getattr(r, "gm_event", None) == "pre_llm_call"
+        ]
+        assert len(pre_llm_records) == 1
+        record = pre_llm_records[0]
+        assert record.gm_stable_chars == 0
+        assert record.gm_volatile_chars == 0
+        assert record.gm_reason == "empty_query"
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_prefetch_with_reason_reports_no_client_and_server_empty():
+    """Direct coverage of the other two documented reasons, which pre_llm_call
+    surfaces whenever the corresponding branch is what left it empty.
+    """
+
+    uninitialized = GossipMemoMemoryProvider(
+        client_factory=lambda **_: (_ for _ in ()).throw(AssertionError("must not be called")))
+    text, reason = uninitialized._prefetch_with_reason("hello", session_id="s-no-client")
+    assert text == ""
+    assert reason == "no_client"
+
+    client = _ContextClient(
+        context_result=_STABLE_BUNDLE,
+        turn_result={"message_ids": ["m1"], "context_update": {}},
+    )
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-server-empty")
+    try:
+        text, reason = provider._prefetch_with_reason("hi", session_id="s-server-empty")
+        assert text == ""
+        assert reason == "server_empty"
+    finally:
+        provider.shutdown()
+
+
+def test_hermes_logs_never_include_the_api_key(caplog):
+    """The API key must never appear in any emitted record, at any level --
+    base_url/space_id are fine, but the key would land in a log file that
+    sits next to the user's transcripts.
+    """
+
+    secret = "sk-super-secret-do-not-log-me"
+    client = _ContextClient(
+        context_result=_STABLE_BUNDLE,
+        turn_result={"message_ids": ["m1"], "context_update": _STABLE_BUNDLE},
+    )
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    adapter = _GossipMemoPluginAdapter(provider)
+    with caplog.at_level(logging.DEBUG, logger=_LOGGER_NAME):
+        provider.initialize("s-secret", api_key=secret, base_url="http://x.test", space_id="sp1")
+        adapter.pre_llm_call(
+            session_id="s-secret", task_id="t1", turn_id="turn1",
+            user_message="Alice called about the secret plan.", conversation_history=[],
+            is_first_turn=True, model="test-model", platform="telegram", sender_id="user-1",
+        )
+        adapter.post_llm_call(
+            session_id="s-secret", task_id="t1", turn_id="turn1",
+            user_message="Alice called about the secret plan.",
+            assistant_response="Noted, thanks.", conversation_history=[],
+            model="test-model", platform="telegram",
+        )
+        provider.shutdown()
+
+    assert caplog.records, "expected at least one emitted record to check"
+    for record in caplog.records:
+        assert secret not in record.getMessage()
+        for value in vars(record).values():
+            assert secret not in repr(value)

@@ -23,6 +23,7 @@ import logging
 import os
 import queue
 import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
@@ -40,6 +41,11 @@ except ImportError:  # pragma: no cover - exercised only outside Hermes.
 
 
 logger = logging.getLogger(__name__)
+
+# Every log line this plugin emits carries this tag, so the operator-facing
+# contract is a single grep against the profile's logs/agent.log -- see
+# AGENTS.md / the Hermes operator notes for the intended usage.
+_LOG_TAG = "[gossipmemo]"
 
 _DEFAULT_BASE_URL = "http://127.0.0.1:8765"
 _DEFAULT_SPACE_ID = "personal"
@@ -171,6 +177,15 @@ class GossipMemoMemoryProvider:
         self._session_started_keys: set[str] = set()
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
+        # ``_init_path`` is an internal-only marker (never set by Hermes
+        # itself): ``ensure_initialized`` stamps "lazy" onto it before
+        # delegating here so the resulting log line records which path
+        # actually built the client -- the eager on_session_start path, or
+        # the lazy safety net that runs when a gateway restart restored a
+        # session without re-firing on_session_start. See
+        # ``ensure_initialized``'s docstring for why that distinction was
+        # previously invisible and cost a debugging session.
+        init_path = str(kwargs.get("_init_path") or "eager")
         hermes_home = str(kwargs.get("hermes_home", "") or "")
         config_value = kwargs.get("config")
         config = dict(config_value) if isinstance(
@@ -222,6 +237,22 @@ class GossipMemoMemoryProvider:
             daemon=True,
         )
         self._writer.start()
+        # Never include api_key here -- base_url/space_id are fine, but the
+        # key must never land in a log file next to the user's transcripts.
+        try:
+            logger.info(
+                "%s engine initialized session=%s base_url=%s space_id=%s path=%s",
+                _LOG_TAG, self._session_id, base_url, self._space_id, init_path,
+                extra={
+                    "gm_event": "engine_init",
+                    "gm_session_id": self._session_id,
+                    "gm_base_url": base_url,
+                    "gm_space_id": self._space_id,
+                    "gm_init_path": init_path,
+                },
+            )
+        except Exception:  # noqa: BLE001 - logging must never break init.
+            pass
 
     def ensure_initialized(self, session_id: str, **kwargs: Any) -> None:
         """Lazily build the client if nothing has initialized it yet.
@@ -247,7 +278,9 @@ class GossipMemoMemoryProvider:
         with self._init_lock:
             if self._client is not None:
                 return
-            self.initialize(session_id, **kwargs)
+            lazy_kwargs = dict(kwargs)
+            lazy_kwargs["_init_path"] = "lazy"
+            self.initialize(session_id, **lazy_kwargs)
 
     def system_prompt_block(self) -> str:
         instructions = (
@@ -304,7 +337,14 @@ class GossipMemoMemoryProvider:
                 try:
                     value = client.context()
                 except Exception as exc:  # noqa: BLE001 - must never break prompt assembly.
-                    logger.debug("GossipMemo system_prompt_block context fetch failed: %s", exc)
+                    # WARNING, not debug: a failed stable-block fetch means the
+                    # agent loses the user-model/hypothesis half of context for
+                    # this conversation key.
+                    logger.warning(
+                        "%s stable block context fetch failed key=%s: %s",
+                        _LOG_TAG, key, exc,
+                        extra={"gm_event": "stable_fetch_failed", "gm_session_key": key},
+                    )
                     return
                 if isinstance(value, Mapping):
                     fetched.append(value)
@@ -452,7 +492,12 @@ class GossipMemoMemoryProvider:
                 if client is not None:
                     client.turn(batch)
             except Exception as exc:  # noqa: BLE001 - a daemon must stay alive.
-                logger.warning("GossipMemo turn sync failed: %s", exc)
+                # A write that could not be queued/committed: the agent just
+                # lost its memory for this turn.
+                logger.warning(
+                    "%s turn write failed: %s", _LOG_TAG, exc,
+                    extra={"gm_event": "turn_write_failed"},
+                )
             finally:
                 work_queue.task_done()
 
@@ -489,11 +534,11 @@ class GossipMemoMemoryProvider:
         if persisted:
             # The prefetch turn already stored the user message, so resending it
             # would only rely on the server to deduplicate work we can skip.
-            self._queue.put(
-                self._turn_messages(
-                    user_content, assistant_content, session_id, include_user=False
-                )
+            queued = self._turn_messages(
+                user_content, assistant_content, session_id, include_user=False
             )
+            self._queue.put(queued)
+            self._log_turn_queued(conversation, queued, user_already_persisted=True)
             return
         messages = self._turn_messages(user_content, assistant_content, session_id)
         # The idempotency key stays a fuse rather than a routine deduplicator:
@@ -502,6 +547,32 @@ class GossipMemoMemoryProvider:
         # that ambiguous case from creating a duplicate user row.
         messages[0]["idempotency_key"] = idem or uuid.uuid4().hex
         self._queue.put(messages)
+        self._log_turn_queued(conversation, messages, user_already_persisted=False)
+
+    def _log_turn_queued(
+        self, key: str, messages: list[dict[str, Any]], *, user_already_persisted: bool
+    ) -> None:
+        """INFO: a turn write was queued, and its size -- counts only, never content."""
+
+        try:
+            chars = sum(len(str(message.get("content", ""))) for message in messages)
+            logger.info(
+                "%s post_llm_call turn write queued session=%s messages=%d chars=%d "
+                "user_already_persisted=%s",
+                _LOG_TAG, key, len(messages), chars, user_already_persisted,
+                extra={
+                    "gm_event": "post_llm_call",
+                    "gm_session_key": key,
+                    "gm_message_count": len(messages),
+                    "gm_chars": chars,
+                    "gm_user_already_persisted": user_already_persisted,
+                },
+            )
+            logger.debug(
+                "%s post_llm_call payload session=%s messages=%r", _LOG_TAG, key, messages,
+            )
+        except Exception:  # noqa: BLE001 - logging must never break a turn.
+            pass
 
     def _turn_context(self, query: str, key: str) -> tuple[str, str]:
         client = self._client
@@ -594,7 +665,13 @@ class GossipMemoMemoryProvider:
                     with self._prefetch_lock:
                         self._prefetch_cache[key] = {"formatted": formatted}
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
-                logger.debug("GossipMemo prefetch failed: %s", exc)
+                # WARNING, not debug: a failed background recall means the
+                # next turn silently loses the volatile context it warmed for.
+                logger.warning(
+                    "%s background prefetch context fetch failed session=%s: %s",
+                    _LOG_TAG, key, exc,
+                    extra={"gm_event": "prefetch_fetch_failed", "gm_session_key": key},
+                )
 
         thread = threading.Thread(target=_prefetch, name="gossipmemo-prefetch", daemon=True)
         self._prefetch_threads = [item for item in self._prefetch_threads if item.is_alive()]
@@ -602,12 +679,32 @@ class GossipMemoMemoryProvider:
         thread.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        formatted, _reason = self._prefetch_with_reason(query, session_id=session_id)
+        return formatted
+
+    def _prefetch_with_reason(
+        self, query: str, *, session_id: str = ""
+    ) -> tuple[str, str]:
+        """Core of ``prefetch()``, also exposing *why* an empty result happened.
+
+        Returns ``(formatted, reason)``: ``reason`` is ``""`` whenever
+        ``formatted`` is non-empty, otherwise one of ``"no_client"``,
+        ``"empty_query"``, ``"cache_miss"``, or ``"server_empty"`` -- the
+        adapter's ``pre_llm_call`` logs this reason whenever nothing gets
+        injected, which is exactly the signal that was missing when a
+        silently-uninitialized restored session made this return "" forever.
+        """
+
         key = session_id or self._session_id or "default"
         with self._prefetch_lock:
             cached_entry = self._prefetch_cache.pop(key, {})
         cached = cached_entry.get("formatted", "") if isinstance(cached_entry, Mapping) else ""
-        if cached or not query.strip() or not self._client:
-            return cached
+        if cached:
+            return cached, ""
+        if not query.strip():
+            return "", "empty_query"
+        if not self._client:
+            return "", "no_client"
 
         # Hermes calls prefetch before the first queue_prefetch opportunity.
         # Give a fast local server a small synchronous window so turn one can
@@ -626,7 +723,13 @@ class GossipMemoMemoryProvider:
                     with self._prefetch_lock:
                         self._prefetch_cache[key] = {"formatted": formatted}
             except Exception as exc:  # noqa: BLE001 - recall is non-fatal.
-                logger.debug("GossipMemo first-turn prefetch failed: %s", exc)
+                # WARNING, not debug: a failed context fetch means this turn
+                # gets no injected memory at all.
+                logger.warning(
+                    "%s first-turn prefetch context fetch failed session=%s: %s",
+                    _LOG_TAG, key, exc,
+                    extra={"gm_event": "prefetch_fetch_failed", "gm_session_key": key},
+                )
 
         thread = threading.Thread(
             target=_first_fetch, name="gossipmemo-prefetch-first", daemon=True)
@@ -635,8 +738,12 @@ class GossipMemoMemoryProvider:
         if result:
             with self._prefetch_lock:
                 self._prefetch_cache.pop(key, None)
-            return result[0]
-        return ""
+            return result[0], ""
+        # The thread is still alive after the 0.25s window: the result
+        # simply is not cached *yet* (it will be, for the next turn). If the
+        # thread already finished, the server genuinely returned nothing (or
+        # the fetch failed and was already logged above as a warning).
+        return "", "cache_miss" if thread.is_alive() else "server_empty"
 
     @staticmethod
     def _render_user_model(card: Any) -> list[str]:
@@ -1049,12 +1156,32 @@ class GossipMemoMemoryProvider:
         except (TypeError, ValueError) as exc:
             return _json_result({"error": str(exc)})
         except Exception as exc:  # noqa: BLE001 - tool failures stay tool-local.
-            logger.warning("GossipMemo tool %s failed: %s", tool_name, exc)
+            logger.warning(
+                "%s tool %s failed: %s", _LOG_TAG, tool_name, exc,
+                extra={"gm_event": "tool_failed", "gm_tool_name": tool_name},
+            )
             return _json_result({"error": str(exc)})
 
     def shutdown(self) -> None:
         queue_value = self._queue
         writer = self._writer
+        if queue_value is not None:
+            try:
+                pending = queue_value.qsize()
+            except (NotImplementedError, OSError):  # pragma: no cover - platform-specific.
+                pending = -1
+            try:
+                logger.info(
+                    "%s session finalize shutdown session=%s pending=%d",
+                    _LOG_TAG, self._session_id, pending,
+                    extra={
+                        "gm_event": "finalize",
+                        "gm_session_id": self._session_id,
+                        "gm_pending": pending,
+                    },
+                )
+            except Exception:  # noqa: BLE001 - logging must never break shutdown.
+                pass
         if queue_value is not None and writer is not None and writer.is_alive():
             self._stop_requested = True
             queue_value.put(None)
@@ -1069,7 +1196,7 @@ class GossipMemoMemoryProvider:
             try:
                 client.close()
             except Exception as exc:  # noqa: BLE001 - shutdown is best effort.
-                logger.debug("GossipMemo client close failed: %s", exc)
+                logger.debug("%s client close failed: %s", _LOG_TAG, exc)
 
 
 # Both spellings are useful to plugin authors and preserve a simple public API.
@@ -1113,7 +1240,7 @@ class _GossipMemoPluginAdapter:
             try:
                 init_kwargs["hermes_home"] = str(_hermes_get_hermes_home())
             except Exception as exc:  # noqa: BLE001 - initialize must not raise.
-                logger.debug("GossipMemo could not resolve hermes_home: %s", exc)
+                logger.debug("%s could not resolve hermes_home: %s", _LOG_TAG, exc)
         return init_kwargs
 
     def on_session_start(self, **kwargs: Any) -> None:
@@ -1139,7 +1266,9 @@ class _GossipMemoPluginAdapter:
         # re-fetch the stable block again.
         key = self._provider._conversation_key(session_id) or "default"
         is_new_key = self._provider._claim_first_turn(key)
-        if kwargs.get("is_first_turn") or is_new_key:
+        first_turn_claim = bool(kwargs.get("is_first_turn") or is_new_key)
+        stable_chars = 0
+        if first_turn_claim:
             # system_prompt_block() has no hook equivalent in plugin mode
             # (that lands in slice 3b, via middleware). Prepend just the
             # stable (user-model/hypothesis) half here so it is not silently
@@ -1154,10 +1283,64 @@ class _GossipMemoPluginAdapter:
             stable = self._provider._fetch_stable_block(session_id=session_id)
             if stable:
                 parts.append(stable)
-        volatile = self._provider.prefetch(user_message, session_id=session_id)
+                stable_chars = len(stable)
+        recall_start = time.monotonic()
+        volatile, volatile_reason = self._provider._prefetch_with_reason(
+            user_message, session_id=session_id)
+        recall_elapsed = time.monotonic() - recall_start
+        volatile_chars = 0
         if volatile:
             parts.append(volatile)
-        return {"context": "\n\n".join(parts)}
+            volatile_chars = len(volatile)
+        self._log_pre_llm_call(
+            key, stable_chars, volatile_chars, first_turn_claim, recall_elapsed,
+            volatile_reason,
+        )
+        context = "\n\n".join(parts)
+        logger.debug("%s pre_llm_call rendered session=%s context=%r", _LOG_TAG, key, context)
+        return {"context": context}
+
+    @staticmethod
+    def _log_pre_llm_call(
+        key: str,
+        stable_chars: int,
+        volatile_chars: int,
+        first_turn_claim: bool,
+        recall_elapsed: float,
+        volatile_reason: str,
+    ) -> None:
+        """INFO: is-it-working per turn -- counts, timing, never memory content."""
+
+        try:
+            total_chars = stable_chars + volatile_chars
+            extra = {
+                "gm_event": "pre_llm_call",
+                "gm_session_key": key,
+                "gm_stable_chars": stable_chars,
+                "gm_volatile_chars": volatile_chars,
+                "gm_first_turn_claim": first_turn_claim,
+                "gm_recall_elapsed_s": round(recall_elapsed, 3),
+            }
+            if total_chars:
+                logger.info(
+                    "%s pre_llm_call session=%s stable_chars=%d volatile_chars=%d "
+                    "first_turn_claim=%s recall_elapsed=%.3fs",
+                    _LOG_TAG, key, stable_chars, volatile_chars, first_turn_claim,
+                    recall_elapsed, extra=extra,
+                )
+            else:
+                # A silent empty return is exactly the failure mode that hid
+                # a restored session never getting an initialized engine --
+                # always say why nothing was injected.
+                extra["gm_reason"] = volatile_reason
+                logger.info(
+                    "%s pre_llm_call session=%s injected nothing reason=%s "
+                    "first_turn_claim=%s recall_elapsed=%.3fs",
+                    _LOG_TAG, key, volatile_reason, first_turn_claim, recall_elapsed,
+                    extra=extra,
+                )
+        except Exception:  # noqa: BLE001 - logging must never break a turn.
+            pass
 
     def post_llm_call(self, **kwargs: Any) -> None:
         session_id = str(kwargs.get("session_id") or "")
@@ -1195,17 +1378,32 @@ def _register_as_plugin(ctx: Any, provider: GossipMemoMemoryProvider) -> None:
     """
 
     adapter = _GossipMemoPluginAdapter(provider)
-    for schema in provider.get_tool_schemas():
+    schemas = provider.get_tool_schemas()
+    for schema in schemas:
         ctx.register_tool(
             name=schema["name"],
             toolset=_TOOLSET,
             schema=schema,
             handler=_make_tool_handler(provider, schema["name"]),
         )
+    hook_names = ("on_session_start", "pre_llm_call", "post_llm_call", "on_session_finalize")
     ctx.register_hook("on_session_start", adapter.on_session_start)
     ctx.register_hook("pre_llm_call", adapter.pre_llm_call)
     ctx.register_hook("post_llm_call", adapter.post_llm_call)
     ctx.register_hook("on_session_finalize", adapter.on_session_finalize)
+    try:
+        logger.info(
+            "%s registered tools=%d toolset=%s hooks=%s",
+            _LOG_TAG, len(schemas), _TOOLSET, ",".join(hook_names),
+            extra={
+                "gm_event": "register",
+                "gm_tool_count": len(schemas),
+                "gm_toolset": _TOOLSET,
+                "gm_hooks": hook_names,
+            },
+        )
+    except Exception:  # noqa: BLE001 - logging must never break registration.
+        pass
 
 
 def register(ctx: Any) -> None:
