@@ -456,6 +456,7 @@ POST /v1/spaces/{space_id}/reason
 - Coverage catch up 后单独规划 LearningGoals，同样按 root 扇出，只读 entries，沿纵向、横向、时间纵深和 entry 中出现的人四个方向扩展；Goal 可以 focus Person/Relationship，但始终属于 user/Space。
 - Planner 忠实维护包括私密与敏感内容在内的未知方向；现在是否问、怎样问由消费 agent 决定。goal 是可拒绝的邀请，禁止直接病理诊断。
 - Hermes 每轮最多消费一条 Hypothesis 和随机 3–5 条 LearningGoal，并被明确告知默认忽略这些方向，不在请求路径增加 LLM latency。
+- Coverage 深度刻度与 goal 排序这两块规格上的取舍，以及 `declined` 边界目前无处安放的问题，记在 `docs/coverage-and-planner-gaps.md`。
 
 ### Query
 
