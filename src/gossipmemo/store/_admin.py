@@ -81,7 +81,9 @@ class LinkedPerson:
 class LinkedRelationship:
     id: str
     person_a_id: str
+    person_a_name: str
     person_b_id: str
+    person_b_name: str
     summary: str
 
 
@@ -90,6 +92,79 @@ class DerivationLink:
     memory_id: str
     content: str
     role: str
+
+
+@dataclass
+class PersonListRow:
+    id: str
+    display_name: str
+    status: str
+    aliases: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RelationshipListRow:
+    id: str
+    person_a_id: str
+    person_a_name: str
+    person_b_id: str
+    person_b_name: str
+    status: str
+    summary: str
+
+
+@dataclass
+class LearningGoalRow:
+    id: str
+    prompt: str
+    rationale: str
+    focus_kind: str
+    focus_id: str | None
+    status: str
+    status_reason: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass
+class HypothesisEvidenceRef:
+    memory_id: str
+    content: str
+
+
+@dataclass
+class HypothesisRow:
+    id: str
+    owner_kind: str
+    owner_id: str | None
+    content: str
+    kind: str
+    confidence: str
+    status: str
+    created_at: str
+    updated_at: str
+    support_evidence: list[HypothesisEvidenceRef] = field(default_factory=list)
+    counter_evidence: list[HypothesisEvidenceRef] = field(default_factory=list)
+
+
+@dataclass
+class CoverageRootRow:
+    root: str
+    revision: int
+    entry_count: int
+    source_watermark: str | None
+    source_cursor_id: str | None
+
+
+@dataclass
+class CoverageEntryRow:
+    id: str
+    root: str
+    path: str
+    content: str
+    status: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass
@@ -279,8 +354,12 @@ class _AdminReadMixin(_BaseStore):
 
             relationship_rows = connection.execute(
                 """
-                SELECT r.id, r.person_a_id, r.person_b_id, r.summary FROM relationships r
+                SELECT r.id, r.person_a_id, pa.display_name AS person_a_name,
+                       r.person_b_id, pb.display_name AS person_b_name, r.summary
+                FROM relationships r
                 JOIN memory_relationships mr ON mr.relationship_id = r.id
+                JOIN people pa ON pa.id = r.person_a_id
+                JOIN people pb ON pb.id = r.person_b_id
                 WHERE mr.memory_id = ?
                 ORDER BY r.id
                 """,
@@ -290,7 +369,9 @@ class _AdminReadMixin(_BaseStore):
                 LinkedRelationship(
                     id=row["id"],
                     person_a_id=row["person_a_id"],
+                    person_a_name=row["person_a_name"],
                     person_b_id=row["person_b_id"],
+                    person_b_name=row["person_b_name"],
                     summary=row["summary"],
                 )
                 for row in relationship_rows
@@ -360,6 +441,335 @@ class _AdminReadMixin(_BaseStore):
                 source_messages=source_messages,
             )
 
+    def admin_count_people(self, space_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM people WHERE space_id = ? AND status = 'active'",
+                (space_id,),
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_people(
+        self, space_id: str, offset: int, limit: int
+    ) -> list[PersonListRow]:
+        with self._connect() as connection:
+            page_rows = connection.execute(
+                """
+                SELECT id, display_name, status FROM people
+                WHERE space_id = ? AND status = 'active'
+                ORDER BY display_name, id
+                LIMIT ? OFFSET ?
+                """,
+                (space_id, limit, offset),
+            ).fetchall()
+            people: list[PersonListRow] = []
+            for row in page_rows:
+                alias_rows = connection.execute(
+                    "SELECT value FROM person_aliases WHERE person_id = ? ORDER BY value",
+                    (row["id"],),
+                ).fetchall()
+                people.append(
+                    PersonListRow(
+                        id=row["id"],
+                        display_name=row["display_name"],
+                        status=row["status"],
+                        aliases=[alias["value"] for alias in alias_rows],
+                    )
+                )
+            return people
+
+    def admin_person_display_name(self, space_id: str, person_id: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT display_name FROM people WHERE space_id = ? AND id = ?",
+                (space_id, person_id),
+            ).fetchone()
+            return row["display_name"] if row else None
+
+    def admin_person_aliases(self, space_id: str, person_id: str) -> list[str]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT a.value FROM person_aliases a
+                WHERE a.space_id = ? AND a.person_id = ?
+                ORDER BY a.value
+                """,
+                (space_id, person_id),
+            ).fetchall()
+            return [row["value"] for row in rows]
+
+    def admin_count_relationships(self, space_id: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) AS n FROM relationships WHERE space_id = ?", (space_id,)
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_relationships(
+        self, space_id: str, offset: int, limit: int
+    ) -> list[RelationshipListRow]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT r.id, r.person_a_id, pa.display_name AS person_a_name,
+                       r.person_b_id, pb.display_name AS person_b_name,
+                       r.status, r.summary
+                FROM relationships r
+                JOIN people pa ON pa.id = r.person_a_id
+                JOIN people pb ON pb.id = r.person_b_id
+                WHERE r.space_id = ?
+                ORDER BY r.updated_at DESC, r.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (space_id, limit, offset),
+            ).fetchall()
+            return [
+                RelationshipListRow(
+                    id=row["id"],
+                    person_a_id=row["person_a_id"],
+                    person_a_name=row["person_a_name"],
+                    person_b_id=row["person_b_id"],
+                    person_b_name=row["person_b_name"],
+                    status=row["status"],
+                    summary=row["summary"],
+                )
+                for row in rows
+            ]
+
+    def admin_count_learning_goals(
+        self, space_id: str, *, root: str | None = None, status: str | None = None
+    ) -> int:
+        clauses, params = _learning_goal_filter_clauses(space_id, root, status)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS n FROM learning_goals lg WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_learning_goals(
+        self,
+        space_id: str,
+        offset: int,
+        limit: int,
+        *,
+        root: str | None = None,
+        status: str | None = None,
+    ) -> list[LearningGoalRow]:
+        clauses, params = _learning_goal_filter_clauses(space_id, root, status)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT lg.id, lg.prompt, lg.rationale, lg.focus_kind, lg.focus_id,
+                       lg.status, lg.status_reason, lg.created_at, lg.updated_at
+                FROM learning_goals lg
+                WHERE {' AND '.join(clauses)}
+                ORDER BY lg.updated_at DESC, lg.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+            return [
+                LearningGoalRow(
+                    id=row["id"],
+                    prompt=row["prompt"],
+                    rationale=row["rationale"],
+                    focus_kind=row["focus_kind"],
+                    focus_id=row["focus_id"],
+                    status=row["status"],
+                    status_reason=row["status_reason"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+                for row in rows
+            ]
+
+    def admin_count_hypotheses(
+        self, space_id: str, *, owner_kind: str | None = None
+    ) -> int:
+        clauses, params = _hypothesis_filter_clauses(space_id, owner_kind)
+        with self._connect() as connection:
+            row = connection.execute(
+                f"SELECT COUNT(*) AS n FROM hypotheses WHERE {' AND '.join(clauses)}",
+                params,
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_hypotheses(
+        self,
+        space_id: str,
+        offset: int,
+        limit: int,
+        *,
+        owner_kind: str | None = None,
+    ) -> list[HypothesisRow]:
+        clauses, params = _hypothesis_filter_clauses(space_id, owner_kind)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, owner_kind, owner_id, content, kind, confidence, status,
+                       created_at, updated_at
+                FROM hypotheses
+                WHERE {' AND '.join(clauses)}
+                ORDER BY updated_at DESC, id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [*params, limit, offset],
+            ).fetchall()
+            hypotheses: list[HypothesisRow] = []
+            for row in rows:
+                evidence_rows = connection.execute(
+                    """
+                    SELECT he.role, m.id AS memory_id, m.content
+                    FROM hypothesis_evidence he
+                    JOIN memories m ON m.id = he.memory_id
+                    WHERE he.hypothesis_id = ?
+                    ORDER BY m.created_at DESC, m.id
+                    """,
+                    (row["id"],),
+                ).fetchall()
+                support = [
+                    HypothesisEvidenceRef(memory_id=item["memory_id"], content=item["content"])
+                    for item in evidence_rows
+                    if item["role"] == "support"
+                ]
+                counter = [
+                    HypothesisEvidenceRef(memory_id=item["memory_id"], content=item["content"])
+                    for item in evidence_rows
+                    if item["role"] == "counter"
+                ]
+                hypotheses.append(
+                    HypothesisRow(
+                        id=row["id"],
+                        owner_kind=row["owner_kind"],
+                        owner_id=row["owner_id"],
+                        content=row["content"],
+                        kind=row["kind"],
+                        confidence=row["confidence"],
+                        status=row["status"],
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                        support_evidence=support,
+                        counter_evidence=counter,
+                    )
+                )
+            return hypotheses
+
+    def admin_list_coverage_roots(self, space_id: str) -> list[CoverageRootRow]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT cr.root, cr.revision, cr.source_watermark, cr.source_cursor_id,
+                       (SELECT COUNT(*) FROM coverage_entries ce
+                        WHERE ce.space_id = cr.space_id AND ce.root = cr.root
+                          AND ce.status = 'active') AS entry_count
+                FROM coverage_roots cr
+                WHERE cr.space_id = ?
+                ORDER BY cr.root
+                """,
+                (space_id,),
+            ).fetchall()
+            return [
+                CoverageRootRow(
+                    root=row["root"],
+                    revision=row["revision"],
+                    entry_count=row["entry_count"],
+                    source_watermark=row["source_watermark"],
+                    source_cursor_id=row["source_cursor_id"],
+                )
+                for row in rows
+            ]
+
+    def admin_get_coverage_root(self, space_id: str, root: str) -> CoverageRootRow | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT cr.root, cr.revision, cr.source_watermark, cr.source_cursor_id,
+                       (SELECT COUNT(*) FROM coverage_entries ce
+                        WHERE ce.space_id = cr.space_id AND ce.root = cr.root
+                          AND ce.status = 'active') AS entry_count
+                FROM coverage_roots cr
+                WHERE cr.space_id = ? AND cr.root = ?
+                """,
+                (space_id, root),
+            ).fetchone()
+            if not row:
+                return None
+            return CoverageRootRow(
+                root=row["root"],
+                revision=row["revision"],
+                entry_count=row["entry_count"],
+                source_watermark=row["source_watermark"],
+                source_cursor_id=row["source_cursor_id"],
+            )
+
+    def admin_count_coverage_entries(self, space_id: str, root: str) -> int:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) AS n FROM coverage_entries
+                WHERE space_id = ? AND root = ? AND status = 'active'
+                """,
+                (space_id, root),
+            ).fetchone()
+            return row["n"]
+
+    def admin_list_coverage_entries(
+        self, space_id: str, root: str, offset: int, limit: int
+    ) -> list[CoverageEntryRow]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, root, path, content, status, created_at, updated_at
+                FROM coverage_entries
+                WHERE space_id = ? AND root = ? AND status = 'active'
+                ORDER BY (path = '') DESC, path, id
+                LIMIT ? OFFSET ?
+                """,
+                (space_id, root, limit, offset),
+            ).fetchall()
+            return [
+                CoverageEntryRow(
+                    id=row["id"],
+                    root=row["root"],
+                    path=row["path"],
+                    content=row["content"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                    updated_at=row["updated_at"],
+                )
+                for row in rows
+            ]
+
+
+def _learning_goal_filter_clauses(
+    space_id: str, root: str | None, status: str | None
+) -> tuple[list[str], list[object]]:
+    clauses = ["lg.space_id = ?"]
+    params: list[object] = [space_id]
+    if root is not None:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(lg.entry_ids) je "
+            "JOIN coverage_entries ce ON ce.id = je.value AND ce.space_id = lg.space_id "
+            "WHERE ce.root = ?)"
+        )
+        params.append(root)
+    if status is not None:
+        clauses.append("lg.status = ?")
+        params.append(status)
+    return clauses, params
+
+
+def _hypothesis_filter_clauses(
+    space_id: str, owner_kind: str | None
+) -> tuple[list[str], list[object]]:
+    clauses = ["space_id = ?"]
+    params: list[object] = [space_id]
+    if owner_kind is not None:
+        clauses.append("owner_kind = ?")
+        params.append(owner_kind)
+    return clauses, params
+
 
 def _memory_filter_clauses(
     space_id: str, state: str | None, kind: str | None, about_user: bool | None
@@ -379,12 +789,19 @@ def _memory_filter_clauses(
 
 
 __all__ = [
+    "CoverageEntryRow",
+    "CoverageRootRow",
     "DerivationLink",
+    "HypothesisEvidenceRef",
+    "HypothesisRow",
+    "LearningGoalRow",
     "LinkedPerson",
     "LinkedRelationship",
     "MemoryDetail",
     "MemoryRow",
     "MessageRow",
+    "PersonListRow",
+    "RelationshipListRow",
     "SpaceOverview",
     "SpaceSummary",
     "_AdminReadMixin",

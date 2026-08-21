@@ -12,58 +12,17 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ..store._admin import MemoryDetail, MessageRow
-from ..store.sqlite import SqliteWorldStore
-from .render import DEFAULT_PAGE_SIZE, esc, html_response, page, table_component
+from ...store._admin import MemoryDetail, MessageRow
+from ...store.sqlite import SqliteWorldStore
+from ..render import esc, html_response, page, table_component
+from ._common import clamp_limit, clamp_offset, clean_bool, clean_choice, require_space, space_breadcrumbs
 
 _MEMORY_STATES = ("active", "retracted", "superseded")
 _MEMORY_KINDS = ("fact", "event", "preference", "plan", "situation", "impression")
 
 
-def _clamp_offset(raw: str | None) -> int:
-    try:
-        value = int(raw) if raw is not None else 0
-    except ValueError:
-        return 0
-    return max(0, value)
-
-
-def _clamp_limit(raw: str | None) -> int:
-    try:
-        value = int(raw) if raw is not None else DEFAULT_PAGE_SIZE
-    except ValueError:
-        return DEFAULT_PAGE_SIZE
-    return min(max(1, value), DEFAULT_PAGE_SIZE)
-
-
-def _clean_choice(raw: str | None, allowed: tuple[str, ...]) -> str | None:
-    """A filter value only survives if it is one of `allowed`; anything
-    else (including an empty "no filter" choice) is dropped rather than
-    ever reaching SQL unbound."""
-
-    if raw and raw in allowed:
-        return raw
-    return None
-
-
-def _clean_bool(raw: str | None) -> bool | None:
-    if raw == "1":
-        return True
-    if raw == "0":
-        return False
-    return None
-
-
-def _space_breadcrumbs(space_id: str, space_name: str) -> list[tuple[str, str]]:
-    return [
-        ("Admin", "/admin"),
-        ("Spaces", "/admin/spaces"),
-        (space_name, f"/admin/spaces/{space_id}"),
-    ]
-
-
-def register_admin_views(router: APIRouter, require_session, store: SqliteWorldStore) -> None:
-    """Attach the slice-2 read-only views to `router`.
+def register(router: APIRouter, require_session, store: SqliteWorldStore) -> None:
+    """Attach the space/message/memory views to `router`.
 
     `require_session` is `AdminAuth.require_session`, passed in rather than
     imported so this module never constructs its own `AdminAuth`.
@@ -85,23 +44,20 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
     async def space_overview(
         space_id: str, _: None = Depends(require_session)
     ) -> HTMLResponse:
-        overview = store.admin_space_overview(space_id)
-        if overview is None:
-            return html_response(
-                page(
-                    title="Space not found",
-                    breadcrumbs=[("Admin", "/admin"), ("Spaces", "/admin/spaces")],
-                    body="<p>No such space.</p>",
-                ),
-                status_code=404,
-            )
+        overview = require_space(store, space_id)
+        if isinstance(overview, HTMLResponse):
+            return overview
         body = f"""
 <section>
 <h2>Counts</h2>
 <ul>
 <li>Messages: {esc(overview.message_count)} (<a href="/admin/spaces/{esc(space_id)}/messages">view</a>)</li>
 <li>Memories: {esc(overview.memory_count)} (<a href="/admin/spaces/{esc(space_id)}/memories">view</a>)</li>
-<li>People: {esc(overview.people_count)}</li>
+<li>People: {esc(overview.people_count)} (<a href="/admin/spaces/{esc(space_id)}/people">view</a>)</li>
+<li>Relationships: (<a href="/admin/spaces/{esc(space_id)}/relationships">view</a>)</li>
+<li>Learning goals: (<a href="/admin/spaces/{esc(space_id)}/goals">view</a>)</li>
+<li>Hypotheses: (<a href="/admin/spaces/{esc(space_id)}/hypotheses">view</a>)</li>
+<li>Coverage: (<a href="/admin/spaces/{esc(space_id)}/coverage">view</a>)</li>
 </ul>
 </section>
 <section>
@@ -119,7 +75,7 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
         return html_response(
             page(
                 title=f"Space: {overview.name}",
-                breadcrumbs=_space_breadcrumbs(space_id, overview.name),
+                breadcrumbs=space_breadcrumbs(space_id, overview.name),
                 body=body,
             )
         )
@@ -128,16 +84,12 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
     async def messages_view(
         space_id: str, request: Request, _: None = Depends(require_session)
     ) -> HTMLResponse:
-        overview = store.admin_space_overview(space_id)
-        if overview is None:
-            return html_response(
-                page(title="Space not found", breadcrumbs=[("Admin", "/admin")],
-                     body="<p>No such space.</p>"),
-                status_code=404,
-            )
+        overview = require_space(store, space_id)
+        if isinstance(overview, HTMLResponse):
+            return overview
         query = request.query_params
-        offset = _clamp_offset(query.get("offset"))
-        limit = _clamp_limit(query.get("limit"))
+        offset = clamp_offset(query.get("offset"))
+        limit = clamp_limit(query.get("limit"))
         total = store.admin_count_messages(space_id)
         rows = store.admin_list_messages(space_id, offset, limit)
         body = table_component(
@@ -148,7 +100,7 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
             total=total,
             base_path=f"/admin/spaces/{space_id}/messages",
         )
-        breadcrumbs = _space_breadcrumbs(space_id, overview.name) + [
+        breadcrumbs = space_breadcrumbs(space_id, overview.name) + [
             ("Messages", f"/admin/spaces/{space_id}/messages")
         ]
         return html_response(
@@ -159,19 +111,15 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
     async def memories_view(
         space_id: str, request: Request, _: None = Depends(require_session)
     ) -> HTMLResponse:
-        overview = store.admin_space_overview(space_id)
-        if overview is None:
-            return html_response(
-                page(title="Space not found", breadcrumbs=[("Admin", "/admin")],
-                     body="<p>No such space.</p>"),
-                status_code=404,
-            )
+        overview = require_space(store, space_id)
+        if isinstance(overview, HTMLResponse):
+            return overview
         query = request.query_params
-        offset = _clamp_offset(query.get("offset"))
-        limit = _clamp_limit(query.get("limit"))
-        state = _clean_choice(query.get("state"), _MEMORY_STATES)
-        kind = _clean_choice(query.get("kind"), _MEMORY_KINDS)
-        about_user = _clean_bool(query.get("about_user"))
+        offset = clamp_offset(query.get("offset"))
+        limit = clamp_limit(query.get("limit"))
+        state = clean_choice(query.get("state"), _MEMORY_STATES)
+        kind = clean_choice(query.get("kind"), _MEMORY_KINDS)
+        about_user = clean_bool(query.get("about_user"))
 
         total = store.admin_count_memories(
             space_id, state=state, kind=kind, about_user=about_user
@@ -208,7 +156,7 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
             extra_params=extra_params,
         )
         filter_form = _memory_filter_form(base_path, state, kind, about_user)
-        breadcrumbs = _space_breadcrumbs(space_id, overview.name) + [
+        breadcrumbs = space_breadcrumbs(space_id, overview.name) + [
             ("Memories", base_path)
         ]
         return html_response(
@@ -223,17 +171,13 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
     async def memory_detail_view(
         space_id: str, memory_id: str, _: None = Depends(require_session)
     ) -> HTMLResponse:
-        overview = store.admin_space_overview(space_id)
-        if overview is None:
-            return html_response(
-                page(title="Space not found", breadcrumbs=[("Admin", "/admin")],
-                     body="<p>No such space.</p>"),
-                status_code=404,
-            )
+        overview = require_space(store, space_id)
+        if isinstance(overview, HTMLResponse):
+            return overview
         detail = store.admin_memory_detail(space_id, memory_id)
         if detail is None:
             body = "<p>No such memory.</p>"
-            breadcrumbs = _space_breadcrumbs(space_id, overview.name) + [
+            breadcrumbs = space_breadcrumbs(space_id, overview.name) + [
                 ("Memories", f"/admin/spaces/{space_id}/memories"),
                 (memory_id, f"/admin/spaces/{space_id}/memories/{memory_id}"),
             ]
@@ -242,7 +186,7 @@ def register_admin_views(router: APIRouter, require_session, store: SqliteWorldS
                 status_code=404,
             )
         body = _render_memory_detail(space_id, detail)
-        breadcrumbs = _space_breadcrumbs(space_id, overview.name) + [
+        breadcrumbs = space_breadcrumbs(space_id, overview.name) + [
             ("Memories", f"/admin/spaces/{space_id}/memories"),
             (memory_id, f"/admin/spaces/{space_id}/memories/{memory_id}"),
         ]
@@ -312,11 +256,10 @@ def _memory_filter_form(
 
 
 def _render_memory_detail(space_id: str, detail: MemoryDetail) -> str:
-    # A person detail page does not exist until a later slice, so these
-    # are plain text rather than dead links.
     people_html = (
         "<ul>" + "".join(
-            f"<li>{esc(p.display_name)} <em>(person id: {esc(p.id)})</em></li>"
+            f'<li><a href="/admin/spaces/{esc(space_id)}/people/{esc(p.id)}">'
+            f"{esc(p.display_name)}</a></li>"
             for p in detail.people
         ) + "</ul>"
         if detail.people
@@ -324,8 +267,9 @@ def _render_memory_detail(space_id: str, detail: MemoryDetail) -> str:
     )
     relationships_html = (
         "<ul>" + "".join(
-            f"<li>{esc(r.person_a_id)} &harr; {esc(r.person_b_id)}: {esc(r.summary or '(no summary)')}"
-            f" <em>(relationship detail page not available yet)</em></li>"
+            f'<li><a href="/admin/spaces/{esc(space_id)}/relationships/{esc(r.id)}">'
+            f"{esc(r.person_a_name)} &harr; {esc(r.person_b_name)}</a>: "
+            f"{esc(r.summary or '(no summary)')}</li>"
             for r in detail.relationships
         ) + "</ul>"
         if detail.relationships
@@ -399,4 +343,4 @@ def _render_memory_detail(space_id: str, detail: MemoryDetail) -> str:
 """
 
 
-__all__ = ["register_admin_views"]
+__all__ = ["register"]
