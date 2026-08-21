@@ -148,7 +148,16 @@ class GossipMemoMemoryProvider:
         # unrelated prefetch bookkeeping for other sessions.
         self._init_lock = threading.Lock()
         self._prefetch_cache: dict[str, dict[str, Any]] = {}
-        self._context_cache: dict[str, dict[str, Any]] = {}
+        # The context bundle (version/user_model/continuity/people/guidance)
+        # is a property of the space, not of any one conversation -- every
+        # session against the same space gets the identical answer from the
+        # server, so this is a single process-wide slot rather than a dict
+        # keyed by session. Keying it per session made every new session (and
+        # every silent session_id rotation -- compression, /resume, /branch)
+        # look like a cold cache: a redundant re-fetch, plus a stale
+        # ``context_version`` sent to the server even though this process
+        # already held the current bundle.
+        self._context_bundle: dict[str, Any] | None = None
         # A conversation is strictly serial, so at most one turn is in flight
         # per conversation: a single slot, not a list that can only grow.
         self._current_turn: dict[str, dict[str, Any]] = {}
@@ -166,8 +175,8 @@ class GossipMemoMemoryProvider:
         # not re-announce a session_id rotation mid-conversation -- context
         # compression, /resume, and /branch all silently swap the session_id
         # a later hook call carries. Because every per-session dict here
-        # (_context_cache, _prefetch_cache, _current_turn, _stable_delivered)
-        # is keyed on that session_id, an unannounced rotation lands on a key
+        # (_prefetch_cache, _current_turn, _stable_delivered) is keyed on
+        # that session_id, an unannounced rotation lands on a key
         # none of them have seen, and relying solely on is_first_turn would
         # mean the stable block is never fetched (and _stable_delivered never
         # set) again for the rest of that conversation. _claim_first_turn
@@ -216,7 +225,10 @@ class GossipMemoMemoryProvider:
         self._write_enabled = context in {"", "primary"}
         self._stop_requested = False
         self._prefetch_cache.clear()
-        self._context_cache.clear()
+        # space_id can change here, and the bundle is scoped to space_id, so
+        # a stale bundle from a different space must never survive a
+        # re-initialize.
+        self._context_bundle = None
         self._current_turn.clear()
         self._stable_delivered.clear()
         self._session_started_keys.clear()
@@ -325,7 +337,7 @@ class GossipMemoMemoryProvider:
 
         key = self._conversation_key(session_id) or "default"
         with self._prefetch_lock:
-            cached = self._context_cache.get(key)
+            cached = self._context_bundle
         bundle: Any = cached if isinstance(cached, Mapping) and cached else None
         if bundle is None:
             client = self._client
@@ -357,7 +369,12 @@ class GossipMemoMemoryProvider:
                 return ""
             bundle = fetched[0]
             with self._prefetch_lock:
-                self._context_cache.setdefault(key, dict(bundle))
+                # First-writer-wins, same as the old per-key setdefault: a
+                # concurrent fetch that lost the race must not clobber a
+                # bundle another thread already stored for this (single,
+                # space-scoped) slot.
+                if self._context_bundle is None:
+                    self._context_bundle = dict(bundle)
         lines = self._render_stable_lines(bundle)
         if not lines:
             return ""
@@ -579,7 +596,7 @@ class GossipMemoMemoryProvider:
         if client is None:
             return "", ""
         with self._prefetch_lock:
-            cached = dict(self._context_cache.get(key, {}))
+            cached = dict(self._context_bundle or {})
             entry = self._current_turn.get(key)
             if entry is None or entry.get("content") != query:
                 # A different content means the previous turn is over and its
@@ -632,7 +649,7 @@ class GossipMemoMemoryProvider:
                 and len(message_ids) > 0
             )
             if isinstance(update, Mapping):
-                self._context_cache[key] = dict(update)
+                self._context_bundle = dict(update)
             elif cached:
                 update = cached
         merged = {

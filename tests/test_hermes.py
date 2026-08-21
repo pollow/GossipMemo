@@ -377,6 +377,32 @@ def test_hermes_system_prompt_block_carries_stable_half_and_keeps_instructions()
         provider.shutdown()
 
 
+def test_hermes_context_bundle_is_shared_across_session_keys_not_refetched():
+    """The context bundle is a property of the space, not any one session.
+
+    A second, unrelated session_id asking for the stable block must reuse
+    the bundle a first session already fetched -- no redundant round-trip,
+    and no ``context_version=None`` sent to the server as if this process
+    had never seen the bundle before.
+    """
+
+    client = _ContextClient(context_result=_STABLE_BUNDLE)
+    provider = GossipMemoMemoryProvider(client_factory=lambda **_: client)
+    provider.initialize("s-first")
+    try:
+        first_block = provider.system_prompt_block()
+        assert "User model — preferences: likes tea" in first_block
+        assert client.context_calls == 1
+
+        second_block = provider._fetch_stable_block(session_id="s-second")
+        assert "User model — preferences: likes tea" in second_block
+        # Same process-wide bundle, so the second, never-before-seen session
+        # key still gets the answer without a second server round-trip.
+        assert client.context_calls == 1
+    finally:
+        provider.shutdown()
+
+
 def test_hermes_prefetch_omits_stable_lines_once_delivered_by_system_prompt_block():
     turn_result = {
         "message_ids": ["m1"],
