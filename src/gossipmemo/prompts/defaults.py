@@ -265,6 +265,22 @@ EXTRACTION_COMPARISON_RULE = (
     "memory as evidence."
 )
 
+EXTRACTION_CLARIFICATION_RULE = (
+    "Additionally, list any question you would have to ask the user before "
+    "current user evidence can be interpreted correctly. Raise one only when "
+    "the ambiguity actually blocks a durable, useful memory -- typically an "
+    "unresolved reference to a concrete individual. Do not raise one for every "
+    "pronoun, group, category, or incidental third party, and never ask for "
+    "private detail about another person beyond what identifying them in the "
+    "user's own memory requires. Say in `reason` what the ambiguity blocks, "
+    "and put a short description of the kind of ambiguity in `blocked_by`. "
+    "Cite the message IDs that triggered it in `evidence_message_ids`. "
+    "Asking nothing is the normal outcome; return an empty list. "
+    "Clarifications never change what you emit in `people` or `memories`: "
+    "retain exactly the memories you would have retained without them."
+)
+
+
 # --- prompts/render.py (the owner-reasoning family) ---
 
 OWNER_EVIDENCE_SCOPE_RULE = (
@@ -404,6 +420,7 @@ __all__ = [
     "EMBEDDING_LEARNING_GOAL_DEDUP_INSTRUCTION",
     "EMBEDDING_QUERY_INSTRUCTION",
     "EMBEDDING_TURN_RECALL_INSTRUCTION",
+    "EXTRACTION_CLARIFICATION_RULE",
     "EXTRACTION_COMPARISON_RULE",
     "EXTRACTION_KNOWN_PEOPLE_RULE",
     "EXTRACTION_PERSON_IDENTITY_RULE",

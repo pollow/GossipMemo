@@ -51,6 +51,8 @@ from .common import (
 )
 from .llm_schemas import (
     ContinuityReasoningResult,
+    ExtractedClarification,
+    ExtractedClarificationResult,
     ExtractedCoverageAudit,
     ExtractedCoverageEntry,
     ExtractedCoverageEntryEdit,
@@ -108,6 +110,8 @@ __all__ = [
     "CoverageEntryStatus",
     "CoverageEntryView",
     "CoverageRootView",
+    "ExtractedClarification",
+    "ExtractedClarificationResult",
     "ExtractedCoverageAudit",
     "ExtractedCoverageEntry",
     "ExtractedCoverageEntryEdit",

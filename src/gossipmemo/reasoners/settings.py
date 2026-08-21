@@ -26,6 +26,10 @@ class ReasoningSettings:
 
     user_name: str = "CurrentUser"
     prompts: PromptLibrary = DEFAULT_PROMPTS
+    # Observation-only probe: ask extraction to also report what it could not
+    # safely interpret, and log it. Nothing reads the answers back, so this
+    # stays off unless a deployment is deliberately collecting that data.
+    extraction_clarification_probe: bool = False
 
 
 __all__ = ["DEFAULT_PROMPTS", "ReasoningSettings"]

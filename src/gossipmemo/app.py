@@ -46,6 +46,7 @@ def build_world(settings: Settings) -> SocialMemoryWorld:
                 if settings.prompts_path
                 else PromptLibrary()
             ),
+            extraction_clarification_probe=settings.extraction_clarification_probe,
         ),
         # The embedding client itself is resolved inside `world.start()`,
         # not here: building it needs an async network probe (dimension

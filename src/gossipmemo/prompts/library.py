@@ -66,6 +66,7 @@ class PromptLibrary:
     extraction_time_bound_rule: str = defaults.EXTRACTION_TIME_BOUND_RULE
     extraction_known_people_rule: str = defaults.EXTRACTION_KNOWN_PEOPLE_RULE
     extraction_comparison_rule: str = defaults.EXTRACTION_COMPARISON_RULE
+    extraction_clarification_rule: str = defaults.EXTRACTION_CLARIFICATION_RULE
     owner_evidence_scope_rule: str = defaults.OWNER_EVIDENCE_SCOPE_RULE
     owner_evidence_digest_rule: str = defaults.OWNER_EVIDENCE_DIGEST_RULE
     continuity_rebuild_rule: str = defaults.CONTINUITY_REBUILD_RULE

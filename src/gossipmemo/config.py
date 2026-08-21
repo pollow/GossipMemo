@@ -17,6 +17,14 @@ def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
 
 
+def _flag_env(name: str, default: bool = False) -> bool:
+    """Read a boolean switch, accepting the spellings an operator will type."""
+    value = _env(name).lower()
+    if not value:
+        return default
+    return value in {"1", "true", "yes", "on"}
+
+
 def _required_env(name: str) -> str:
     value = _env(name)
     if not value:
@@ -54,6 +62,7 @@ class Settings:
     embedding_model: str = ""
     embedding_dim: int | None = None
     embedding_query_timeout_seconds: float = 2.0
+    extraction_clarification_probe: bool = False
 
     def __post_init__(self) -> None:
         missing = [
@@ -170,6 +179,9 @@ class Settings:
             ),
             extraction_batch_timeout_seconds=float(
                 _env("GOSSIPMEMO_EXTRACTION_BATCH_TIMEOUT_SECONDS", "1800")
+            ),
+            extraction_clarification_probe=_flag_env(
+                "GOSSIPMEMO_EXTRACTION_CLARIFICATION_PROBE"
             ),
             logging_level=_env("GOSSIPMEMO_LOG_LEVEL", "INFO").upper(),
             logging_format=_env("GOSSIPMEMO_LOG_FORMAT", "json").lower(),

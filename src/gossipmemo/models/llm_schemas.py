@@ -44,6 +44,33 @@ class ExtractionResult(BaseModel):
     memories: list[ExtractedMemory] = Field(default_factory=list)
 
 
+class ExtractedClarification(BaseModel):
+    """One question extraction would have to ask to interpret evidence correctly.
+
+    Observation only: nothing reads this back.  `blocked_by` is deliberately
+    free text rather than an enum -- the probe exists to find out what kinds
+    of ambiguity actually show up, and a fixed vocabulary would both presume
+    that answer and steer the model toward the categories it lists.
+    """
+
+    question: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+    blocked_by: str = ""
+    evidence_message_ids: list[str] = Field(default_factory=list)
+
+
+class ExtractedClarificationResult(ExtractionResult):
+    """`ExtractionResult` plus the clarification probe's extra output.
+
+    A subclass, not a flag on the base model, so that with the probe off the
+    schema shown to the model is byte-for-byte what it was before the probe
+    existed.  That is what makes runs with the probe disabled a usable
+    control group for "did the extra field change extraction itself?".
+    """
+
+    clarifications: list[ExtractedClarification] = Field(default_factory=list)
+
+
 class InferredMemory(BaseModel):
     content: str
     kind: MemoryKind = "impression"
