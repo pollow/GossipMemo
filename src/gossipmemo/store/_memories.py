@@ -181,9 +181,6 @@ class _MemoriesMixin(_PeopleMixin):
                 memories=memories,
             )
 
-    def recall_user_memories(self, space_id: str, text: str, limit: int = 5) -> list[MemoryView]:
-        return self.recall_memories(space_id, text, about_user=True, limit=limit)
-
     def recall_memories(
         self, space_id: str, text: str, about_user: bool | None = None,
         person_ids: Iterable[str] | None = None, limit: int = 5,

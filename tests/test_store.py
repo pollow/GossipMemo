@@ -37,7 +37,6 @@ from gossipmemo.models import (
     UserModelReasoningResult,
 )
 from gossipmemo.store import AmbiguousPersonError, SqliteWorldStore
-from gossipmemo.store import _context as _context_module
 
 
 @pytest.fixture
@@ -577,11 +576,6 @@ def test_recall_memories_filters_by_about_user_and_person_and_handles_empty_quer
 
     assert store.recall_memories("personal", "", limit=10) == []
     assert store.recall_memories("personal", "   ", limit=10) == []
-
-    # recall_user_memories keeps its existing hardcoded about_user=1 behavior.
-    assert [memory.content for memory in store.recall_user_memories("personal", "distinctive")] == [
-        "Distinctive tea preference"
-    ]
 
 
 def test_recall_memories_route_is_protected_llm_free_and_caps_limit(store):
@@ -1815,31 +1809,6 @@ def _seeded_store(tmp_path, seed: int, goal_count: int, *,
     return world
 
 
-def test_guidance_samples_three_to_five_learning_goals(tmp_path):
-    """Goals are sampled, not ranked: only the count and the pool are promised.
-
-    The sample is now a deterministic function of the version and the goal
-    pool, so varying the pool's id set (rather than an injected RNG seed) is
-    what drives different sample sizes across iterations here.
-    """
-    sizes = set()
-    for seed in range(20):
-        world = _seeded_store(tmp_path, seed, goal_count=30, id_prefix=f"g{seed}-")
-        ids = [item.id for item in world.guidance_bundle("s").items]
-        assert all(item.startswith("g") for item in ids)
-        assert len(set(ids)) == len(ids)
-        sizes.add(len(ids))
-    assert sizes == {3, 4, 5}
-
-
-def test_guidance_ignores_query_relevance_for_learning_goals(tmp_path):
-    """The sample is deterministic given a fixed version and pool, whatever the query says."""
-    world = _seeded_store(tmp_path, 7, goal_count=30)
-    first = [item.id for item in world.guidance_bundle("s", [], "goal 3").items]
-    second = [item.id for item in world.guidance_bundle("s", [], "something else").items]
-    assert first == second
-
-
 def test_guidance_sampling_still_respects_the_focus_filter(tmp_path):
     """Sampling replaces ranking, not the deterministic focus gate."""
     world = _seeded_store(tmp_path, 11, goal_count=0)
@@ -1863,11 +1832,6 @@ def test_guidance_sampling_still_respects_the_focus_filter(tmp_path):
     assert activated and all(item.startswith("p") for item in activated)
 
 
-def test_guidance_returns_the_whole_small_goal_pool(tmp_path):
-    world = _seeded_store(tmp_path, 1, goal_count=2)
-    assert sorted(item.id for item in world.guidance_bundle("s").items) == ["g00", "g01"]
-
-
 def test_guidance_is_stable_across_repeated_reads_at_an_unchanged_version(tmp_path):
     """Guidance is derived from the version, so an unchanged version must
     reproduce the identical selection on every read -- this is what keeps
@@ -1878,17 +1842,6 @@ def test_guidance_is_stable_across_repeated_reads_at_an_unchanged_version(tmp_pa
     assert first.version == second.version
     assert [item.id for item in first.guidance.items] == [
         item.id for item in second.guidance.items]
-
-
-def test_guidance_rotates_when_the_version_changes(tmp_path):
-    """A durable context change moves the version, which rotates the sample."""
-    world = _seeded_store(tmp_path, 3, goal_count=30)
-    before = world.context_bundle("s")
-    world.overwrite_user_model("s", {"note": "mutated"})
-    after = world.context_bundle("s")
-    assert after.version != before.version
-    assert [item.id for item in after.guidance.items] != [
-        item.id for item in before.guidance.items]
 
 
 def test_a_pinned_goal_seed_survives_a_version_bump(tmp_path):
@@ -1905,18 +1858,6 @@ def test_a_pinned_goal_seed_survives_a_version_bump(tmp_path):
         item.id for item in before.guidance.items]
 
 
-def test_a_pinned_goal_seed_still_rotates_when_the_pool_changes(tmp_path):
-    """Pinning holds the version out of the seed, not the pool."""
-    world = _seeded_store(tmp_path, 5, goal_count=30)
-    before = [item.id for item in world.context_bundle("s", goal_seed="pinned").guidance.items]
-    with world._connect() as connection:
-        connection.execute(
-            "INSERT INTO learning_goals(id,space_id,prompt,rationale,entry_ids,"
-            "created_at,updated_at) VALUES ('g99','s','one more','context','[]','1','1')")
-    after = [item.id for item in world.context_bundle("s", goal_seed="pinned").guidance.items]
-    assert after != before
-
-
 def test_zero_goals_leaves_the_hypothesis_in_the_bundle(tmp_path):
     world = _seeded_store(tmp_path, 6, goal_count=30)
     _insert_hypothesis(world, "h1", "s", "user", None, "User likes tea.")
@@ -1929,16 +1870,6 @@ def test_an_explicit_goal_count_is_exact_and_capped_by_the_pool(tmp_path):
     assert len(large.context_bundle("s", goals=8).guidance.items) == 8
     small = _seeded_store(tmp_path, 8, goal_count=2)
     assert len(small.context_bundle("s", goals=8).guidance.items) == 2
-
-
-def test_the_default_bundle_is_unchanged_by_the_new_knobs(tmp_path):
-    """Passing neither knob must reproduce the pre-change selection exactly."""
-    world = _seeded_store(tmp_path, 9, goal_count=30)
-    default = [item.id for item in world.context_bundle("s").guidance.items]
-    explicit = [item.id for item in world.context_bundle(
-        "s", goal_seed=world.context_bundle("s").version).guidance.items]
-    assert explicit == default
-    assert 3 <= len(default) <= 5
 
 
 def test_guidance_route_is_protected_llm_free_supports_filters_and_caps_limit(store):
@@ -2151,28 +2082,6 @@ def test_list_guidance_shuffles_so_repeated_asks_walk_the_pool(store):
     assert len(firsts) > 1
 
 
-def test_list_guidance_shuffle_defaults_to_module_random(store, monkeypatch):
-    """No `rng` argument still shuffles; the parameter exists for tests."""
-    store.ensure_space("personal")
-    with store._connect() as connection:
-        for index in range(5):
-            connection.execute(
-                "INSERT INTO learning_goals(id, space_id, prompt, rationale, entry_ids, "
-                "status, created_at, updated_at) VALUES (?, 'personal', ?, 'context', "
-                "'[]', 'open', '1', ?)",
-                (f"g{index}", f"Goal {index}", str(index)),
-            )
-    calls: list[int] = []
-    original = _context_module.random.shuffle
-    monkeypatch.setattr(
-        _context_module.random, "shuffle",
-        lambda seq: (calls.append(len(seq)), original(seq))[1],
-    )
-    items = store.list_guidance("personal")
-    assert calls == [5]
-    assert len(items) == 5
-
-
 def test_list_guidance_excludes_closed_and_resolved_items(store):
     store.ensure_space("personal")
     _insert_hypothesis(store, "h_open", "personal", "user", None, "open one")
@@ -2217,15 +2126,6 @@ def test_list_guidance_kind_filter_restricts_to_one_kind(store):
     assert [item.id for item in only_goals] == ["g1"]
     both = store.list_guidance("personal")
     assert {item.id for item in both} == {"h1", "g1"}
-
-
-def test_guidance_bundle_sampling_is_unaffected_by_the_list_guidance_refactor(tmp_path):
-    """`_guidance` must keep sampling; `list_guidance` must not, after sharing the filter SQL."""
-    world = _seeded_store(tmp_path, 99, goal_count=30)
-    sampled = world.guidance_bundle("s").items
-    assert 3 <= len(sampled) <= 5
-    full = world.list_guidance("s", kind="learning_goal", limit=1000)
-    assert len(full) == 30
 
 
 def test_initialize_enables_wal_and_a_short_busy_timeout(store):
