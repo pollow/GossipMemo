@@ -73,7 +73,7 @@ class WorldStore(Protocol):
     ) -> tuple[list[MemoryView], list[HypothesisView]]: ...
 
     def user_model_context(
-        self, space_id: str
+        self, space_id: str, *, delta_only: bool = False
     ) -> tuple[UserModelView, list[MemoryView], str | None] | None: ...
 
     def apply_user_model_reasoning(
@@ -83,7 +83,7 @@ class WorldStore(Protocol):
     ) -> bool: ...
 
     def person_context(
-        self, space_id: str, person_id: str
+        self, space_id: str, person_id: str, *, delta_only: bool = False
     ) -> tuple[PersonView, list[MemoryView], str | None] | None: ...
 
     def apply_person_reasoning(
@@ -97,7 +97,7 @@ class WorldStore(Protocol):
     ) -> bool: ...
 
     def relationship_context(
-        self, space_id: str, relationship_id: str
+        self, space_id: str, relationship_id: str, *, delta_only: bool = False
     ) -> tuple[RelationshipView, list[MemoryView], str | None] | None: ...
 
     def apply_relationship_reasoning(

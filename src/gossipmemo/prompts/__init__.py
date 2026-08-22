@@ -28,7 +28,6 @@ from .library import PromptLibrary
 from .render import (
     actions_stage_prompt,
     fill,
-    owner_evidence_digest_prompt,
     owner_reasoning_prefix,
     projection_stage_prompt,
     schema_instruction,
@@ -51,7 +50,6 @@ __all__ = [
     "USER_MODEL_REASONING_SYSTEM_PROMPT",
     "actions_stage_prompt",
     "fill",
-    "owner_evidence_digest_prompt",
     "owner_reasoning_prefix",
     "projection_stage_prompt",
     "schema_instruction",

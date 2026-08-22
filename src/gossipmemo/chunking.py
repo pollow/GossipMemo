@@ -6,22 +6,20 @@ once a reasoner has decided what it wants to send, `reduce_until_fits`
 gives it one shape for shrinking that request until it fits the transport's
 `context_budget`, bounded and only while shrinking is provably making
 progress. `greedy_chunks` is the paginating sibling: evidence that CAN be
-split across several requests (coverage and goal planning are
-accumulators, unlike owner's snapshot cards) is packed request-by-request
-until it no longer fits, splitting a single oversized item by bisecting
-its `.content` when even one item alone would not fit.
+split across several requests is packed request-by-request until it no
+longer fits, splitting a single oversized item by bisecting its `.content`
+when even one item alone would not fit.
 
 Neither helper knows about `ContextBudget` or `ChatCompletionRequest`:
 callers close over their own transport and pass plain predicates
 (`fits`, `check`), which keeps this module a leaf usable from any
 reasoner.
 
-`reasoners/owner.py` is the first user of `reduce_until_fits`: an oversized
-owner-reasoning prompt can only be shrunk lossily (owner cards are full
-snapshots, not paginated evidence), so it digests memories round by round.
-`reasoners/learning_goals.py` reuses the same round-loop shape for its
-candidate-reconciliation reduction without adopting owner-specific types --
-the round body is entirely the caller's `reduce_round` callback.
+`reasoners/learning_goals.py` is the user of `reduce_until_fits`: its
+candidate reconciliation has to see every candidate at once, so an
+oversized set can only be shrunk lossily, round by round. The owner family
+uses `greedy_chunks` instead -- a card is folded batch by batch, so its
+evidence paginates like coverage's rather than needing compression.
 """
 
 from __future__ import annotations

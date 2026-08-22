@@ -4,9 +4,11 @@ Deliberately not part of `DEFAULT_REASONING_PIPELINE`: continuity keeps its
 own message-count trigger (`SocialMemoryWorld._schedule_continuity_reason`)
 instead of running on the daily/startup induction sweep.
 
-Continuity is an accumulator, not a snapshot (unlike the owner family in
-`reasoners/owner.py`): an oversized backlog is paginated across several
-calls via `chunking.greedy_chunks` rather than lossily digested. Pagination
+Continuity is rebuilt from one prior plus a message window, so an
+oversized backlog is paginated across several calls via
+`chunking.greedy_chunks` and only the last completion is kept -- unlike the
+owner family in `reasoners/owner.py`, where every batch's completion is the
+next batch's input. Pagination
 sizes each chunk against a placeholder prior (`chunk_prior`) rather than the
 real, evolving one, so chunk boundaries do not shift as the streamed prior
 grows; `_fit_continuity_prior` then shrinks the real prior, if needed, to

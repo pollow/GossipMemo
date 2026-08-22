@@ -52,6 +52,15 @@ def build_user_model_reasoner(
     embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
     embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
+    """Fold the space's UserModel card forward per attempt.
+
+    Same `delta_only` read as the person and relationship reasoners: the
+    card plus its `about_user` memories changed since the card's own
+    watermark. The full `about_user` history is folded only when the card
+    has no watermark yet -- the case `overwrite_user_model` seeds from
+    `gossipmemo import --user-md`.
+    """
+
     reason_user_model = partial(
         _reason_user_model, model, settings,
         store=store, embedding_client_getter=embedding_client_getter,
@@ -62,7 +71,7 @@ def build_user_model_reasoner(
         _, _, user_models = store.stale_entities()
         if space_id not in user_models:
             return None
-        context = store.user_model_context(space_id)
+        context = store.user_model_context(space_id, delta_only=True)
         if not context:
             return None
         user_model, memories, watermark = context

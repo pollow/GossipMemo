@@ -69,7 +69,12 @@ def build_person_reasoner(
     embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
     embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
-    """Refresh one stale Person card per attempt.
+    """Fold one stale Person card forward per attempt.
+
+    The context read is `delta_only`: the card plus the memories changed
+    since its own watermark, so a steady-state refresh is one pair of calls
+    over a handful of rows and only a card with no watermark yet pays for
+    the whole history.
 
     If Extract updates the same Person while an LLM call is in flight, the
     optimistic watermark check in `apply_person_reasoning` fails and the next
@@ -89,7 +94,7 @@ def build_person_reasoner(
             return None
         person_id = targets[0]
         more_targets = len(targets) > 1
-        context = store.person_context(space_id, person_id)
+        context = store.person_context(space_id, person_id, delta_only=True)
         if not context:
             return _PersonTarget(person_id, more_targets)
         person, memories, watermark = context

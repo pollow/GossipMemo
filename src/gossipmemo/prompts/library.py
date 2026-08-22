@@ -68,7 +68,8 @@ class PromptLibrary:
     extraction_comparison_rule: str = defaults.EXTRACTION_COMPARISON_RULE
     extraction_clarification_rule: str = defaults.EXTRACTION_CLARIFICATION_RULE
     owner_evidence_scope_rule: str = defaults.OWNER_EVIDENCE_SCOPE_RULE
-    owner_evidence_digest_rule: str = defaults.OWNER_EVIDENCE_DIGEST_RULE
+    owner_fold_rule: str = defaults.OWNER_FOLD_RULE
+    owner_invalidated_scope_rule: str = defaults.OWNER_INVALIDATED_SCOPE_RULE
     continuity_rebuild_rule: str = defaults.CONTINUITY_REBUILD_RULE
     coverage_audit_folding_rule: str = defaults.COVERAGE_AUDIT_FOLDING_RULE
     coverage_audit_entry_shape_rule: str = defaults.COVERAGE_AUDIT_ENTRY_SHAPE_RULE

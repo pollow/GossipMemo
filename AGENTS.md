@@ -19,7 +19,7 @@ Raw `Message` rows are durable evidence. Ingestion supports batches; LLM extract
 
 `Memory` is the durable semantic record. It supports active, retracted, and superseded states. `about_user` selects Memories used to rebuild the UserModel. Memories link directly to People without structural person roles; roles remain expressed in natural-language content.
 
-Person, Relationship, and UserModel cards are rebuildable projections over active Memories. Freshness uses related Memory `updated_at` watermarks, covering additions, retractions, and supersedes. Induction runs at startup for stale projections and then daily at local midnight.
+Person, Relationship, and UserModel cards are rebuildable projections over Memories, maintained by folding the card forward over the Memories that changed since its own watermark rather than by re-projecting the whole history. Freshness uses related Memory `updated_at` watermarks, counted without regard to status, covering additions, retractions, and supersedes. Induction runs at startup for stale projections and then daily at local midnight.
 
 Rolling continuity is a per-space projection generated asynchronously after about 20 new messages. It stores a concise continuity text, related Person IDs, and the last covered message. It summarizes ongoing threads and recent decisions rather than duplicating Person cards.
 

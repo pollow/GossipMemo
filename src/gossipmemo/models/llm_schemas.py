@@ -155,18 +155,6 @@ class PersonProjectionResult(BaseModel):
     profile_card: dict[str, Any] = Field(default_factory=dict)
 
 
-class ExtractedOwnerEvidenceDigestItem(BaseModel):
-    summary: str = Field(min_length=1)
-    source_memory_ids: list[str] = Field(min_length=1, max_length=32)
-    basis: str = "explicit"
-    uncertainty: str = ""
-    semantic_subject: str = ""
-
-
-class ExtractedOwnerEvidenceDigest(BaseModel):
-    items: list[ExtractedOwnerEvidenceDigestItem] = Field(max_length=16)
-
-
 class RelationshipProjectionResult(BaseModel):
     facets: list[dict[str, Any]] = Field(default_factory=list)
     closeness: str | None = None

@@ -55,14 +55,6 @@ class ContinuityView(BaseModel):
     through_message_id: str | None = None
 
 
-class OwnerEvidenceDigestView(BaseModel):
-    summary: str = Field(min_length=1)
-    source_memory_ids: list[str] = Field(min_length=1, max_length=512)
-    basis: str = "explicit"
-    uncertainty: str = ""
-    semantic_subject: str = ""
-
-
 class CoverageEntryView(BaseModel):
     """One stored summary of how well a path under a root is understood.
 

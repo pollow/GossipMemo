@@ -52,8 +52,8 @@ enum values unchanged.
 """
 
 USER_MODEL_REASONING_SYSTEM_PROMPT = """Reason carefully about the fixed current user from
-active memories marked about_user. Capture preferences, communication preferences, goals, current
-situations, and practical interaction guidance. Generalize recurring patterns
+the supplied memories marked about_user. Capture preferences, communication preferences,
+goals, current situations, and practical interaction guidance. Generalize recurring patterns
 when supported, but do not turn a one-off event into a stable trait or include
 another person's identity. Use valid_from and valid_to to separate current
 conditions from historical events. Do not use projections, inferred memories, or
@@ -289,11 +289,18 @@ OWNER_EVIDENCE_SCOPE_RULE = (
     "lifecycle actions, never used as support."
 )
 
-OWNER_EVIDENCE_DIGEST_RULE = (
-    "Compress supplied raw evidence only. Preserve chronology, basis, uncertainty, "
-    "contradictions, semantic subject, and exact source_memory_ids. Do not infer people, "
-    "traits, or actions; never invent IDs. Return exactly one digest item covering every "
-    "supplied source ID."
+OWNER_FOLD_RULE = (
+    "The target already carries the card written by earlier passes. Fold the supplied "
+    "memories into it: keep what they do not touch, revise what they refine, and add what "
+    "they introduce. They are a delta, not the whole record -- what is absent from them is "
+    "not thereby absent from the owner, and is never a reason to drop anything."
+)
+
+OWNER_INVALIDATED_SCOPE_RULE = (
+    "Invalidated-memories were retracted or superseded and are no longer held to be true. "
+    "They are not evidence and not comparison state: remove what each one alone supports "
+    "from the card, and keep whatever other evidence still supports. A superseded record's "
+    "replacement arrives as ordinary evidence; do not restate the withdrawn wording."
 )
 
 # --- reasoners/continuity.py ---
@@ -434,8 +441,9 @@ __all__ = [
     "GOAL_PLANNING_SYSTEM_PROMPT",
     "GOAL_RECONCILIATION_LIFECYCLE_RULE",
     "GOAL_RECONCILIATION_MERGE_RULE",
-    "OWNER_EVIDENCE_DIGEST_RULE",
     "OWNER_EVIDENCE_SCOPE_RULE",
+    "OWNER_FOLD_RULE",
+    "OWNER_INVALIDATED_SCOPE_RULE",
     "PERSON_REASONING_SYSTEM_PROMPT",
     "PROJECTION_STAGE_PROMPT",
     "QUERY_SYNTHESIS_SYSTEM_PROMPT",

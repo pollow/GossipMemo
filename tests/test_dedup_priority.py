@@ -194,7 +194,7 @@ def test_bounded_comparisons_expands_earlier_items_first_baseline() -> None:
         return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    budget = ContextBudget(4000, 200, 100)
+    budget = ContextBudget(4300, 200, 100)
     adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget)
     person = PersonView(id="p", display_name="Bob")
     hyps = [
@@ -217,7 +217,7 @@ def test_owner_reasoning_priority_reorders_hypotheses_by_similarity_to_evidence(
 
     calls: list[dict] = []
     client = httpx.AsyncClient(transport=httpx.MockTransport(_fake_handler(calls)))
-    budget = ContextBudget(4000, 200, 100)
+    budget = ContextBudget(4300, 200, 100)
     adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client, context_budget=budget)
     hyps = [
         _hypothesis("h1", "A" * 2000), _hypothesis("h2", "B" * 2000), _hypothesis("h3", "C" * 2000),
@@ -248,7 +248,7 @@ def test_owner_reasoning_without_store_or_client_matches_pre_slice_order() -> No
 
     calls_with: list[dict] = []
     calls_without: list[dict] = []
-    budget = ContextBudget(4000, 200, 100)
+    budget = ContextBudget(4300, 200, 100)
     hyps = [
         _hypothesis("h1", "A" * 2000), _hypothesis("h2", "B" * 2000), _hypothesis("h3", "C" * 2000),
     ]

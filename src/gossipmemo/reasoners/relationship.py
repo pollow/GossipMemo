@@ -69,10 +69,11 @@ def build_relationship_reasoner(
     embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
     embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> DescriptorReasoner:
-    """Refresh one stale Relationship projection per attempt.
+    """Fold one stale Relationship projection forward per attempt.
 
-    Mirrors the person reasoner: an in-flight watermark conflict simply
-    causes the next `attempt` to recompute from the latest snapshot.
+    Mirrors the person reasoner, including the `delta_only` context read:
+    an in-flight watermark conflict simply causes the next `attempt` to
+    recompute from the latest snapshot.
     """
 
     reason_relationship = partial(
@@ -88,7 +89,7 @@ def build_relationship_reasoner(
             return None
         relationship_id = targets[0]
         more_targets = len(targets) > 1
-        context = store.relationship_context(space_id, relationship_id)
+        context = store.relationship_context(space_id, relationship_id, delta_only=True)
         if not context:
             return _RelationshipTarget(relationship_id, more_targets)
         relationship, memories, watermark = context

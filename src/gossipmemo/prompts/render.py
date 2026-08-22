@@ -69,19 +69,20 @@ def _json(value: Any) -> str:
 
 def _evidence_lines(memories: Sequence[Any]) -> str:
     """Compact, injection-resistant enough-for-reading evidence representation."""
-    lines = []
-    for m in memories:
-        if hasattr(m, "source_memory_ids"):
-            lines.append(
-                "- digest=" + json.dumps(m.model_dump(mode="json"), ensure_ascii=False,
-                                         separators=(",", ":"))
-                + " (compressed evidence; IDs refer to original Memories)")
-        else:
-            lines.append(
-                f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} "
-                f"derivation_sources={'unavailable' if m.basis == 'inferred' else 'n/a'} "
-                f"text={json.dumps(m.content, ensure_ascii=False)}")
-    return "\n".join(lines) or "- (none)"
+    return "\n".join(
+        f"- id={m.id!r} kind={m.kind!r} basis={m.basis!r} "
+        f"text={json.dumps(m.content, ensure_ascii=False)}"
+        for m in memories
+    ) or "- (none)"
+
+
+def _invalidated_lines(memories: Sequence[Any]) -> str:
+    """Withdrawn records: what the card must stop asserting, and why."""
+    return "\n".join(
+        f"- id={m.id!r} status={m.status!r} kind={m.kind!r} "
+        f"text={json.dumps(m.content, ensure_ascii=False)}"
+        for m in memories
+    ) or "- (none)"
 
 
 def _hypothesis_lines(hypotheses: list[HypothesisView] | tuple[HypothesisView, ...]) -> str:
@@ -96,30 +97,34 @@ def _hypothesis_lines(hypotheses: list[HypothesisView] | tuple[HypothesisView, .
 def owner_reasoning_prefix(
     target: BaseModel,
     evidence_memories: Sequence[Any],
+    invalidated_memories: Sequence[Any],
     inferred_memories: list[MemoryView] | tuple[MemoryView, ...],
     hypotheses: list[HypothesisView] | tuple[HypothesisView, ...],
     *, prompts: PromptLibrary, user_name: str = "CurrentUser",
 ) -> str:
-    """Shared immutable prefix for both stages of an owner reasoning pair."""
+    """Shared immutable prefix for both stages of an owner reasoning pair.
+
+    `target` carries the card this batch folds into, so the four rendered
+    sections are four different kinds of input: the card so far, evidence,
+    records withdrawn since the card was written, and comparison-only
+    state. Invalidation gets its own section rather than a flag on an
+    evidence line because it is neither evidence nor comparison -- it is a
+    negative instruction, and `owner_evidence_scope_rule` draws its
+    boundary by section.
+    """
     return (
         f"<owner-reasoning user={json.dumps(user_name)}>\n<target>\n"
         + _json(target) + "\n</target>\n<evidence-memories>\n"
         + _evidence_lines(evidence_memories) + "\n</evidence-memories>\n"
+        + "<invalidated-memories evidence=\"false\">\n"
+        + _invalidated_lines(invalidated_memories) + "\n</invalidated-memories>\n"
         + "<current-inferred-memories comparison-only=\"true\">\n"
         + _evidence_lines(inferred_memories) + "\n</current-inferred-memories>\n"
         + "<open-hypotheses comparison-only=\"true\">\n" + _hypothesis_lines(hypotheses)
-        + "\n</open-hypotheses>\n" + prompts.owner_evidence_scope_rule
+        + "\n</open-hypotheses>\n" + prompts.owner_fold_rule
+        + "\n" + prompts.owner_invalidated_scope_rule
+        + "\n" + prompts.owner_evidence_scope_rule
     )
-
-
-def owner_evidence_digest_prompt(
-    memories: list[Any], user_name: str = "CurrentUser", *, prompts: PromptLibrary,
-) -> str:
-    return (prompts.owner_evidence_digest_rule
-            + "\n" + _json([
-                item.model_dump(mode="json") if isinstance(item, BaseModel) else item
-                for item in memories
-            ]))
 
 
 def projection_stage_prompt(prompts: PromptLibrary) -> str:
@@ -133,7 +138,6 @@ def actions_stage_prompt(prompts: PromptLibrary) -> str:
 __all__ = [
     "actions_stage_prompt",
     "fill",
-    "owner_evidence_digest_prompt",
     "owner_reasoning_prefix",
     "projection_stage_prompt",
     "schema_instruction",

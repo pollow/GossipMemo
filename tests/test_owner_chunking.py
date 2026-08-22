@@ -13,6 +13,7 @@ from gossipmemo.models import (
     HypothesisView,
     ManualMemoryRequest,
     MemoryView,
+    PersonReasoningResult,
     PersonView,
 )
 from gossipmemo.reasoners import ReasoningSettings
@@ -23,98 +24,172 @@ from gossipmemo.transport import ChatCompletionRequest
 REASONING = ReasoningSettings()
 
 
-def _memory(identifier: str, content: str, *, basis: str = "stated") -> MemoryView:
+def _memory(
+    identifier: str, content: str, *, basis: str = "stated", status: str = "active"
+) -> MemoryView:
     return MemoryView(
         id=identifier,
         content=content,
         kind="fact",
         basis=basis,
-        status="active",
+        status=status,
         created_at="2026-01-01T00:00:00+00:00",
     )
 
 
-def test_owner_chunking_filters_fake_ids_and_keeps_final_two_calls() -> None:
-    calls: list[dict] = []
+def _prefix(payload: dict) -> str:
+    """The owner-reasoning prefix, which is always the second message."""
+    return str(payload["messages"][1]["content"])
+
+
+def _fold_handler(calls: list[dict], cards: list[str]):
+    """Answer a projection call with the next card, an actions call with one
+    hypothesis upsert, so a fold over several batches is countable."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         calls.append(payload)
-        text = "\n".join(str(m.get("content", "")) for m in payload["messages"])
-        if "Compress evidence only" in text:
-            body = {"items": [{"summary": "tea", "source_memory_ids": ["m1"]},
-                              {"summary": "fake", "source_memory_ids": ["forged"]}]}
-        elif len([c for c in calls
-                  if "Compress evidence only" not in
-                  " ".join(str(m) for m in c["messages"])]) == 1:
-            body = {"profile_card": {"summary": "tea"}}
+        combined = str(payload["messages"][-1]["content"])
+        if "Return only the requested projection" in combined:
+            body = {"profile_card": {"summary": cards[
+                sum("Return only the requested projection" in
+                    str(call["messages"][-1]["content"]) for call in calls) - 1]}}
         else:
-            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
+            body = {"hypothesis_actions": {"upserts": [{
+                "content": "tentative",
+                "evidence": [{"memory_id": "m0", "role": "support"}],
+            }], "transitions": []}}
         return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(body)}}]})
 
-    async def run() -> None:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenAICompatibleAdapter(
-                "http://x", "k", "m", client=client, context_budget=ContextBudget(5000, 80, 20))
-            result = await _reason_person(
-                adapter,
-                REASONING,
-                PersonView(id="p", display_name="Bob"),
-                [_memory("m1", "x" * 10000)],
-            )
-            assert result.profile_card == {"summary": "tea"}
-
-    asyncio.run(run())
-    assert sum("Compress evidence only" in str(c["messages"]) for c in calls) >= 1
-    assert sum("inferred_memory_actions" in str(c["messages"][-1]) for c in calls) == 1
-    assert "forged" not in str(calls[-2:])
+    return handler
 
 
-def test_owner_chunking_recursively_digests_large_cjk_with_bounded_requests() -> None:
+def test_owner_fold_over_several_batches_carries_the_card_into_the_next_one() -> None:
+    """A rebuild has no watermark, so the delta is the whole history: it is
+    folded batch by batch, each batch reading the card the last one wrote."""
+
     calls: list[dict] = []
-    budget = ContextBudget(5000, 400, 200)
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        calls.append(payload)
-        combined = "\n".join(str(message.get("content", "")) for message in payload["messages"])
-        if "Compress evidence only" in combined:
-            ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
-            assert ids
-            # The first digest round remains deliberately verbose, forcing a
-            # second typed reduction while retaining original source IDs.
-            summary = "摘要" if '"summary"' in combined else "中" * 500
-            body = {"items": [{"summary": summary, "source_memory_ids": ids}]}
-        elif "Return only the requested projection" in combined:
-            body = {"profile_card": {"summary": "ok"}}
-        else:
-            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": json.dumps(body)}}]},
-        )
+    cards = [f"card{index}" for index in range(20)]
+    budget = ContextBudget(6000, 400, 200)
 
     async def run() -> None:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_fold_handler(calls, cards))) \
+                as client:
             adapter = OpenAICompatibleAdapter(
-                "http://x", "k", "m", client=client, context_budget=budget,
-            )
+                "http://x", "k", "m", client=client, context_budget=budget)
             result = await _reason_person(
                 adapter,
                 REASONING,
                 PersonView(id="p", display_name="Bob"),
-                [_memory(f"m{index}", "往事" * 1200) for index in range(12)],
+                [_memory(f"m{index}", "往事" * 400) for index in range(12)],
             )
-            assert result.profile_card == {"summary": "ok"}
+            projections = sum(
+                "Return only the requested projection" in str(call["messages"][-1]["content"])
+                for call in calls)
+            assert projections >= 3
+            assert result.profile_card == {"summary": cards[projections - 1]}
+            # One epistemic review per batch, and every batch's actions kept.
+            assert len(calls) == projections * 2
+            assert result.hypothesis_actions is not None
+            assert len(result.hypothesis_actions.upserts) == projections
 
     asyncio.run(run())
-    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
-    assert len(digest_calls) > 2
-    assert sum("Return only the requested projection" in str(call) for call in calls) == 2
-    assert sum("inferred_memory_actions" in str(call) for call in calls) == 1
+    projection_calls = [
+        call for call in calls
+        if "Return only the requested projection" in str(call["messages"][-1]["content"])]
+    # The first batch folds into the stored (empty) card; every later batch
+    # folds into the card its predecessor produced.
+    assert "card0" not in _prefix(projection_calls[0])
+    for index, call in enumerate(projection_calls[1:]):
+        assert f'"{cards[index]}"' in _prefix(call)
+    # Each memory reaches exactly one batch, and nothing was summarized away.
+    seen = [identifier for call in projection_calls
+            for identifier in re.findall(r"- id='(m\d+)'", _prefix(call))]
+    assert sorted(seen) == sorted(f"m{index}" for index in range(12))
     for payload in calls:
         request = ChatCompletionRequest.model_validate(payload)
         assert budget.estimate_request(request) <= budget.usable_input_tokens
+
+
+def test_owner_fold_of_a_steady_state_delta_is_a_single_pair() -> None:
+    """The normal case: a handful of new memories folded into a real card."""
+
+    calls: list[dict] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(_fold_handler(calls, ["next"]))) as client:
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
+            result = await _reason_person(
+                adapter,
+                REASONING,
+                PersonView(id="p", display_name="Bob",
+                           profile_card={"summary": "prefers tea"},
+                           profile_source_updated_at="2026-01-01T00:00:00+00:00"),
+                [_memory("m1", "Bob switched to coffee.")],
+            )
+            assert result.profile_card == {"summary": "next"}
+
+    asyncio.run(run())
+    assert len(calls) == 2
+    prefix = _prefix(calls[0])
+    assert "prefers tea" in prefix
+    assert "- id='m1'" in prefix
+
+
+def test_owner_fold_renders_invalidated_memories_in_their_own_section() -> None:
+    """Retracted and superseded rows travel in the delta as a negative
+    instruction, never as an evidence line carrying a flag."""
+
+    calls: list[dict] = []
+
+    async def run() -> None:
+        async with httpx.AsyncClient(
+                transport=httpx.MockTransport(_fold_handler(calls, ["next"]))) as client:
+            adapter = OpenAICompatibleAdapter("http://x", "k", "m", client=client)
+            await _reason_person(
+                adapter,
+                REASONING,
+                PersonView(id="p", display_name="Bob", profile_card={"summary": "drinks tea"}),
+                [
+                    _memory("m1", "Bob drinks tea.", status="retracted"),
+                    _memory("m2", "Bob drinks coffee."),
+                ],
+            )
+
+    asyncio.run(run())
+    prefix = _prefix(calls[0])
+    evidence = prefix.split("<evidence-memories>")[1].split("</evidence-memories>")[0]
+    invalidated = prefix.split("<invalidated-memories")[1].split("</invalidated-memories>")[0]
+    assert "m2" in evidence and "m1" not in evidence
+    assert "m1" in invalidated and "m2" not in invalidated
+    assert "status='retracted'" in invalidated
+    # The evidence line is id/kind/basis/text and nothing else.
+    assert "derivation_sources" not in prefix
+
+
+def test_person_delta_read_carries_a_retraction_and_marks_the_card_stale(tmp_path) -> None:
+    store = SqliteWorldStore(tmp_path / "fold.db")
+    store.initialize()
+    kept = store.add_manual_memory(
+        "s", ManualMemoryRequest(content="Bob drinks tea.", people=["Bob"]))
+    with store._connect() as connection:
+        person_id = connection.execute(
+            "SELECT id FROM people WHERE space_id = 's'").fetchone()["id"]
+    person, memories, watermark = store.person_context("s", person_id, delta_only=True)
+    assert [memory.id for memory in memories] == [kept]
+    assert store.apply_person_reasoning(
+        "s", person_id, watermark, PersonReasoningResult(profile_card={"summary": "tea"})) is True
+    # Folded up to the watermark: nothing new, nothing to do.
+    person, memories, _ = store.person_context("s", person_id, delta_only=True)
+    assert memories == [] and person.stale is False
+
+    store.retract_memory("s", kept)
+    person, memories, _ = store.person_context("s", person_id, delta_only=True)
+    assert person.stale is True
+    assert [(memory.id, memory.status) for memory in memories] == [(kept, "retracted")]
+    # The dossier read is unchanged: active memories only, newest first.
+    assert store.person_context("s", person_id)[1] == []
 
 
 def test_owner_stage_two_checks_actual_first_completion_before_second_http() -> None:
@@ -175,106 +250,6 @@ def test_owner_reasoning_retries_malformed_structured_output() -> None:
 
     asyncio.run(run())
     assert calls == 3
-
-
-def test_owner_digest_retries_semantically_incomplete_source_ids() -> None:
-    calls: list[dict] = []
-    digest_attempts = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal digest_attempts
-        payload = json.loads(request.content)
-        calls.append(payload)
-        combined = str(payload["messages"])
-        if "Compress evidence only" in combined:
-            digest_attempts += 1
-            ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
-            returned = ids[:-1] if digest_attempts == 1 else ids
-            body = {"items": [{
-                "summary": "bounded evidence",
-                "source_memory_ids": returned,
-            }]}
-        elif "Return only the requested projection" in combined:
-            body = {"profile_card": {"summary": "ok"}}
-        else:
-            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": json.dumps(body)}}]},
-        )
-
-    async def run() -> None:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenAICompatibleAdapter(
-                "http://x", "k", "m", client=client,
-                context_budget=ContextBudget(5000, 400, 200),
-                max_retries=1, retry_base_seconds=0.001,
-                retry_max_seconds=0.001,
-            )
-            result = await _reason_person(
-                adapter,
-                REASONING,
-                PersonView(id="p", display_name="Bob"),
-                [_memory(f"m{index}", "证据" * 700) for index in range(6)],
-            )
-            assert result.profile_card == {"summary": "ok"}
-
-    asyncio.run(run())
-    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
-    assert len(digest_calls) >= 2
-    assert digest_calls[0]["messages"] == digest_calls[1]["messages"]
-
-
-def test_recursive_digest_inherits_validated_provenance_server_side() -> None:
-    calls: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        payload = json.loads(request.content)
-        calls.append(payload)
-        combined = str(payload["messages"])
-        if "Compress evidence only" in combined:
-            ids = sorted(set(re.findall(r'"(m\d+)"', combined)))
-            user_prompt = payload["messages"][-1]["content"]
-            if '"summary"' in user_prompt:
-                # A reduce response need not mechanically repeat every
-                # already-validated original ID; the server inherits them.
-                body = {"items": [{
-                    "summary": "reduced",
-                    "source_memory_ids": ["forged"],
-                }]}
-            else:
-                groups = [ids[index:index + 2] for index in range(0, len(ids), 2)]
-                body = {"items": [{
-                    "summary": "中" * 600,
-                    "source_memory_ids": group,
-                } for group in groups]}
-        elif "Return only the requested projection" in combined:
-            assert "m0" in combined and "m39" in combined
-            body = {"profile_card": {"summary": "ok"}}
-        else:
-            body = {"hypothesis_actions": {"upserts": [], "transitions": []}}
-        return httpx.Response(
-            200,
-            json={"choices": [{"message": {"content": json.dumps(body)}}]},
-        )
-
-    async def run() -> None:
-        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            adapter = OpenAICompatibleAdapter(
-                "http://x", "k", "m", client=client,
-                context_budget=ContextBudget(6000, 400, 200),
-            )
-            result = await _reason_person(
-                adapter,
-                REASONING,
-                PersonView(id="p", display_name="Bob"),
-                [_memory(f"m{index}", "证据" * 300) for index in range(40)],
-            )
-            assert result.profile_card == {"summary": "ok"}
-
-    asyncio.run(run())
-    digest_calls = [call for call in calls if "Compress evidence only" in str(call)]
-    assert any('"summary"' in str(call) for call in digest_calls)
 
 
 def test_owner_comparison_state_is_bounded_and_remains_comparison_only() -> None:

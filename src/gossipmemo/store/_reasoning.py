@@ -468,19 +468,34 @@ class _ReasoningMixin(_MessagesMixin):
             return True
 
     def user_model_context(
-        self, space_id: str
+        self, space_id: str, *, delta_only: bool = False
     ) -> tuple[UserModelView, list[MemoryView], str | None] | None:
+        """Read the space's UserModel, its `about_user` memories and watermark.
+
+        `delta_only` has the same meaning as in `person_context`: the fold
+        read, bounded below by the card's own watermark and including the
+        rows that have since been retracted or superseded.
+        """
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM user_models WHERE space_id = ?", (space_id,)
             ).fetchone()
             if not row:
                 return None
-            memories = connection.execute(
-                """SELECT * FROM memories WHERE space_id = ? AND status = 'active'
-                   AND about_user = 1 ORDER BY created_at DESC, id DESC""",
-                (space_id,),
-            ).fetchall()
+            if delta_only:
+                since = row["profile_source_updated_at"]
+                memories = connection.execute(
+                    """SELECT * FROM memories WHERE space_id = ? AND about_user = 1
+                       AND (? IS NULL OR updated_at > ?)
+                       ORDER BY updated_at ASC, id ASC""",
+                    (space_id, since, since),
+                ).fetchall()
+            else:
+                memories = connection.execute(
+                    """SELECT * FROM memories WHERE space_id = ? AND status = 'active'
+                       AND about_user = 1 ORDER BY created_at DESC, id DESC""",
+                    (space_id,),
+                ).fetchall()
             watermark = self._user_model_watermark(connection, space_id)
             view = UserModelView(
                 space_id=space_id,

@@ -347,7 +347,7 @@ re-enabled. An unknown name is a startup error rather than a silent no-op.
 Continuity and extraction are not part of this pipeline and cannot be disabled.
 
 Person, Relationship, and UserModel reasoning is two-staged: a projection call
-rewrites the card, then an epistemic review call decides what to infer and what
+writes the card, then an epistemic review call decides what to infer and what
 to merely suspect. That split is what keeps *inference* out of the card:
 
 - An **inferred Memory** is a conclusion the system is willing to state, stored
@@ -358,8 +358,21 @@ to merely suspect. That split is what keeps *inference* out of the card:
   cards until it is promoted, rejected, superseded, or retired.
 
 Freshness is watermark-based: a card is stale when a related Memory has a newer
-`updated_at`. That covers additions, retractions, and supersedes with one
-mechanism, so no reasoner needs an invalidation hook.
+`updated_at`, counted without regard to status. That covers additions,
+retractions, and supersedes with one mechanism, so no reasoner needs an
+invalidation hook.
+
+The same watermark is the fold boundary. A card is not recomputed from its
+owner's whole history; the projection call is a **fold** — current card plus
+the Memories that changed since the card's own watermark, producing the next
+card. Retracted and superseded rows travel in that delta and are rendered in
+their own prompt section, as an instruction to withdraw rather than as
+evidence. A steady-state refresh is therefore one pair of calls over a handful
+of rows however long the history is. A card with no watermark yet — a fresh
+space, or a rebuild — folds the whole history instead, in as many budget-sized
+batches as it takes, each batch reading the card the previous one produced.
+That is the same code path, iterated, which is why nothing has to be summarized
+lossily to fit.
 
 Extraction drains sequentially per space: one batch at a time, oldest and
 least-attempted first, until nothing is pending. A batch that keeps failing is
@@ -617,8 +630,9 @@ reasoners, one module each under `reasoners/`, with the budget-driven splitting
 tools they share in `chunking.py`.
 
 The point of the narrowness is that each reasoner's real path — two-stage owner
-reasoning, lossy digesting, paginated evidence — is exercised by tests against
-a transport double, rather than stubbed out behind a per-reasoner method.
+folding, batched evidence, lossy candidate reduction — is exercised by tests
+against a transport double, rather than stubbed out behind a per-reasoner
+method.
 
 See [data_schema.md](data_schema.md) for the table-level model and
 [glossary.md](glossary.md) for the canonical vocabulary.

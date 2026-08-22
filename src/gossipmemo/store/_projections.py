@@ -169,9 +169,13 @@ class _ProjectionsMixin(_VectorsMixin):
             updated_at=row["updated_at"])
 
     def _user_model_watermark(self, connection: sqlite3.Connection, space_id: str) -> str | None:
+        # No status filter, matching the person and relationship watermarks:
+        # retracting or superseding a memory bumps its `updated_at`, and that
+        # has to move the watermark even when the row is not the newest one,
+        # or the withdrawal never makes the card stale and is silently lost.
         row = connection.execute(
             "SELECT MAX(updated_at) AS watermark FROM memories "
-            "WHERE space_id = ? AND status = 'active' AND about_user = 1",
+            "WHERE space_id = ? AND about_user = 1",
             (space_id,),
         ).fetchone()
         return row["watermark"] if row else None

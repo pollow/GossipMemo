@@ -1,51 +1,51 @@
-"""Two-phase owner-reasoning skeleton shared by person, relationship, and
+"""The two-phase owner-reasoning fold shared by person, relationship, and
 user_model.
 
-Phase 1 asks for the projection (profile card / relationship facets)
-alone; phase 2 replays that exact projection as an assistant turn and asks
-only for inferred-memory and hypothesis actions against it. That split
-lets `structured()` validate the projection and the actions independently
-against their own schemas, and lets the digest fallback below prove the
-*actions* request (the larger of the two, since it embeds the first
-completion) fits before any HTTP call is made.
+One fold step is `(current card, one batch of memories) -> new card`. Phase
+1 asks for the projection (profile card / relationship facets) alone;
+phase 2 replays that exact projection as an assistant turn and asks only
+for inferred-memory and hypothesis actions against it. That split lets
+`structured()` validate the projection and the actions independently
+against their own schemas, and lets the check below prove the *actions*
+request (the larger of the two, since it embeds the first completion)
+fits before any HTTP call is made.
 
-Owner cards are full snapshots, not paginated evidence, so an oversized
-prompt can only be shrunk lossily: `_digest_evidence` compresses raw
-Memories into `OwnerEvidenceDigestView`s via `chunking.reduce_until_fits`,
-each digest call itself checked and, if needed, further chunked before
-being sent.
+The caller supplies a delta -- memories newer than the card's watermark,
+including the ones that are no longer active -- so steady-state
+maintenance is one fold step over a handful of rows. A card with no
+watermark yet gets the whole history instead, folded batch by batch into
+the card the previous batch produced; that iteration is why an oversized
+prompt no longer has to be compressed lossily. Batches come from
+`chunking.greedy_chunks`, so a batch is as large as the budget allows and
+a single oversized memory is split by content rather than summarized
+away.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
+from collections import deque
 from collections.abc import Callable, Sequence
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from pydantic import BaseModel
 
-from ..chunking import reduce_until_fits
+from ..chunking import greedy_chunks
 from ..embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, EmbeddingClient
 from ..models import (
-    ExtractedOwnerEvidenceDigest,
     HypothesisView,
     MemoryView,
-    OwnerEvidenceDigestView,
 )
 from ..priority import current_call_label, current_call_tier
 from ..prompts import (
     actions_stage_prompt,
-    owner_evidence_digest_prompt,
     owner_reasoning_prefix,
     projection_stage_prompt,
     schema_instruction,
 )
 from ..store import WorldStore
 from ..transport import (
-    ChatCompletionRequest,
     ChatMessage,
-    LLMOutputError,
     LlmTransport,
     structured,
 )
@@ -74,12 +74,15 @@ async def owner_reasoning(
     embedding_client_getter: Callable[[], EmbeddingClient | None] | None = None,
     embedding_query_timeout_seconds: float = DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
 ) -> tuple[ProjectionT, ActionsT]:
-    """Run the shared two-call owner-reasoning shape over `transport`.
+    """Fold `memories` into `target` and return the final card plus actions.
 
     Comparison-only inferred memories and hypotheses are bounded first
-    (they may never grow to consume the evidence budget); if the actions
-    request still would not fit with full evidence, evidence is digested
-    and the whole prefix rebuilt before either call goes out.
+    (they may never grow to consume the evidence budget); what is left of
+    the budget decides how many memories one batch carries. Each batch
+    runs the full two-call pair against the card the previous batch
+    produced, and the actions of every batch are concatenated: omission
+    stays a no-op, so a later batch never withdraws an earlier one's
+    action.
 
     Before bounding, `hypotheses` is stable-resorted by similarity to
     `memories` (the evidence this call is actually reasoning about): a
@@ -104,49 +107,105 @@ async def owner_reasoning(
         transport, settings, system_prompt, target, inferred_memories, hypotheses,
         projection_type, actions_type,
     )
-    first_messages = _first_messages(
-        transport, settings, system_prompt, target, memories, bounded_inferred,
-        bounded_hypotheses, projection_type,
-    )
-    if not _stage2_fits(transport, settings, first_messages, actions_type):
-        digest = await _digest_evidence(
-            transport, settings, target, memories, bounded_inferred, bounded_hypotheses,
-            system_prompt, projection_type, actions_type,
+
+    def fits(batch: Sequence[MemoryView], card: BaseModel) -> bool:
+        return _stage2_fits(
+            transport, settings,
+            _first_messages(
+                transport, settings, system_prompt, card, batch, bounded_inferred,
+                bounded_hypotheses, projection_type,
+            ),
+            actions_type,
         )
+
+    def split(batch: Sequence[MemoryView], card: BaseModel) -> list[list[MemoryView]]:
+        def check(candidate: Sequence[MemoryView]) -> None:
+            if not fits(candidate, card):
+                raise ValueError("owner evidence batch exceeds context budget")
+
+        return greedy_chunks(list(batch), lambda candidate: fits(candidate, card), check)
+
+    # An owner with no evidence at all still gets one pass: the card is
+    # rewritten from the comparison-only context it does have.
+    pending = deque(split(memories, target) or [[]])
+    card: BaseModel = target
+    projection: ProjectionT | None = None
+    collected: list[ActionsT] = []
+    while pending:
+        batch = pending.popleft()
+        if not fits(batch, card):
+            # Folding earlier batches grew the card, so this batch no
+            # longer fits beside it. Re-pack it against the current card.
+            pieces = split(batch, card)
+            if len(pieces) < 2:
+                raise ValueError("owner evidence batch exceeds context budget")
+            pending.extendleft(reversed(pieces))
+            continue
         first_messages = _first_messages(
-            transport, settings, system_prompt, target, digest, bounded_inferred,
+            transport, settings, system_prompt, card, batch, bounded_inferred,
             bounded_hypotheses, projection_type,
         )
-        if not _stage2_fits(transport, settings, first_messages, actions_type):
-            raise ValueError("owner evidence digest did not fit context budget")
+        first, projection = await structured(
+            transport, first_messages, projection_type,
+            tier=current_call_tier(), label=current_call_label(),
+        )
+        _, actions = await structured(
+            transport,
+            first_messages + [
+                ChatMessage(role="assistant", content=first),
+                ChatMessage(
+                    role="user",
+                    content=actions_stage_prompt(settings.prompts) + "\n"
+                    + schema_instruction(actions_type),
+                ),
+            ],
+            actions_type,
+            tier=current_call_tier(), label=current_call_label(),
+        )
+        collected.append(actions)
+        card = card.model_copy(update=projection.model_dump())
+    if projection is None:
+        raise ValueError("owner reasoning ran no fold step")
+    return projection, _merged_actions(collected, actions_type)
 
-    first, projection = await structured(
-        transport, first_messages, projection_type,
-        tier=current_call_tier(), label=current_call_label(),
-    )
-    _, actions = await structured(
-        transport,
-        first_messages + [
-            ChatMessage(role="assistant", content=first),
-            ChatMessage(
-                role="user",
-                content=actions_stage_prompt(settings.prompts) + "\n"
-                + schema_instruction(actions_type),
-            ),
-        ],
-        actions_type,
-        tier=current_call_tier(), label=current_call_label(),
-    )
-    return projection, actions
+
+def _merged_actions(results: Sequence[ActionsT], actions_type: type[ActionsT]) -> ActionsT:
+    """Concatenate the per-batch action results into one.
+
+    Every field of an actions result is an optional sub-model whose own
+    fields are lists of independent, explicitly scoped items, so a merge
+    is a concatenation: order is preserved, and storage applies the same
+    per-item validation it would have applied to a single batch's result.
+    """
+
+    if len(results) == 1:
+        return results[0]
+    merged: dict[str, Any] = {}
+    for name in actions_type.model_fields:
+        parts = [part for part in (getattr(item, name) for item in results) if part is not None]
+        if not parts:
+            continue
+        combined: dict[str, Any] = {}
+        for part in parts:
+            for field, value in part:
+                if isinstance(value, list):
+                    combined.setdefault(field, []).extend(value)
+                else:
+                    combined[field] = value
+        merged[name] = type(parts[0])(**combined)
+    return actions_type(**merged)
 
 
 def _first_messages(
     transport: LlmTransport, settings: ReasoningSettings, system_prompt: str,
-    target: BaseModel, evidence: Sequence[Any], inferred: Sequence[MemoryView],
+    target: BaseModel, evidence: Sequence[MemoryView], inferred: Sequence[MemoryView],
     hypotheses: Sequence[HypothesisView], projection_type: type[BaseModel],
 ) -> list[ChatMessage]:
     prefix = owner_reasoning_prefix(
-        target, list(evidence), list(inferred), list(hypotheses),
+        target,
+        [memory for memory in evidence if memory.status == "active"],
+        [memory for memory in evidence if memory.status != "active"],
+        list(inferred), list(hypotheses),
         prompts=settings.prompts, user_name=settings.user_name,
     )
     return [
@@ -203,7 +262,7 @@ def _bounded_comparisons(
     IDs are retained before prose. If even every ID skeleton cannot fit,
     the oldest tail is omitted; omission remains a no-op by contract.
     Comparison state gets at most one third of the usable input budget so
-    evidence always has room to be represented or digested.
+    every fold batch still has room for real evidence.
     """
     context_budget = transport.context_budget
     empty_first = _first_messages(
@@ -259,178 +318,6 @@ def _bounded_comparisons(
         if fits(chosen_inferred, hypothesis_candidate):
             chosen_hypotheses = hypothesis_candidate
     return chosen_inferred, chosen_hypotheses
-
-
-def _evidence_source_ids(item: MemoryView | OwnerEvidenceDigestView) -> set[str]:
-    if isinstance(item, MemoryView):
-        return {item.id}
-    return set(item.source_memory_ids)
-
-
-def _digest_request(
-    transport: LlmTransport, settings: ReasoningSettings, chunk: list[Any]
-) -> ChatCompletionRequest:
-    return transport.prepare(
-        [
-            ChatMessage(
-                role="system",
-                content="Compress evidence only; do not infer people or actions.\n\n"
-                + schema_instruction(ExtractedOwnerEvidenceDigest),
-            ),
-            ChatMessage(role="user", content=owner_evidence_digest_prompt(
-                chunk, settings.user_name, prompts=settings.prompts)),
-        ],
-        structured=True,
-    )
-
-
-async def _digest_evidence(
-    transport: LlmTransport, settings: ReasoningSettings, target: BaseModel,
-    memories: Sequence[MemoryView],
-    inferred_memories: Sequence[MemoryView], hypotheses: Sequence[HypothesisView],
-    system_prompt: str, projection_type: type[BaseModel], actions_type: type[BaseModel],
-) -> list[OwnerEvidenceDigestView]:
-    context_budget = transport.context_budget
-
-    def chunks_for(
-        source: Sequence[MemoryView | OwnerEvidenceDigestView],
-    ) -> list[list[MemoryView | OwnerEvidenceDigestView]]:
-        chunks: list[list[MemoryView | OwnerEvidenceDigestView]] = []
-        current: list[MemoryView | OwnerEvidenceDigestView] = []
-        for memory in source:
-            # Segment oversized content so every digest request is valid.
-            pieces: list[Any] = [memory]
-            if isinstance(memory, MemoryView) and not context_budget.report(
-                context_budget.estimate_request(_digest_request(transport, settings, [memory]))
-            ).fits:
-                lo, hi = 1, len(memory.content)
-                while lo < hi:
-                    mid = (lo + hi + 1) // 2
-                    candidate_piece = memory.model_copy(update={"content": memory.content[:mid]})
-                    if context_budget.report(
-                        context_budget.estimate_request(
-                            _digest_request(transport, settings, [candidate_piece]))
-                    ).fits:
-                        lo = mid
-                    else:
-                        hi = mid - 1
-                width = lo
-                if width < 1:
-                    raise ValueError(
-                        f"single owner evidence segment exceeds context budget: {memory.id}"
-                    )
-                pieces = [
-                    memory.model_copy(update={"content": memory.content[i:i + width]})
-                    for i in range(0, len(memory.content), width)
-                ]
-            for piece in pieces:
-                candidate = current + [piece]
-                candidate_ids = set().union(*(_evidence_source_ids(item) for item in candidate))
-                source_id_limit = (
-                    32 if any(isinstance(item, MemoryView) for item in candidate) else 512
-                )
-                candidate_fits = context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, settings, candidate))
-                ).fits and len(candidate_ids) <= source_id_limit
-                if current and not candidate_fits:
-                    chunks.append(current)
-                    current = []
-                current.append(piece)
-                if not context_budget.report(
-                    context_budget.estimate_request(_digest_request(transport, settings, current))
-                ).fits:
-                    identifier = getattr(memory, "id", "digest")
-                    raise ValueError(
-                        f"single owner evidence segment exceeds context budget: {identifier}"
-                    )
-        if current:
-            chunks.append(current)
-        return chunks
-
-    async def digest_chunk(
-        chunk: list[MemoryView | OwnerEvidenceDigestView],
-    ) -> list[OwnerEvidenceDigestView]:
-        request = _digest_request(transport, settings, chunk)
-        context_budget.check(context_budget.estimate_request(request))
-        allowed = set().union(*(_evidence_source_ids(item) for item in chunk))
-        recursive = all(isinstance(item, OwnerEvidenceDigestView) for item in chunk)
-        policy = transport.retry_policy
-        semantic_attempt = 0
-        while True:
-            _, result = await structured(
-                transport, request.messages, ExtractedOwnerEvidenceDigest,
-                tier=current_call_tier(), label=current_call_label(),
-            )
-            if recursive and result.items:
-                # Reduce inputs already passed strict raw-ID validation.
-                # Ignore any model-copied IDs here and deterministically
-                # inherit the trusted server-side union.
-                return [OwnerEvidenceDigestView(
-                    summary="\n".join(item.summary for item in result.items),
-                    source_memory_ids=sorted(allowed),
-                    basis="compressed", uncertainty="", semantic_subject="",
-                )]
-            accepted = [
-                OwnerEvidenceDigestView.model_validate(item.model_dump(mode="json"))
-                for item in result.items
-                if item.source_memory_ids and set(item.source_memory_ids) <= allowed
-            ]
-            covered = set().union(*(set(item.source_memory_ids) for item in accepted), set())
-            if covered == allowed:
-                return accepted
-            if semantic_attempt >= policy.attempts:
-                raise LLMOutputError(
-                    "owner evidence digest omitted or invented source Memory IDs"
-                )
-            delay = policy.delay(semantic_attempt)
-            logger.warning(
-                "llm_output_retry_scheduled",
-                extra={
-                    "attempt": semantic_attempt + 1,
-                    "result_type": "ExtractedOwnerEvidenceDigest",
-                    "reason": "source_memory_ids_mismatch",
-                    "delay_seconds": round(delay, 3),
-                },
-            )
-            await asyncio.sleep(delay)
-            semantic_attempt += 1
-
-    async def reduce_round(
-        source: Sequence[MemoryView | OwnerEvidenceDigestView],
-    ) -> list[MemoryView | OwnerEvidenceDigestView]:
-        output: list[MemoryView | OwnerEvidenceDigestView] = []
-        for chunk in chunks_for(source):
-            output.extend(await digest_chunk(chunk))
-        if not output:
-            raise ValueError("owner evidence digest made no progress")
-        return output
-
-    def final_first_messages(
-        output: list[MemoryView | OwnerEvidenceDigestView]
-    ) -> list[ChatMessage]:
-        return _first_messages(
-            transport, settings, system_prompt, target, output, list(inferred_memories),
-            list(hypotheses), projection_type,
-        )
-
-    def target_fits(output: list[MemoryView | OwnerEvidenceDigestView]) -> bool:
-        return _stage2_fits(transport, settings, final_first_messages(output), actions_type)
-
-    def progress_size(output: list[MemoryView | OwnerEvidenceDigestView]) -> int:
-        return context_budget.estimate_text(
-            owner_reasoning_prefix(
-                target, output, list(inferred_memories), list(hypotheses),
-                prompts=settings.prompts, user_name=settings.user_name,
-            )
-        )
-
-    source: list[MemoryView | OwnerEvidenceDigestView] = list(memories)
-    reduced = await reduce_until_fits(
-        reduce_round, target_fits, progress_size, source,
-        max_rounds=3, no_progress_message="owner evidence digest reduction made no progress",
-    )
-    # Every round replaces its input with digests, so the survivors are digests.
-    return cast(list[OwnerEvidenceDigestView], reduced)
 
 
 __all__ = ["owner_reasoning"]

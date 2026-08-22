@@ -488,7 +488,13 @@ def test_user_model_reads_active_about_user_memories_and_uses_watermark(store):
     store.retract_memory("personal", about_id)
     after_retract = store.user_model_context("personal")
     assert after_retract is not None and after_retract[1] == []
-    assert after_retract[0].stale is False
+    # Retracting bumps `updated_at`, so the watermark moves even though the
+    # row leaves the active set: the card must go stale or the withdrawal
+    # would never reach it.
+    assert after_retract[0].stale is True
+    delta = store.user_model_context("personal", delta_only=True)
+    assert delta is not None
+    assert [memory.id for memory in delta[1]] == [about_id]
 
 
 def test_memory_fts_triggers_track_insert_update_and_delete(store):

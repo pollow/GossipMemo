@@ -19,7 +19,7 @@ TIER_FRESHNESS = 2  # extraction, continuity.
 TIER_BACKGROUND = 3  # person, relationship, user_model, coverage, learning_goals.
 
 # Set at each reasoner boundary via `llm_call_tier`; internal call sites
-# (~15 of them across owner-reasoning, chunking, and digesting) inherit the
+# (~15 of them across owner-reasoning, batching, and chunking) inherit the
 # active tier through the contextvar instead of threading a parameter.
 _call_tier: ContextVar[int] = ContextVar("gossipmemo_llm_call_tier", default=TIER_BACKGROUND)
 

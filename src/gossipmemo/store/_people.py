@@ -130,27 +130,52 @@ class _PeopleMixin(_ProjectionsMixin):
         return relationship_id
 
     def person_context(
-        self, space_id: str, person_id: str
+        self, space_id: str, person_id: str, *, delta_only: bool = False
     ) -> tuple[PersonView, list[MemoryView], str | None] | None:
+        """Read one Person with the memories a reader needs and its watermark.
+
+        `delta_only` switches from the dossier read (every active memory,
+        newest first) to the fold read: everything whose `updated_at` is past
+        the card's own `profile_source_updated_at`, oldest change first, with
+        retracted and superseded rows kept so the fold can be told what to
+        withdraw. A card with no watermark yet gets the whole history, which
+        is how a rebuild and a steady-state refresh stay one code path.
+        """
         with self._connect() as connection:
             person = connection.execute(
                 "SELECT * FROM people WHERE space_id = ? AND id = ?",
                 (space_id, person_id)).fetchone()
             if not person:
                 return None
-            rows = connection.execute(
-                """SELECT DISTINCT m.* FROM memories m
-                JOIN memory_people mp ON mp.memory_id = m.id
-                WHERE m.space_id = ? AND m.status = 'active'
-                  AND m.basis <> 'inferred' AND mp.person_id = ?
-                ORDER BY m.created_at DESC, m.id DESC""", (space_id, person_id)).fetchall()
+            if delta_only:
+                since = person["profile_source_updated_at"]
+                rows = connection.execute(
+                    """SELECT DISTINCT m.* FROM memories m
+                    JOIN memory_people mp ON mp.memory_id = m.id
+                    WHERE m.space_id = ? AND m.basis <> 'inferred' AND mp.person_id = ?
+                      AND (? IS NULL OR m.updated_at > ?)
+                    ORDER BY m.updated_at ASC, m.id ASC""",
+                    (space_id, person_id, since, since)).fetchall()
+            else:
+                rows = connection.execute(
+                    """SELECT DISTINCT m.* FROM memories m
+                    JOIN memory_people mp ON mp.memory_id = m.id
+                    WHERE m.space_id = ? AND m.status = 'active'
+                      AND m.basis <> 'inferred' AND mp.person_id = ?
+                    ORDER BY m.created_at DESC, m.id DESC""", (space_id, person_id)).fetchall()
             watermark = self._person_watermark(connection, space_id, person_id)
             view = self._person_view(connection, person)
             return view, [self._memory_view(connection, row, True) for row in rows], watermark
 
     def relationship_context(
-        self, space_id: str, relationship_id: str
+        self, space_id: str, relationship_id: str, *, delta_only: bool = False
     ) -> tuple[RelationshipView, list[MemoryView], str | None] | None:
+        """Read one Relationship, its memories and its watermark.
+
+        `delta_only` has the same meaning as in `person_context`: the fold
+        read, bounded below by the projection's own watermark and including
+        the rows that have since been retracted or superseded.
+        """
         with self._connect() as connection:
             relationship = connection.execute(
                 "SELECT * FROM relationships WHERE space_id = ? AND id = ?",
@@ -158,24 +183,48 @@ class _PeopleMixin(_ProjectionsMixin):
             ).fetchone()
             if not relationship:
                 return None
-            rows = connection.execute(
-                """
-                SELECT DISTINCT m.* FROM memories m
-                LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
-                LEFT JOIN memory_people a ON a.memory_id = m.id
-                LEFT JOIN memory_people b ON b.memory_id = m.id
-                WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND (
-                    mr.relationship_id = ? OR
-                    (a.person_id = ? AND b.person_id = ?)
-                ) ORDER BY m.created_at DESC, m.id DESC
-                """,
-                (
-                    space_id,
-                    relationship_id,
-                    relationship["person_a_id"],
-                    relationship["person_b_id"],
-                ),
-            ).fetchall()
+            if delta_only:
+                since = relationship["profile_source_updated_at"]
+                rows = connection.execute(
+                    """
+                    SELECT DISTINCT m.* FROM memories m
+                    LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
+                    LEFT JOIN memory_people a ON a.memory_id = m.id
+                    LEFT JOIN memory_people b ON b.memory_id = m.id
+                    WHERE m.space_id = ? AND m.basis <> 'inferred' AND (
+                        mr.relationship_id = ? OR
+                        (a.person_id = ? AND b.person_id = ?)
+                    ) AND (? IS NULL OR m.updated_at > ?)
+                    ORDER BY m.updated_at ASC, m.id ASC
+                    """,
+                    (
+                        space_id,
+                        relationship_id,
+                        relationship["person_a_id"],
+                        relationship["person_b_id"],
+                        since,
+                        since,
+                    ),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT DISTINCT m.* FROM memories m
+                    LEFT JOIN memory_relationships mr ON mr.memory_id = m.id
+                    LEFT JOIN memory_people a ON a.memory_id = m.id
+                    LEFT JOIN memory_people b ON b.memory_id = m.id
+                    WHERE m.space_id = ? AND m.status = 'active' AND m.basis <> 'inferred' AND (
+                        mr.relationship_id = ? OR
+                        (a.person_id = ? AND b.person_id = ?)
+                    ) ORDER BY m.created_at DESC, m.id DESC
+                    """,
+                    (
+                        space_id,
+                        relationship_id,
+                        relationship["person_a_id"],
+                        relationship["person_b_id"],
+                    ),
+                ).fetchall()
             return (
                 self._relationship_view(connection, relationship),
                 [self._memory_view(connection, row, True) for row in rows

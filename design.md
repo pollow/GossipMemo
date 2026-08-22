@@ -176,7 +176,7 @@ Query 默认不写入 Memory，也不修改 profile card。需要把 query 结�
 
 ```text
 extraction：Message → Memory
-owner reasoning call 1：active evidence Memories → current projection
+owner reasoning call 1：current card + 一批 delta Memories → new card（fold）
 owner reasoning call 2：same context + projection result → explicit epistemic actions
 coverage audit（每 root 一次）：该 root 的 active entries + 新增 evidence → entry add/modify
 goal planning（每 root 一次 + 一次 reconciliation）：该 root 的 entries → LearningGoals
@@ -198,25 +198,36 @@ Reasoning 不在每条 Message 写入时同步执行。应用每天在本地午�
 
 Reasoning 在调用模型前记录相关 Memories 的最新 `updated_at`，模型返回后用同一水位做 optimistic check。如果期间 Memory 已变化，旧结果不写入，直接读取新状态重算；整个 LLM 调用期间不持有数据库 transaction 或 lock。optimistic check 和成功写回共同构成 projection refresh。
 
+水位取相关 Memories 的 `MAX(updated_at)`，不按 status 过滤：retract 和 supersede 都会抬高被改行的 `updated_at`，即使它不是最新的一条，projection 也必须因此变 stale。水位同时是 fold 的下界，见 4.3。
+
 ### 4.3 Reasoning 做什么
+
+owner reasoning 的一步是一次 **fold**：`当前 card + 一批 Memories → 新 card`。稳态下这批
+Memories 是 delta——`updated_at` 晚于该 card 自身 `profile_source_updated_at` 的那些，包括
+status 已经不是 `active` 的行。card 从来不从全部 evidence 重算：那只是 fold 的边界情形。
 
 对受影响的 Person：
 
-1. 构建 evidence Memories、当前 card、active inferred Memories 和 open Hypotheses 的同一 context。
-2. call 1 仅重建 profile card。
+1. 构建当前 card、这一批 evidence Memories、被 retract/supersede 的 Memories、active inferred Memories 和 open Hypotheses 的同一 context。被 invalidate 的行单独成段，是一条 negative 指令，既不是 evidence 也不是 comparison。
+2. call 1 把这批 Memories fold 进当前 card，只输出 card。delta 里没出现的内容不构成删除理由。
 3. call 2 复用 call 1 的完整 transcript/prefix，显式 upsert/retract inferred Memory，或 upsert/transition Hypothesis。
 4. omission 是 no-op；只有 optimistic watermark 仍匹配时一起写回。
 
 对受影响的 Relationship：
 
-1. 使用相同的两阶段结构读取 relationship evidence、当前画像、inferred Memories 和 Hypotheses。
+1. 使用相同的两阶段 fold 结构读取当前画像、relationship delta、inferred Memories 和 Hypotheses。
 2. call 1 更新 facets、closeness、tone、status 和 summary。
 3. call 2 显式维护可独立引用的 inferred Memory 与 Hypothesis。
 4. 更新 Relationship 的 projection freshness 水位。
 
-UserModel 使用相同 cached-prefix 两阶段结构，但第二阶段只维护 Hypothesis。稳定的
-user information 继续由 active `about_user` Memories 支撑 UserModel；不为 user 复制一套
+UserModel 使用相同 cached-prefix 两阶段 fold，但第二阶段只维护 Hypothesis。稳定的
+user information 继续由 `about_user` Memories 支撑 UserModel；不为 user 复制一套
 inferred Memory。
+
+delta 装不进一次请求时（首次 fold 没有水位，delta 就是全部历史），按 context budget 切成
+连续几批，每批 fold 进上一批产出的 card，两阶段结构逐批照常执行，各批的 epistemic actions
+合并后一起写回。因此 owner 侧不需要把 evidence 有损压缩成摘要：批数增长换取的是每条
+Memory 都被原文读过一次。
 
 ### 4.4 什么应该成为 inferred Memory
 
@@ -416,7 +427,7 @@ POST /v1/spaces/{space_id}/reason
 }
 ```
 
-该 endpoint 用于人工刷新、模型升级后的重建和调试。首个可运行版本不暴露它：正常 ingest、manual memory、supersede 和 retract 都会使 projection 变 stale，由每日 induction 处理；进程启动也会扫描 stale projection。Person merge 同样留到有真实同名样例后实现，避免过早固定合并语义。
+该 endpoint 用于人工刷新、模型升级后的重建和调试；重建即清空 card 的水位，让下一次 fold 从空 card 起重读全部历史。首个可运行版本不暴露它：正常 ingest、manual memory、supersede 和 retract 都会使 projection 变 stale，由每日 induction 处理；进程启动也会扫描 stale projection。Person merge 同样留到有真实同名样例后实现，避免过早固定合并语义。
 
 ## 6. 第一版功能
 
