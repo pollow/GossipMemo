@@ -453,3 +453,51 @@ def test_sidecar_path_is_derived_from_main_db_path(store):
     sidecar = _sidecar_path(store.path)
     assert sidecar.name == store.path.stem + ".vec.db"
     assert sidecar.parent == store.path.parent
+
+
+def test_reembedding_an_existing_owner_updates_the_sidecar_in_place(store):
+    """A second upsert for the same owner must reach the sidecar.
+
+    `space_id` is the vec0 partition key, and sqlite-vec raises "UPDATE on
+    partition key columns are not supported yet" for any UPDATE that assigns
+    one -- including an assignment of the value the row already holds. That
+    made every re-embedding (a memory rewritten in place, a supersede) fail
+    with an OperationalError while first-time inserts kept working, so the
+    breakage only surfaced once real content changed under a built sidecar.
+    """
+
+    import sqlite_vec
+
+    from gossipmemo.store._vectors import _sidecar_path
+
+    _insert_memory(store, "memory_1", "Zhang Wei just switched jobs")
+    _upsert(store, "memory", "memory_1", "Zhang Wei just switched jobs")
+    _insert_memory(store, "memory_2", "the weather has been cold lately")
+    _upsert(store, "memory", "memory_2", "the weather has been cold lately")
+    # The sidecar sync in upsert_embeddings only runs against an already-built
+    # sidecar, so build it before re-embedding -- that is the UPDATE path.
+    store.ensure_vector_index(MODEL, DIM)
+
+    rewritten = "Zhang Wei just switched jobs, to a hardware startup"
+    with sqlite3.connect(store.path) as connection:
+        connection.execute(
+            "UPDATE memories SET content = ? WHERE id = 'memory_1'", (rewritten,))
+    new_vector = _upsert(store, "memory", "memory_1", rewritten)
+
+    hits = store.search_vectors("s1", "memory", new_vector, k=2)
+    assert hits and hits[0][0] == "memory_1"
+
+    connection = sqlite3.connect(store.path)
+    try:
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+        connection.enable_load_extension(False)
+        connection.execute("ATTACH DATABASE ? AS vec", (str(_sidecar_path(store.path)),))
+        rows = connection.execute(
+            "SELECT space_id, content_hash FROM vec.embeddings WHERE owner_id = 'memory_1'"
+        ).fetchall()
+    finally:
+        connection.close()
+    # Updated in place -- one row, still in its own partition, carrying the
+    # hash of the rewritten text rather than the original.
+    assert rows == [("s1", content_hash(rewritten))]

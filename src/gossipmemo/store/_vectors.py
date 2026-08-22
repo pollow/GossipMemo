@@ -320,10 +320,17 @@ class _VectorsMixin(_BaseStore):
             for item in items:
                 blob = pack_vector(item.vector)
                 h = content_hash(item.text)
+                # `space_id` is the vec0 partition key and stays out of the SET
+                # list: sqlite-vec rejects an UPDATE that assigns one at all
+                # ("UPDATE on partition key columns are not supported yet"),
+                # even when the value is unchanged. Nothing needs it there --
+                # `owner_id` is globally unique and no code path ever moves a
+                # row between spaces, so a row's partition is fixed the moment
+                # it is inserted below.
                 cursor = connection.execute(
-                    "UPDATE vec.embeddings SET embedding = ?, space_id = ?, "
+                    "UPDATE vec.embeddings SET embedding = ?, "
                     "owner_kind = ?, content_hash = ? WHERE owner_id = ?",
-                    (blob, space_id, item.owner_kind, h, item.owner_id),
+                    (blob, item.owner_kind, h, item.owner_id),
                 )
                 if cursor.rowcount == 0:
                     connection.execute(
