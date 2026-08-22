@@ -35,6 +35,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
                 [row.display_name, ", ".join(row.aliases) or "(none)", row.status]
                 for row in rows
             ],
+            column_classes=["nowrap", "wrap", "nowrap"],
             row_hrefs=[f"{base_path}/{row.id}" for row in rows],
             offset=offset,
             limit=limit,

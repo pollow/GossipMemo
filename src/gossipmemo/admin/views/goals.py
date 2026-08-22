@@ -47,6 +47,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
                 ]
                 for row in rows
             ],
+            column_classes=["wrap", "nowrap", "nowrap", "nowrap mono"],
             offset=offset,
             limit=limit,
             total=total,

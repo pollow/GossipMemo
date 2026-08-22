@@ -35,10 +35,11 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
                     row.person_a_name,
                     row.person_b_name,
                     row.status,
-                    (row.summary[:120] + "...") if len(row.summary) > 120 else row.summary,
+                    (row.summary[:300] + "...") if len(row.summary) > 300 else row.summary,
                 ]
                 for row in rows
             ],
+            column_classes=["nowrap", "nowrap", "nowrap", "wrap"],
             row_hrefs=[f"{base_path}/{row.id}" for row in rows],
             offset=offset,
             limit=limit,

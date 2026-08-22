@@ -154,9 +154,12 @@ def test_space_overview_shows_counts_user_model_and_continuity(tmp_path: Path):
     async def scenario(client, fixtures):
         response = await client.get("/admin/spaces/space1")
         assert response.status_code == 200
-        assert "Messages: 2" in response.text
-        assert "Memories: 3" in response.text
-        assert "People: 2" in response.text
+        # The counts render as stat tiles: a label span followed by its value.
+        for label, count in (("Messages", 2), ("Memories", 3), ("People", 2)):
+            assert (
+                f'<span class="stat-label">{label}</span>'
+                f'<span class="stat-value">{count}</span>' in response.text
+            )
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 

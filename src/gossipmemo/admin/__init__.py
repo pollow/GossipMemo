@@ -23,7 +23,7 @@ from .search import register as register_search_view
 from .views import register_admin_views
 
 _STATIC_DIR = Path(__file__).parent / "static"
-_CSS_PATH = _STATIC_DIR / "simple.css"
+_CSS_PATH = _STATIC_DIR / "admin.css"
 
 
 def create_admin_router(settings: Settings, world: SocialMemoryWorld) -> APIRouter | None:

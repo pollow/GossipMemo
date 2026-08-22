@@ -1,0 +1,338 @@
+/*
+ * Admin console stylesheet -- hand-written for this UI.
+ *
+ * Replaces the vendored simple.css, which is a blog-typography sheet: it
+ * caps the body at a 45rem reading column and never wraps `pre`, so wide
+ * tables were squeezed into a third of the screen and pretty-printed JSON
+ * scrolled sideways one line at a time. This one is built for the opposite
+ * job -- dense, full-width, tabular. Still no JavaScript and no external
+ * resources: `style-src 'self'` is the whole budget (ADR 0001).
+ */
+
+:root {
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans",
+    "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Consolas, Menlo, "Ubuntu Mono", monospace;
+
+  --bg: #f4f5f7;
+  --surface: #ffffff;
+  --bar: #263445;
+  --bar-text: #e7ecf3;
+  --bar-muted: #9fb0c4;
+  --text: #1f2733;
+  --muted: #66748a;
+  --border: #d3d8e0;
+  --border-strong: #b6bece;
+  --zebra: #f8f9fb;
+  --hover: #eef4fd;
+  --accent: #1d4ed8;
+  --radius: 4px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #14181e;
+    --surface: #1b2028;
+    --bar: #0f1319;
+    --bar-text: #dde3ec;
+    --bar-muted: #8b98a9;
+    --text: #dde3ec;
+    --muted: #93a0b2;
+    --border: #2d3542;
+    --border-strong: #3d4756;
+    --zebra: #1f242d;
+    --hover: #26303d;
+    --accent: #7aa2f7;
+  }
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { font-family: var(--sans); }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* ---------- Top bar ---------- */
+
+body > header {
+  background: var(--bar);
+  color: var(--bar-text);
+  padding: 0.6rem 1.25rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem 1.5rem;
+}
+
+body > header h1 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: 0.01em;
+}
+
+body > header nav { margin-inline-start: auto; }
+
+body > header nav a,
+body > header nav a:visited {
+  color: var(--bar-muted);
+  text-decoration: none;
+  font-size: 0.85rem;
+  margin-inline-start: 1rem;
+}
+
+body > header nav a:hover { color: #fff; }
+
+/* ---------- Page frame ---------- */
+
+main {
+  /* Full width by design: these pages are tables, not prose. */
+  padding: 0 1.25rem 3rem;
+}
+
+main > nav[aria-label="breadcrumb"] {
+  font-size: 0.82rem;
+  color: var(--muted);
+  padding: 0.6rem 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1rem;
+}
+
+main > nav[aria-label="breadcrumb"] a,
+main > nav[aria-label="breadcrumb"] a:visited {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+main > nav[aria-label="breadcrumb"] a:hover { color: var(--accent); }
+
+a, a:visited { color: var(--accent); }
+
+h2 {
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+
+h3 {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 1.25rem 0 0.5rem;
+}
+
+/* Panels. Views emit bare <section>s; each becomes a card. */
+section {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.15rem;
+  margin: 0 0 1rem;
+}
+
+section > *:first-child { margin-top: 0; }
+section > *:last-child { margin-bottom: 0; }
+
+p { margin: 0.6rem 0; }
+
+ul, ol { margin: 0.5rem 0; padding-inline-start: 1.3rem; }
+li { margin: 0.15rem 0; }
+
+/* ---------- Tables ---------- */
+
+.table-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  margin-bottom: 0.5rem;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 13px;
+}
+
+thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--surface);
+  border-bottom: 2px solid var(--border-strong);
+  text-align: start;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  white-space: nowrap;
+  padding: 0.55rem 0.75rem;
+}
+
+tbody td {
+  border-bottom: 1px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  vertical-align: top;
+  /* Long free-text cells wrap instead of stretching the table. */
+  overflow-wrap: anywhere;
+}
+
+tbody tr:nth-child(even) { background: var(--zebra); }
+tbody tr:hover { background: var(--hover); }
+tbody tr:last-child td { border-bottom: none; }
+
+/* A row link often wraps the whole free-text cell; tinting all of it
+   accent-blue makes the table unreadable. The row hover is what signals
+   clickability, so the link stays body-coloured until pointed at. */
+tbody td a, tbody td a:visited { color: inherit; text-decoration: none; }
+tbody td a:hover { color: var(--accent); text-decoration: underline; }
+
+/* Column hints emitted by `table_component`. */
+th.nowrap, td.nowrap { white-space: nowrap; }
+td.mono { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+th.num, td.num { text-align: end; font-variant-numeric: tabular-nums; }
+td.wrap { min-width: 22rem; }
+
+/* ---------- Stat tiles (space overview counts) ---------- */
+
+ul.stats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.6rem;
+}
+
+ul.stats li { margin: 0; }
+
+ul.stats a {
+  display: block;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  text-decoration: none;
+  color: inherit;
+}
+
+ul.stats a:hover { border-color: var(--accent); background: var(--hover); }
+
+ul.stats .stat-label {
+  display: block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+}
+
+ul.stats .stat-value {
+  display: block;
+  font-size: 1.5rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.25;
+}
+
+ul.stats .stat-value.unknown { color: var(--muted); font-size: 1.1rem; }
+
+p.pagination {
+  font-size: 0.8rem;
+  color: var(--muted);
+  margin: 0 0 1.5rem;
+}
+
+p.pagination span { color: var(--border-strong); }
+
+/* ---------- JSON / preformatted ---------- */
+
+pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 0.9rem;
+  margin: 0.5rem 0;
+  /* The reason this file exists, part two: wrap long values instead of
+     forcing a one-line horizontal scroll. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 32rem;
+  overflow-y: auto;
+}
+
+code, kbd, samp { font-family: var(--mono); font-size: 0.92em; }
+
+/* ---------- Forms (filters, search, login) ---------- */
+
+form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.4rem 0.9rem;
+  margin: 0 0 1rem;
+}
+
+form label {
+  display: block;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 0.2rem;
+}
+
+input, select, button {
+  font: inherit;
+  font-size: 13px;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+}
+
+input[type="text"], input[type="password"], input[type="search"] { min-width: 18rem; }
+
+button {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+  cursor: pointer;
+  padding-inline: 0.9rem;
+}
+
+button:hover { filter: brightness(1.1); }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* A filter bar sits in its own card so it reads as a toolbar. */
+main > form {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+}
+
+@media (max-width: 720px) {
+  main { padding-inline: 0.75rem; }
+  input[type="text"], input[type="password"], input[type="search"] {
+    min-width: 0;
+    width: 100%;
+  }
+}

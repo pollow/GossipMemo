@@ -64,19 +64,8 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
 </form>
 </section>
 <section>
-<h2>Counts</h2>
-<ul>
-<li>Messages: {esc(overview.message_count)}
-(<a href="/admin/spaces/{esc(space_id)}/messages">view</a>)</li>
-<li>Memories: {esc(overview.memory_count)}
-(<a href="/admin/spaces/{esc(space_id)}/memories">view</a>)</li>
-<li>People: {esc(overview.people_count)}
-(<a href="/admin/spaces/{esc(space_id)}/people">view</a>)</li>
-<li>Relationships: (<a href="/admin/spaces/{esc(space_id)}/relationships">view</a>)</li>
-<li>Learning goals: (<a href="/admin/spaces/{esc(space_id)}/goals">view</a>)</li>
-<li>Hypotheses: (<a href="/admin/spaces/{esc(space_id)}/hypotheses">view</a>)</li>
-<li>Coverage: (<a href="/admin/spaces/{esc(space_id)}/coverage">view</a>)</li>
-</ul>
+<h2>Contents</h2>
+{_render_stats(space_id, overview)}
 </section>
 <section>
 <h2>User model</h2>
@@ -116,6 +105,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
         body = table_component(
             headers=["Occurred at", "Author", "Content", "Extraction batch", "Extracted?"],
             rows=[_message_table_row(row) for row in rows],
+            column_classes=["nowrap mono", "nowrap", "wrap", "mono nowrap", "nowrap"],
             offset=offset,
             limit=limit,
             total=total,
@@ -161,7 +151,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
             headers=["Content", "Kind", "Status", "About user", "Created at"],
             rows=[
                 [
-                    (row.content[:120] + "...") if len(row.content) > 120 else row.content,
+                    (row.content[:300] + "...") if len(row.content) > 300 else row.content,
                     row.kind,
                     row.status,
                     "yes" if row.about_user else "no",
@@ -169,6 +159,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
                 ]
                 for row in rows
             ],
+            column_classes=["wrap", "nowrap", "nowrap", "nowrap", "nowrap mono"],
             row_hrefs=[f"{base_path}/{row.id}" for row in rows],
             offset=offset,
             limit=limit,
@@ -220,6 +211,7 @@ def _render_space_list(spaces) -> str:
     table_html = table_component(
         headers=["Name", "Messages", "Memories", "People"],
         rows=[[s.name, s.message_count, s.memory_count, s.people_count] for s in spaces],
+        column_classes=["", "num nowrap", "num nowrap", "num nowrap"],
         row_hrefs=[f"/admin/spaces/{s.id}" for s in spaces],
         offset=0,
         limit=max(len(spaces), 1),
@@ -232,6 +224,37 @@ def _render_space_list(spaces) -> str:
         breadcrumbs=[("Admin", "/admin")],
         body=table_html + tables_link,
     )
+
+
+def _render_stats(space_id: str, overview) -> str:
+    """The space's contents as a row of tiles, each linking into its list.
+
+    `admin_space_overview` only counts messages, memories, and people; the
+    other four sections are still worth a tile as a way in, so they show a
+    dash instead of a number rather than being demoted to a footnote.
+    """
+
+    tiles: list[tuple[str, object, str]] = [
+        ("Messages", overview.message_count, "messages"),
+        ("Memories", overview.memory_count, "memories"),
+        ("People", overview.people_count, "people"),
+        ("Relationships", None, "relationships"),
+        ("Learning goals", None, "goals"),
+        ("Hypotheses", None, "hypotheses"),
+        ("Coverage", None, "coverage"),
+    ]
+    items = "".join(
+        f'<li><a href="/admin/spaces/{esc(space_id)}/{esc(path)}">'
+        f'<span class="stat-label">{esc(label)}</span>'
+        + (
+            f'<span class="stat-value">{esc(count)}</span>'
+            if count is not None
+            else '<span class="stat-value unknown">view</span>'
+        )
+        + "</a></li>"
+        for label, count, path in tiles
+    )
+    return f'<ul class="stats">{items}</ul>'
 
 
 def _render_continuity_people(space_id: str, people) -> str:
@@ -258,7 +281,7 @@ def _message_table_row(row: MessageRow) -> list[object]:
     return [
         row.occurred_at,
         row.author,
-        (row.content[:160] + "...") if len(row.content) > 160 else row.content,
+        (row.content[:400] + "...") if len(row.content) > 400 else row.content,
         row.extraction_batch_id or "(none)",
         extracted,
     ]

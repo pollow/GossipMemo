@@ -88,6 +88,7 @@ def table_component(
     base_path: str,
     extra_params: dict[str, str] | None = None,
     row_hrefs: list[str | None] | None = None,
+    column_classes: list[str] | None = None,
 ) -> str:
     """Render a table plus an offset/limit prev/next pagination footer.
 
@@ -98,19 +99,38 @@ def table_component(
     row's first cell is wrapped in a link to it, so a list page can link
     each row into its detail page without any view writing raw HTML of its
     own. The href itself is escaped like any other interpolated value.
+
+    `column_classes`, when given, is one CSS class per column, stamped on
+    both the header and every body cell. It only ever names a class from
+    `admin.css` (`nowrap`, `mono`, `num`, `wrap`) -- it is a layout hint
+    from the view, which alone knows whether a column holds a timestamp,
+    a count, or a paragraph of free text. Views may pass a short list; the
+    remaining columns are unclassed.
     """
 
     extra_params = extra_params or {}
-    head_html = "".join(f"<th>{esc(header)}</th>" for header in headers)
+    column_classes = column_classes or []
+
+    def _class_attr(column: int) -> str:
+        name = column_classes[column] if column < len(column_classes) else ""
+        return f' class="{esc(name)}"' if name else ""
+
+    head_html = "".join(
+        f"<th{_class_attr(column)}>{esc(header)}</th>"
+        for column, header in enumerate(headers)
+    )
     body_rows: list[str] = []
     for index, row in enumerate(rows):
         href = row_hrefs[index] if row_hrefs else None
         cells_html: list[str] = []
         for column, cell in enumerate(row):
+            attr = _class_attr(column)
             if column == 0 and href is not None:
-                cells_html.append(f'<td><a href="{esc(href)}">{esc(cell)}</a></td>')
+                cells_html.append(
+                    f'<td{attr}><a href="{esc(href)}">{esc(cell)}</a></td>'
+                )
             else:
-                cells_html.append(f"<td>{esc(cell)}</td>")
+                cells_html.append(f"<td{attr}>{esc(cell)}</td>")
         body_rows.append("<tr>" + "".join(cells_html) + "</tr>")
     body_html = "".join(body_rows)
     if not rows:
@@ -137,17 +157,31 @@ def table_component(
     range_start = 0 if total == 0 else offset + 1
     range_end = min(offset + limit, total)
     return (
-        f"<table><thead><tr>{head_html}</tr></thead>"
-        f"<tbody>{body_html}</tbody></table>"
+        # The wrapper is what scrolls when a table is wider than the
+        # viewport, so the page body itself never scrolls sideways.
+        f'<div class="table-wrap"><table><thead><tr>{head_html}</tr></thead>'
+        f"<tbody>{body_html}</tbody></table></div>"
         f'<p class="pagination">{prev_html} | {next_html} '
         f"&mdash; {range_start}-{range_end} of {total}</p>"
     )
+
+
+#: Links present on every page. Breadcrumbs move within one space; this
+#: bar is the way back out of it. Logout is deliberately absent: it is a
+#: POST route, and it stays one.
+_TOP_NAV = (
+    ("Spaces", "/admin/spaces"),
+    ("Raw tables", "/admin/tables"),
+)
 
 
 def page(*, title: str, body: str, breadcrumbs: list[tuple[str, str]] | None = None) -> str:
     """Wrap `body` (already-rendered HTML) in the admin page skeleton."""
 
     crumbs_html = breadcrumbs_component(breadcrumbs or [])
+    nav_html = "".join(
+        f'<a href="{esc(href)}">{esc(label)}</a>' for label, href in _TOP_NAV
+    )
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -157,7 +191,7 @@ def page(*, title: str, body: str, breadcrumbs: list[tuple[str, str]] | None = N
 <link rel="stylesheet" href="/admin/static/admin.css">
 </head>
 <body>
-<header><h1>{esc(title)}</h1></header>
+<header><h1>{esc(title)}</h1><nav>{nav_html}</nav></header>
 <main>
 {crumbs_html}
 {body}

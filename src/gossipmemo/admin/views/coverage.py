@@ -33,6 +33,7 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
                 [row.root, row.entry_count, row.revision, row.source_watermark or "-"]
                 for row in rows
             ],
+            column_classes=["nowrap", "num nowrap", "num nowrap", "nowrap mono"],
             row_hrefs=[f"{base_path}/{row.root}" for row in rows],
             offset=0,
             limit=max(len(rows), 1),
@@ -74,11 +75,12 @@ def register(router: APIRouter, require_session, store: SqliteWorldStore) -> Non
             rows=[
                 [
                     row.path or "(root overview)",
-                    (row.content[:160] + "...") if len(row.content) > 160 else row.content,
+                    (row.content[:400] + "...") if len(row.content) > 400 else row.content,
                     row.updated_at,
                 ]
                 for row in rows
             ],
+            column_classes=["nowrap mono", "wrap", "nowrap mono"],
             offset=offset,
             limit=limit,
             total=total,
