@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 
 import httpx
 import pytest
@@ -322,6 +323,113 @@ def test_trace_path_pointing_at_a_regular_file_disables_tracing(tmp_path, caplog
     assert result == "ok"
     # The old file is left untouched -- no migration, no crash.
     assert trace_path.read_text() == '{"sequence": 1}\n'
+
+
+def test_complete_trace_false_skips_the_trace_write(tmp_path) -> None:
+    """The admin playground's opt-out: `complete(..., trace=False)` writes nothing."""
+
+    trace_path = tmp_path / "trace"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client, trace_path=trace_path)
+            request = ChatCompletionRequest(
+                model="m", messages=[ChatMessage(role="user", content="hi")])
+            return await adapter.complete(request, trace=False)
+
+    result = asyncio.run(run())
+    assert result == "ok"
+    assert _trace_files(trace_path) == []
+
+
+def test_complete_trace_false_also_skips_on_protocol_error(tmp_path) -> None:
+    """`trace=False` covers the invalid-response branch too, not just success."""
+
+    from gossipmemo.transport import LLMProtocolError
+
+    trace_path = tmp_path / "trace"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"not": "a completion"})
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client, trace_path=trace_path)
+            request = ChatCompletionRequest(
+                model="m", messages=[ChatMessage(role="user", content="hi")])
+            with pytest.raises(LLMProtocolError):
+                await adapter.complete(request, trace=False)
+
+    asyncio.run(run())
+    assert _trace_files(trace_path) == []
+
+
+def test_build_trace_record_matches_production_shape() -> None:
+    """`build_trace_record` (extracted for the admin playground) writes the
+    same fields `_trace` has always produced."""
+
+    from gossipmemo.llm import build_trace_record
+
+    request = ChatCompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")])
+    record = build_trace_record(
+        sequence=3, label="my-label", tier=2, model="m", status=200,
+        estimated_tokens=42, request=request, completion="done", error=None,
+    )
+    assert record["sequence"] == 3
+    assert record["label"] == "my-label"
+    assert record["tier"] == 2
+    assert record["model"] == "m"
+    assert record["status"] == 200
+    assert record["estimated_tokens"] == 42
+    assert record["completion"] == "done"
+    assert record["error"] is None
+    assert record["request"]["messages"] == [{"role": "user", "content": "hi"}]
+    assert "timestamp" in record
+
+
+def test_write_trace_file_writes_under_a_day_subdirectory_and_returns_the_path(tmp_path) -> None:
+    from gossipmemo.llm import build_trace_record, write_trace_file
+
+    directory = tmp_path / "playground"
+    request = ChatCompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")])
+    record = build_trace_record(
+        sequence=1, label="replay", tier=1, model="m", status=200,
+        estimated_tokens=10, request=request, completion="ok", error=None,
+    )
+    written = write_trace_file(directory, record, "replay", 1)
+    assert written is not None
+    assert written.exists()
+    assert written.parent.parent == directory
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", written.parent.name)
+    assert re.fullmatch(r"\d{9}-replay-0001\.json", written.name)
+    assert json.loads(written.read_text(encoding="utf-8"))["label"] == "replay"
+
+
+def test_write_trace_file_avoids_collision_within_the_same_millisecond(tmp_path) -> None:
+    from gossipmemo.llm import build_trace_record, write_trace_file
+
+    directory = tmp_path / "playground"
+    request = ChatCompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="hi")])
+
+    written_paths = []
+    for _ in range(3):
+        record = build_trace_record(
+            sequence=1, label="same-label", tier=1, model="m", status=200,
+            estimated_tokens=10, request=request, completion="ok", error=None,
+        )
+        written = write_trace_file(directory, record, "same-label", 1)
+        assert written is not None
+        written_paths.append(written)
+
+    assert len(set(written_paths)) == 3
 
 
 def test_trace_is_off_by_default() -> None:

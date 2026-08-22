@@ -120,6 +120,20 @@ recorded inside each file stays UTC). The trace holds full message bodies by
 design, so it is a local debugging tool rather than something to leave on: it is
 off unless the variable is set, and a write failure never interrupts reasoning.
 
+The admin UI's playground (`/admin/playground`) browses these trace files. Its
+detail page can also *replay* a historical call with edited messages/model/
+temperature/max_tokens/response_format against the configured LLM, gated
+separately by `GOSSIPMEMO_ADMIN_PLAYGROUND_ENABLED` (default off, any of
+`1`/`true`/`yes`/`on`). **Enabling it lets the admin UI spend real money on LLM
+calls** -- leave it off unless you are actively using the replay form. When
+off, the detail page still renders (browsing is never gated) but shows a
+one-line note instead of the form, and the replay `POST` route 404s. A replay
+writes its own trace file, in the same shape as a production one, under the
+reserved `<dir>/playground/<YYYY-MM-DD>/...` subdirectory -- never into the
+production day directories above -- and edits made in the form are wire-level
+only: to actually ship a tuned prompt, port it back into
+`prompts/defaults.py` or a `prompts.toml` override by hand.
+
 ### Embeddings (optional)
 
 GossipMemo can supplement its trigram FTS recall with semantic vector
@@ -549,12 +563,17 @@ registered, so `/admin` is a plain 404, not a login prompt. A non-empty value
 under 12 characters is a startup error rather than a weak password silently
 accepted.
 
-The admin UI is **read-only**: every route is a `GET`, there is no template
-engine and no JavaScript, and it cannot write, retract, or delete anything in
-the database. It exists to browse spaces, messages, memories, people,
-relationships, learning goals, hypotheses, coverage, continuity, and
+The admin UI is **read-only with one narrow exception**: every route besides
+login/logout and the playground replay form is a `GET`, there is no template
+engine and no JavaScript, and nothing here can write, retract, or delete
+anything in the database. It exists to browse spaces, messages, memories,
+people, relationships, learning goals, hypotheses, coverage, continuity, and
 a few whitelisted operational tables (`schema_migrations`,
-`extraction_batches`, `embeddings`) without a `sqlite3` shell.
+`extraction_batches`, `embeddings`) without a `sqlite3` shell. The one
+exception is the playground replay `POST`, gated off by default (see
+`GOSSIPMEMO_ADMIN_PLAYGROUND_ENABLED` above) and protected by a CSRF token
+derived from the same session secret as the login cookie -- it calls the
+configured LLM but still touches no database row.
 
 JSON columns (the user model and person profile cards) are stored compact but
 re-indented on the server before rendering, so they read as a formatted block

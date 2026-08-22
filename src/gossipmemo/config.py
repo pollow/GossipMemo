@@ -64,6 +64,7 @@ class Settings:
     embedding_query_timeout_seconds: float = 2.0
     extraction_clarification_probe: bool = False
     admin_password: str = ""
+    admin_playground_enabled: bool = False
 
     def __post_init__(self) -> None:
         missing = [
@@ -206,6 +207,7 @@ class Settings:
                 _env("GOSSIPMEMO_EMBEDDING_QUERY_TIMEOUT_SECONDS", "2")
             ),
             admin_password=_env("GOSSIPMEMO_ADMIN_PASSWORD"),
+            admin_playground_enabled=_flag_env("GOSSIPMEMO_ADMIN_PLAYGROUND_ENABLED"),
         )
 
 

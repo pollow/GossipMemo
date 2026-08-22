@@ -117,6 +117,7 @@ async def run_admin(
     admin_password: str = ADMIN_PASSWORD,
     authenticate: bool = True,
     settings_overrides: dict | None = None,
+    transport=None,
 ):
     """Build the app, seed, optionally log in, then hand `scenario` the client.
 
@@ -126,9 +127,12 @@ async def run_admin(
     `authenticate=False` is for the tests that check a route redirects to
     the login page. `settings_overrides` reaches `settings()` verbatim --
     e.g. `{"llm_trace_path": some_dir}` for the playground tests.
+    `transport` defaults to `NoopTransport()`; the playground replay tests
+    pass a double with a working `complete()` instead, since that route is
+    the one admin route that reaches the model.
     """
     store = SqliteWorldStore(tmp_path / "world.db")
-    world = SocialMemoryWorld(store, NoopTransport())
+    world = SocialMemoryWorld(store, transport if transport is not None else NoopTransport())
     app = create_app(
         settings(tmp_path, admin_password=admin_password, **(settings_overrides or {})), world
     )

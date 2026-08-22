@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 import pytest
-from harness import XSS, run_admin
+from harness import XSS, SilentTransport, run_admin
+
+from gossipmemo.transport import LLMRequestError
 
 
 def _write_trace(day_dir: Path, *, time_prefix: str, label: str, sequence: int,
@@ -36,14 +39,71 @@ def _write_trace(day_dir: Path, *, time_prefix: str, label: str, sequence: int,
     return path
 
 
-async def _run(tmp_path: Path, scenario, *, trace_dir: Path | None, authenticate: bool = True):
+async def _run(
+    tmp_path: Path,
+    scenario,
+    *,
+    trace_dir: Path | None,
+    authenticate: bool = True,
+    playground_enabled: bool = False,
+    transport=None,
+):
     await run_admin(
         tmp_path,
         scenario,
         seed_spaces=[],
-        settings_overrides={"llm_trace_path": trace_dir},
+        settings_overrides={
+            "llm_trace_path": trace_dir,
+            "admin_playground_enabled": playground_enabled,
+        },
         authenticate=authenticate,
+        transport=transport,
     )
+
+
+class FakePlaygroundTransport(SilentTransport):
+    """A transport double for playground replay tests: answers or raises on demand.
+
+    Subclasses `SilentTransport` for the protocol boilerplate (gate,
+    context_budget, retry_policy, prepare); only `complete` is
+    overridden, and it records every request it is asked to send so a
+    test can assert on the edited content that actually went out.
+    """
+
+    def __init__(self, *, reply: str = "replayed completion", raise_error: bool = False):
+        self.reply = reply
+        self.raise_error = raise_error
+        self.sent_requests: list = []
+
+    async def complete(self, request, *, trace: bool = True):
+        self.sent_requests.append(request)
+        if self.raise_error:
+            raise LLMRequestError("boom from provider")
+        return self.reply
+
+
+def _extract_csrf(text: str) -> str:
+    match = re.search(r'name="csrf_token" value="([^"]*)"', text)
+    assert match, "no csrf_token field found in rendered form"
+    return match.group(1)
+
+
+def _replay_form_fields(text: str, *, message_count: int) -> dict[str, str]:
+    """Build a POST body from a rendered detail page's own prefilled values,
+    used as the baseline that individual tests then edit."""
+
+    fields = {
+        "csrf_token": _extract_csrf(text),
+        "message_count": str(message_count),
+        "model": "test-model",
+        "temperature": "",
+        "max_tokens": "",
+        "response_format": "",
+    }
+    for index in range(message_count):
+        fields[f"message_{index}_role"] = "system" if index == 0 else "user"
+        fields[f"message_{index}_content"] = "unused-placeholder"
+    return fields
 
 
 def test_unset_trace_path_shows_friendly_message(tmp_path: Path):
@@ -251,3 +311,222 @@ def test_every_playground_view_requires_a_session(tmp_path: Path, path):
         assert response.headers["location"] == "/admin/login"
 
     asyncio.run(_run(tmp_path, scenario, trace_dir=trace_dir, authenticate=False))
+
+
+# --- Slice 3: the replay form, its gating, CSRF, and the compare view. ---
+
+
+def test_replay_form_hidden_when_playground_disabled(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+
+    async def scenario(client, fixtures):
+        response = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        assert response.status_code == 200
+        assert "GOSSIPMEMO_ADMIN_PLAYGROUND_ENABLED" in response.text
+        assert "<form" not in response.text
+
+    asyncio.run(_run(tmp_path, scenario, trace_dir=trace_dir, playground_enabled=False))
+
+
+def test_replay_form_shown_when_playground_enabled(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+
+    async def scenario(client, fixtures):
+        response = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        assert response.status_code == 200
+        assert f'action="/admin/playground/2026-08-21/{path.name}/run"' in response.text
+        assert 'name="csrf_token"' in response.text
+        # Prefilled from the historical record's messages.
+        assert "You are a system." in response.text
+        assert "hello" in response.text
+
+    asyncio.run(
+        _run(
+            tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True,
+            transport=FakePlaygroundTransport(),
+        )
+    )
+
+
+def test_post_run_404s_when_playground_disabled(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+
+    async def scenario(client, fixtures):
+        response = await client.post(
+            f"/admin/playground/2026-08-21/{path.name}/run",
+            data={"csrf_token": "anything"},
+        )
+        assert response.status_code == 404
+
+    asyncio.run(_run(tmp_path, scenario, trace_dir=trace_dir, playground_enabled=False))
+
+
+def test_post_run_rejected_without_valid_csrf(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+
+    async def scenario(client, fixtures):
+        detail = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        fields = _replay_form_fields(detail.text, message_count=2)
+        fields["csrf_token"] = "not-the-real-token"
+        response = await client.post(
+            f"/admin/playground/2026-08-21/{path.name}/run", data=fields, follow_redirects=False,
+        )
+        assert response.status_code == 403
+
+    asyncio.run(
+        _run(
+            tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True,
+            transport=FakePlaygroundTransport(),
+        )
+    )
+
+
+def test_successful_replay_writes_playground_trace_not_production(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+    transport = FakePlaygroundTransport(reply="replayed completion")
+
+    async def scenario(client, fixtures):
+        detail = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        fields = _replay_form_fields(detail.text, message_count=2)
+        fields["message_1_content"] = "an edited user prompt"
+
+        response = await client.post(
+            f"/admin/playground/2026-08-21/{path.name}/run", data=fields, follow_redirects=False,
+        )
+        assert response.status_code == 303
+        location = response.headers["location"]
+        assert location.startswith(f"/admin/playground/2026-08-21/{path.name}/compare/")
+
+        # The replay landed under the reserved playground/ subdirectory,
+        # never a production day directory.
+        playground_files = list((trace_dir / "playground").glob("*/*.json"))
+        assert len(playground_files) == 1
+        # `trace_dir.glob("*/*.json")` is exactly two segments deep, so it
+        # only ever matches production day directories -- the reserved
+        # `playground/<day>/<name>.json` tree is three segments deep and
+        # never shows up here even without an explicit exclusion.
+        production_files = list(trace_dir.glob("*/*.json"))
+        assert len(production_files) == 1  # only the original seed trace
+
+        record = json.loads(playground_files[0].read_text(encoding="utf-8"))
+        assert record["completion"] == "replayed completion"
+        assert record["request"]["messages"][1]["content"] == "an edited user prompt"
+        assert record["error"] is None
+
+        assert len(transport.sent_requests) == 1
+        assert transport.sent_requests[0].messages[1].content == "an edited user prompt"
+
+        compare = await client.get(location)
+        assert compare.status_code == 200
+        assert "hello" in compare.text  # original's message content
+        assert "an edited user prompt" in compare.text  # replay's edited content
+        assert "replayed completion" in compare.text  # replay's completion
+        assert "<pre>ok</pre>" in compare.text  # original's completion, from the seed fixture
+
+    asyncio.run(
+        _run(tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True, transport=transport)
+    )
+
+
+def test_llm_failure_renders_error_not_500(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+    transport = FakePlaygroundTransport(raise_error=True)
+
+    async def scenario(client, fixtures):
+        detail = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        fields = _replay_form_fields(detail.text, message_count=2)
+
+        response = await client.post(
+            f"/admin/playground/2026-08-21/{path.name}/run", data=fields, follow_redirects=False,
+        )
+        assert response.status_code == 303
+        compare = await client.get(response.headers["location"])
+        assert compare.status_code == 200
+        assert "boom from provider" in compare.text
+
+    asyncio.run(
+        _run(tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True, transport=transport)
+    )
+
+
+@pytest.mark.parametrize(
+    "day",
+    ["..%2f..", "2026-08-21%2f..", "not-a-day"],
+)
+def test_path_traversal_in_day_is_rejected_on_run_route(tmp_path: Path, day):
+    trace_dir = tmp_path / "traces"
+    _write_trace(trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1)
+    secret = tmp_path / "secret.txt"
+    secret.write_text("do not serve this", encoding="utf-8")
+
+    async def scenario(client, fixtures):
+        response = await client.post(
+            f"/admin/playground/{day}/name/run", data={"csrf_token": "x"},
+        )
+        assert response.status_code == 404
+        assert "do not serve this" not in response.text
+
+    asyncio.run(
+        _run(
+            tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True,
+            transport=FakePlaygroundTransport(),
+        )
+    )
+
+
+def test_replay_history_browsing_works(tmp_path: Path):
+    trace_dir = tmp_path / "traces"
+    path = _write_trace(
+        trace_dir / "2026-08-21", time_prefix="090000000", label="extract", sequence=1,
+    )
+    transport = FakePlaygroundTransport(reply="a replay completion")
+
+    async def scenario(client, fixtures):
+        # No replays yet: the replay day list shows the friendly empty state,
+        # not a 500.
+        empty = await client.get("/admin/playground/replays")
+        assert empty.status_code == 200
+
+        detail = await client.get(f"/admin/playground/2026-08-21/{path.name}")
+        fields = _replay_form_fields(detail.text, message_count=2)
+        run_response = await client.post(
+            f"/admin/playground/2026-08-21/{path.name}/run", data=fields, follow_redirects=False,
+        )
+        assert run_response.status_code == 303
+
+        days_response = await client.get("/admin/playground/replays")
+        assert days_response.status_code == 200
+        match = re.search(r'href="(/admin/playground/replays/[\d-]+)"', days_response.text)
+        assert match, days_response.text
+        day_url = match.group(1)
+
+        day_response = await client.get(day_url)
+        assert day_response.status_code == 200
+        call_match = re.search(r'href="(' + re.escape(day_url) + r'/[^"]+)"', day_response.text)
+        assert call_match, day_response.text
+
+        call_response = await client.get(call_match.group(1))
+        assert call_response.status_code == 200
+        assert "a replay completion" in call_response.text
+
+    asyncio.run(
+        _run(tmp_path, scenario, trace_dir=trace_dir, playground_enabled=True, transport=transport)
+    )

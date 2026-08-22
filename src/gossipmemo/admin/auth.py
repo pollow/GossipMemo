@@ -47,6 +47,25 @@ class AdminAuth:
         payload = str(expiry)
         return f"{payload}.{self._sign(payload)}"
 
+    def csrf_token(self) -> str:
+        """A process-lifetime CSRF token for the admin UI's one state-changing form.
+
+        Derived from the same session secret and `hmac` construction as
+        `_sign`, over a fixed label rather than a per-request nonce -- there
+        is exactly one form (the playground replay) and no session-scoped
+        state to bind it to beyond the secret itself, which already rotates
+        on every process restart.
+        """
+
+        return self._sign("csrf")
+
+    def verify_csrf(self, token: str | None) -> bool:
+        """True iff `token` matches the current CSRF token, constant-time."""
+
+        if not token:
+            return False
+        return hmac.compare_digest(token, self.csrf_token())
+
     def verify(self, cookie_value: str | None) -> bool:
         """True iff `cookie_value` carries a validly-signed, unexpired session.
 

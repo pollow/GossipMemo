@@ -169,7 +169,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             max_seconds=self.retry_max_seconds,
         )
 
-    async def complete(self, request: ChatCompletionRequest) -> str:
+    async def complete(self, request: ChatCompletionRequest, *, trace: bool = True) -> str:
         """Send a prebuilt chat-completions request over HTTP.
 
         Acquires :attr:`gate`, runs the context-budget hard check, POSTs,
@@ -177,6 +177,13 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         `mark_unavailable_until` on 429/5xx). Returns the raw assistant
         message content. `response_format` is decided by the caller when
         it builds `request`, not here.
+
+        `trace=False` skips this call's `_trace` write entirely. The admin
+        playground is the one caller that passes it: it replays a call
+        through this same adapter (so it still serializes behind `gate`)
+        but writes its own trace record into a reserved sibling directory,
+        since it knows the exact path it wrote and redirects straight to
+        it. Every other caller leaves this at the default.
         """
         structured = request.response_format is not None
         # Check the exact serialized request before acquiring/sending HTTP.
@@ -281,12 +288,14 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             payload = response.json()
             completion = ChatCompletionResponse.model_validate(payload)
         except (ValueError, ValidationError) as error:
-            self._trace(request, label, tier, response.status_code,
-                        error="invalid chat-completion response")
+            if trace:
+                self._trace(request, label, tier, response.status_code,
+                            error="invalid chat-completion response")
             raise LLMProtocolError("LLM returned an invalid chat-completion response") from error
         message = completion.choices[0].message
         content = _message_content(message.content)
-        self._trace(request, label, tier, response.status_code, completion=content)
+        if trace:
+            self._trace(request, label, tier, response.status_code, completion=content)
         return content
 
     def _trace(
@@ -326,47 +335,18 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             self._trace_disabled = True
             return
         sequence = next(self._trace_sequence)
-        record = {
-            "sequence": sequence,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "label": label,
-            "tier": tier,
-            "model": self.model,
-            "status": status,
-            "estimated_tokens": self.context_budget.estimate_request(request),
-            "request": request.model_dump(exclude_none=True),
-            "completion": completion,
-            "error": error,
-        }
-        now_local = datetime.now().astimezone()
-        day_dir = self.trace_path / now_local.strftime("%Y-%m-%d")
-        time_prefix = now_local.strftime("%H%M%S") + f"{now_local.microsecond // 1000:03d}"
-        safe_label = re.sub(r"[^a-z0-9-]", "-", label.lower())
-        payload = json.dumps(record, indent=2, ensure_ascii=False, default=str)
-        try:
-            day_dir.mkdir(parents=True, exist_ok=True)
-            base_name = f"{time_prefix}-{safe_label}-{sequence:04d}"
-            max_attempts = 10
-            for attempt in range(max_attempts):
-                name = base_name if attempt == 0 else f"{base_name}-{attempt}"
-                target = day_dir / f"{name}.json"
-                try:
-                    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                except FileExistsError:
-                    continue
-                try:
-                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                        handle.write(payload)
-                finally:
-                    pass
-                break
-            else:
-                logger.warning(
-                    "llm_trace_write_failed",
-                    extra={"path": str(day_dir), "reason": "exhausted unique name attempts"},
-                )
-        except OSError:
-            logger.warning("llm_trace_write_failed", extra={"path": str(self.trace_path)})
+        record = build_trace_record(
+            sequence=sequence,
+            label=label,
+            tier=tier,
+            model=self.model,
+            status=status,
+            estimated_tokens=self.context_budget.estimate_request(request),
+            request=request,
+            completion=completion,
+            error=error,
+        )
+        write_trace_file(self.trace_path, record, label, sequence)
 
     def _retry_delay(self, attempt: int, retry_after: float | None = None) -> float:
         return self.retry_policy.delay(attempt, retry_after)
@@ -397,6 +377,86 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         traceback: TracebackType | None,
     ) -> None:
         await self.aclose()
+
+
+def build_trace_record(
+    *,
+    sequence: int,
+    label: str,
+    tier: int,
+    model: str,
+    status: int,
+    estimated_tokens: int,
+    request: ChatCompletionRequest,
+    completion: str | None = None,
+    error: str | None = None,
+) -> dict:
+    """Build one trace record, in the exact shape `_trace` has always written.
+
+    Pulled out of `_trace` so the admin playground (`admin/views/playground.py`)
+    can build a replay record with the same shape without constructing a
+    second `OpenAICompatibleAdapter` -- it calls the shared adapter with
+    `complete(..., trace=False)` and writes its own record via this and
+    `write_trace_file` instead, so it knows the exact path it wrote.
+    """
+
+    return {
+        "sequence": sequence,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "label": label,
+        "tier": tier,
+        "model": model,
+        "status": status,
+        "estimated_tokens": estimated_tokens,
+        "request": request.model_dump(exclude_none=True),
+        "completion": completion,
+        "error": error,
+    }
+
+
+def write_trace_file(directory: Path, record: dict, label: str, sequence: int) -> Path | None:
+    """Write `record` as one JSON file under a per-day subdirectory of `directory`.
+
+    Same layout and collision handling `_trace` has always used:
+
+        <directory>/<YYYY-MM-DD>/<HHMMSSmmm>-<label>-<sequence>.json
+
+    (local time for the directory and filename; `record["timestamp"]` is
+    whatever the caller put there, normally UTC). Returns the path written,
+    or `None` on any failure -- callers must not let a trace-write failure
+    take anything else down with it.
+    """
+
+    now_local = datetime.now().astimezone()
+    day_dir = directory / now_local.strftime("%Y-%m-%d")
+    time_prefix = now_local.strftime("%H%M%S") + f"{now_local.microsecond // 1000:03d}"
+    safe_label = re.sub(r"[^a-z0-9-]", "-", label.lower())
+    payload = json.dumps(record, indent=2, ensure_ascii=False, default=str)
+    try:
+        day_dir.mkdir(parents=True, exist_ok=True)
+        base_name = f"{time_prefix}-{safe_label}-{sequence:04d}"
+        max_attempts = 10
+        for attempt in range(max_attempts):
+            name = base_name if attempt == 0 else f"{base_name}-{attempt}"
+            target = day_dir / f"{name}.json"
+            try:
+                fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                continue
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(payload)
+            finally:
+                pass
+            return target
+        logger.warning(
+            "llm_trace_write_failed",
+            extra={"path": str(day_dir), "reason": "exhausted unique name attempts"},
+        )
+        return None
+    except OSError:
+        logger.warning("llm_trace_write_failed", extra={"path": str(directory)})
+        return None
 
 
 def _response_detail(response: httpx.Response) -> str:
@@ -438,5 +498,7 @@ def create_llm(settings: Settings) -> LlmTransport:
 
 __all__ = [
     "OpenAICompatibleAdapter",
+    "build_trace_record",
     "create_llm",
+    "write_trace_file",
 ]
