@@ -4,62 +4,36 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
 import pytest
+from harness import ADMIN_PASSWORD, NoopTransport, asgi_client, run_admin, settings
 
 from gossipmemo.admin.auth import COOKIE_NAME, AdminAuth
 from gossipmemo.app import create_app
-from gossipmemo.config import ConfigurationError, Settings
+from gossipmemo.config import ConfigurationError
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.world import SocialMemoryWorld
 
 
-class _NoopModel:
-    """Minimal `LlmTransport` double -- the admin routes never call the
-    model, but `SocialMemoryWorld` needs one to construct."""
-
-    configured = False
-
-    async def aclose(self):
-        return None
-
-
-def _settings(tmp_path: Path, *, admin_password: str = "") -> Settings:
-    return Settings(
-        database_path=tmp_path / "world.db",
-        llm_base_url="http://llm.test/v1",
-        llm_api_key="key",
-        llm_model="model",
-        admin_password=admin_password,
-    )
-
-
-def _client(app):
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
-
-
 async def _run(tmp_path: Path, admin_password: str, scenario):
-    store = SqliteWorldStore(tmp_path / "world.db")
-    world = SocialMemoryWorld(store, _NoopModel())
-    app = create_app(_settings(tmp_path, admin_password=admin_password), world)
-    async with app.router.lifespan_context(app):
-        async with _client(app) as client:
-            await scenario(client)
+    """These tests drive login itself, so the shared runner must not log in."""
+    await run_admin(
+        tmp_path, lambda client, _fixtures: scenario(client),
+        admin_password=admin_password, authenticate=False,
+    )
 
 
 def test_admin_password_shorter_than_12_chars_raises(tmp_path: Path):
     with pytest.raises(ConfigurationError):
-        _settings(tmp_path, admin_password="short")
+        settings(tmp_path, admin_password="short")
 
 
 def test_admin_disabled_returns_404_and_registers_no_routes(tmp_path: Path):
     async def scenario():
         store = SqliteWorldStore(tmp_path / "world.db")
-        world = SocialMemoryWorld(store, _NoopModel())
-        app = create_app(_settings(tmp_path, admin_password=""), world)
+        world = SocialMemoryWorld(store, NoopTransport())
+        app = create_app(settings(tmp_path, admin_password=""), world)
         async with app.router.lifespan_context(app):
-            async with _client(app) as client:
+            async with asgi_client(app) as client:
                 response = await client.get("/admin")
                 assert response.status_code == 404
 
@@ -78,7 +52,7 @@ def test_wrong_password_rerenders_form_without_cookie(tmp_path: Path):
         assert "Incorrect password" in response.text
         assert COOKIE_NAME not in response.cookies
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 def test_correct_password_sets_httponly_samesite_strict_cookie_without_secure_over_http(
@@ -87,7 +61,7 @@ def test_correct_password_sets_httponly_samesite_strict_cookie_without_secure_ov
     async def scenario(client):
         response = await client.post(
             "/admin/login",
-            data={"password": "correct-horse-battery-staple"},
+            data={"password": ADMIN_PASSWORD},
             follow_redirects=False,
         )
         assert response.status_code == 303
@@ -99,14 +73,14 @@ def test_correct_password_sets_httponly_samesite_strict_cookie_without_secure_ov
         )
         assert "secure" not in set_cookie.lower()
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 def test_landing_page_reachable_after_login(tmp_path: Path):
     async def scenario(client):
         login = await client.post(
             "/admin/login",
-            data={"password": "correct-horse-battery-staple"},
+            data={"password": ADMIN_PASSWORD},
             follow_redirects=False,
         )
         assert login.status_code == 303
@@ -118,7 +92,7 @@ def test_landing_page_reachable_after_login(tmp_path: Path):
         assert "Content-Security-Policy" in landing.headers
         assert landing.headers["X-Frame-Options"] == "DENY"
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 def test_missing_session_redirects_to_login(tmp_path: Path):
@@ -127,7 +101,7 @@ def test_missing_session_redirects_to_login(tmp_path: Path):
         assert response.status_code == 303
         assert response.headers["location"] == "/admin/login"
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 def test_tampered_cookie_signature_is_rejected():
@@ -149,7 +123,7 @@ def test_logout_clears_cookie(tmp_path: Path):
     async def scenario(client):
         await client.post(
             "/admin/login",
-            data={"password": "correct-horse-battery-staple"},
+            data={"password": ADMIN_PASSWORD},
             follow_redirects=False,
         )
         assert client.cookies.get(COOKIE_NAME)
@@ -159,7 +133,7 @@ def test_logout_clears_cookie(tmp_path: Path):
         set_cookie = logout.headers.get("set-cookie", "")
         assert COOKIE_NAME in set_cookie
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 def test_static_css_served_without_session_as_text_css(tmp_path: Path):
@@ -168,7 +142,7 @@ def test_static_css_served_without_session_as_text_css(tmp_path: Path):
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/css")
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 
 
 @pytest.mark.parametrize(
@@ -184,4 +158,4 @@ def test_admin_responses_carry_csp_header(tmp_path: Path, make_request):
         assert "Content-Security-Policy" in response.headers
         assert response.headers["X-Frame-Options"] == "DENY"
 
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))

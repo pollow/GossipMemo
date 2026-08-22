@@ -4,42 +4,16 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-import httpx
 import pytest
+from harness import XSS, run_admin
 
-from gossipmemo.app import create_app
-from gossipmemo.config import Settings
 from gossipmemo.models import ManualMemoryRequest, MessageInput, SourceRef
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.store.policy import new_id, now_iso
-from gossipmemo.world import SocialMemoryWorld
-
-ADMIN_PASSWORD = "correct-horse-battery-staple"
-XSS = "<script>alert(1)</script>"
 
 
-class _NoopModel:
-    """Minimal `LlmTransport` double -- admin routes never call the model."""
-
-    configured = False
-
-    async def aclose(self):
-        return None
-
-
-def _settings(tmp_path: Path, *, admin_password: str = ADMIN_PASSWORD) -> Settings:
-    return Settings(
-        database_path=tmp_path / "world.db",
-        llm_base_url="http://llm.test/v1",
-        llm_api_key="key",
-        llm_model="model",
-        admin_password=admin_password,
-    )
-
-
-def _client(app):
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None):
+    await run_admin(tmp_path, scenario, seeder=_seed_space, seed_spaces=seed_spaces or [])
 
 
 def _seed_space(store: SqliteWorldStore, space_id: str, name: str) -> dict:
@@ -155,26 +129,6 @@ def _seed_space(store: SqliteWorldStore, space_id: str, name: str) -> dict:
         "alice_id": alice_id,
         "bob_id": bob_id,
     }
-
-
-async def _login(client: httpx.AsyncClient, password: str = ADMIN_PASSWORD) -> None:
-    response = await client.post(
-        "/admin/login", data={"password": password}, follow_redirects=False
-    )
-    assert response.status_code == 303
-
-
-async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None):
-    store = SqliteWorldStore(tmp_path / "world.db")
-    world = SocialMemoryWorld(store, _NoopModel())
-    app = create_app(_settings(tmp_path), world)
-    fixtures: dict[str, dict] = {}
-    async with app.router.lifespan_context(app):
-        async with _client(app) as client:
-            for space_id in seed_spaces or []:
-                fixtures[space_id] = _seed_space(store, space_id, f"Space {space_id}")
-            await _login(client)
-            await scenario(client, fixtures)
 
 
 def test_single_space_redirects_from_admin_root(tmp_path: Path):
@@ -352,24 +306,19 @@ def test_person_name_and_memory_content_are_escaped_everywhere(tmp_path: Path):
     ],
 )
 def test_every_view_requires_a_session(tmp_path: Path, path):
-    async def scenario():
-        store = SqliteWorldStore(tmp_path / "world.db")
-        world = SocialMemoryWorld(store, _NoopModel())
-        app = create_app(_settings(tmp_path), world)
-        async with app.router.lifespan_context(app):
-            _seed_space(store, "space1", "Space space1")
-            async with _client(app) as client:
-                response = await client.get(path, follow_redirects=False)
-                assert response.status_code == 303
-                assert response.headers["location"] == "/admin/login"
+    async def scenario(client, fixtures):
+        response = await client.get(path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/admin/login"
 
-    asyncio.run(scenario())
+    asyncio.run(run_admin(tmp_path, scenario, seeder=_seed_space,
+                          seed_spaces=["space1"], authenticate=False))
 
 
 def test_user_model_card_is_pretty_printed(tmp_path: Path):
     """The stored card is compact JSON; the overview must indent it."""
 
-    async def scenario(store, client):
+    async def scenario(client, fixtures):
         response = await client.get("/admin/spaces/space1")
         assert response.status_code == 200
         # `esc()` turns the JSON quotes into entities; the browser renders
@@ -379,20 +328,11 @@ def test_user_model_card_is_pretty_printed(tmp_path: Path):
         # The compact one-line form must be gone.
         assert "{&quot;summary&quot;" not in response.text
 
-    async def run():
-        store = SqliteWorldStore(tmp_path / "world.db")
-        world = SocialMemoryWorld(store, _NoopModel())
-        app = create_app(_settings(tmp_path), world)
-        async with app.router.lifespan_context(app):
-            async with _client(app) as client:
-                _seed_space(store, "space1", "Space space1")
-                store.overwrite_user_model(
-                    "space1", {"summary": "loves coffee", "likes": ["espresso"]}
-                )
-                await _login(client)
-                await scenario(store, client)
+    def seed_card(store):
+        store.overwrite_user_model("space1", {"summary": "loves coffee", "likes": ["espresso"]})
 
-    asyncio.run(run())
+    asyncio.run(run_admin(tmp_path, scenario, seeder=_seed_space,
+                          seed_spaces=["space1"], also_seed=seed_card))
 
 
 def test_json_block_indents_escapes_and_passes_through_non_json():

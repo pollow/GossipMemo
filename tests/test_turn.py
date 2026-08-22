@@ -6,41 +6,26 @@ from pathlib import Path
 
 import httpx
 import pytest
+from harness import SilentTransport
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
-from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import (
     ManualMemoryRequest,
     MessageInput,
     TurnRequest,
 )
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
+from gossipmemo.transport import ChatCompletionRequest
 from gossipmemo.world import SocialMemoryWorld
 
 
-class _NoopModel:
-    """A minimal `LlmTransport` double: extraction/continuity/coverage/goal
-    stages are all told apart by prompt marker in `complete`, matching the
-    pattern in `reasoners/owner.py` and friends -- see `tests/test_features.py`'s
-    `FakeModel` for the fuller version of this same shape.
+class _NoopModel(SilentTransport):
+    """`SilentTransport` plus the one stage these tests need a real answer
+    from: continuity, told apart by prompt marker the way `reasoners/`
+    does. `tests/test_features.py`'s `FakeModel` is the fuller version of
+    this same shape.
     """
-
-    configured = False
-    gate = ProviderGate()
-    context_budget = ContextBudget()
-    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-
-    async def aclose(self):
-        return None
-
-    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
-        return ChatCompletionRequest(
-            model="fake",
-            messages=list(messages),
-            response_format={"type": "json_object"} if structured else None,
-        )
 
     async def complete(self, request: ChatCompletionRequest) -> str:
         combined = " ".join(str(message.content) for message in request.messages)

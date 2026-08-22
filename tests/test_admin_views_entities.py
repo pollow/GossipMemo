@@ -4,40 +4,16 @@ import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 
-import httpx
 import pytest
+from harness import XSS, run_admin
 
-from gossipmemo.app import create_app
-from gossipmemo.config import Settings
 from gossipmemo.models import ManualMemoryRequest, MessageInput, SourceRef
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.store.policy import new_id, now_iso
-from gossipmemo.world import SocialMemoryWorld
-
-ADMIN_PASSWORD = "correct-horse-battery-staple"
-XSS = "<script>alert(1)</script>"
 
 
-class _NoopModel:
-    configured = False
-
-    async def aclose(self):
-        return None
-
-
-def _settings(tmp_path: Path) -> Settings:
-    return Settings(
-        database_path=tmp_path / "world.db",
-        llm_base_url="http://llm.test/v1",
-        llm_api_key="key",
-        llm_model="model",
-        admin_password=ADMIN_PASSWORD,
-    )
-
-
-def _client(app):
-    transport = httpx.ASGITransport(app=app)
-    return httpx.AsyncClient(transport=transport, base_url="http://test")
+async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None):
+    await run_admin(tmp_path, scenario, seeder=_seed_space, seed_spaces=seed_spaces or [])
 
 
 def _seed_space(store: SqliteWorldStore, space_id: str, name: str) -> dict:
@@ -190,26 +166,6 @@ def _seed_space(store: SqliteWorldStore, space_id: str, name: str) -> dict:
         "root_entry_id": root_entry_id,
         "sub_entry_id": sub_entry_id,
     }
-
-
-async def _login(client: httpx.AsyncClient) -> None:
-    response = await client.post(
-        "/admin/login", data={"password": ADMIN_PASSWORD}, follow_redirects=False
-    )
-    assert response.status_code == 303
-
-
-async def _run(tmp_path: Path, scenario, *, seed_spaces: list[str] | None = None):
-    store = SqliteWorldStore(tmp_path / "world.db")
-    world = SocialMemoryWorld(store, _NoopModel())
-    app = create_app(_settings(tmp_path), world)
-    fixtures: dict[str, dict] = {}
-    async with app.router.lifespan_context(app):
-        async with _client(app) as client:
-            for space_id in seed_spaces or []:
-                fixtures[space_id] = _seed_space(store, space_id, f"Space {space_id}")
-            await _login(client)
-            await scenario(client, fixtures)
 
 
 # --- people ---------------------------------------------------------------
@@ -413,16 +369,11 @@ def test_unknown_id_returns_404(tmp_path: Path, path):
     ],
 )
 def test_every_new_view_requires_a_session(tmp_path: Path, path_template):
-    async def scenario():
-        store = SqliteWorldStore(tmp_path / "world.db")
-        world = SocialMemoryWorld(store, _NoopModel())
-        app = create_app(_settings(tmp_path), world)
-        async with app.router.lifespan_context(app):
-            fixture = _seed_space(store, "space1", "Space space1")
-            path = path_template.format(**fixture)
-            async with _client(app) as client:
-                response = await client.get(path, follow_redirects=False)
-                assert response.status_code == 303
-                assert response.headers["location"] == "/admin/login"
+    async def scenario(client, fixtures):
+        path = path_template.format(**fixtures["space1"])
+        response = await client.get(path, follow_redirects=False)
+        assert response.status_code == 303
+        assert response.headers["location"] == "/admin/login"
 
-    asyncio.run(scenario())
+    asyncio.run(run_admin(tmp_path, scenario, seeder=_seed_space,
+                          seed_spaces=["space1"], authenticate=False))

@@ -6,12 +6,12 @@ from pathlib import Path
 
 import httpx
 import pytest
+from harness import SilentTransport
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
 from gossipmemo.models import ManualMemoryRequest
 from gossipmemo.store import PersonMergeError, SqliteWorldStore
-from gossipmemo.transport import ProviderGate
 from gossipmemo.world import SocialMemoryWorld
 from gossipmemo_client import AsyncGossipMemo, GossipMemo
 from integrations.hermes.gossipmemo import GossipMemoMemoryProvider
@@ -165,7 +165,7 @@ def test_merge_http_endpoint_and_status_mapping(tmp_path: Path):
                 "WHERE space_id = 's' ORDER BY display_name",
             )
         ]
-        world = SocialMemoryWorld(store, _NoopModel())
+        world = SocialMemoryWorld(store, SilentTransport())
         settings = Settings(
             database_path=store.path,
             llm_base_url="http://llm.test/v1",
@@ -195,14 +195,6 @@ def test_merge_http_endpoint_and_status_mapping(tmp_path: Path):
                 assert conflict.status_code == 409
 
     asyncio.run(scenario())
-
-
-class _NoopModel:
-    configured = False
-    gate = ProviderGate()
-
-    async def aclose(self):
-        return None
 
 
 def test_sdk_merge_methods_send_source_target_payloads():

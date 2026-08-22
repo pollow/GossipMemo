@@ -25,8 +25,8 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from harness import SilentTransport
 
-from gossipmemo.context_budget import ContextBudget
 from gossipmemo.embedding import embed_query_vector
 from gossipmemo.models import (
     ManualMemoryRequest,
@@ -39,34 +39,12 @@ from gossipmemo.reasoners.extraction import build_extraction_reasoner
 from gossipmemo.reasoners.settings import ReasoningSettings
 from gossipmemo.store import SqliteWorldStore
 from gossipmemo.store._vectors import EmbeddingUpsert
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.world import SocialMemoryWorld
 from tests.fakes_embedding import FakeEmbeddingClient, deterministic_unit_vector
 
 MODEL = "fake-embedding"
 DIM = 8
 DEFAULT_PROMPTS = PromptLibrary()
-
-
-class _NoopModel:
-    """Minimal `LlmTransport` double -- mirrors `tests/test_embedding_worker.py`."""
-
-    configured = False
-    gate = ProviderGate()
-    context_budget = ContextBudget()
-    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-
-    async def aclose(self):
-        return None
-
-    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
-        return ChatCompletionRequest(
-            model="fake", messages=list(messages),
-            response_format={"type": "json_object"} if structured else None,
-        )
-
-    async def complete(self, request: ChatCompletionRequest) -> str:
-        return "{}"
 
 
 @pytest.fixture
@@ -434,7 +412,7 @@ def test_load_extraction_comparisons_text_with_no_query_vector_falls_back_to_fts
 def test_extraction_reasoner_comparison_query_vectors_dedupes_and_uses_its_own_instruction():
     client = FakeEmbeddingClient(model=MODEL, dim=DIM)
     reasoner = build_extraction_reasoner(
-        store=None, model=_NoopModel(), settings=ReasoningSettings(),
+        store=None, model=SilentTransport(), settings=ReasoningSettings(),
         embedding_client_getter=lambda: client,
     )
 
@@ -449,7 +427,7 @@ def test_extraction_reasoner_comparison_query_vectors_dedupes_and_uses_its_own_i
 
 def test_extraction_reasoner_comparison_query_vectors_none_without_a_client():
     reasoner = build_extraction_reasoner(
-        store=None, model=_NoopModel(), settings=ReasoningSettings(),
+        store=None, model=SilentTransport(), settings=ReasoningSettings(),
     )
     assert asyncio.run(reasoner._comparison_query_vectors(["text"])) is None
 
@@ -472,7 +450,7 @@ def test_turn_recall_uses_turn_instruction_and_recalls_a_semantic_only_match(tmp
     _insert_memory(store, "m1", "Zhang Wei just switched jobs", about_user=1)
     _embed(store, "memory", "m1", _turn_expected_vector(text))
     client = FakeEmbeddingClient(model=MODEL, dim=DIM)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     async def scenario():
         await world.start()
@@ -501,7 +479,7 @@ def test_query_uses_query_instruction_and_recalls_a_semantic_only_match(tmp_path
         ),
     )
     client = FakeEmbeddingClient(model=MODEL, dim=DIM)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     async def scenario():
         await world.start()
@@ -530,7 +508,7 @@ def test_turn_degrades_to_pure_fts_without_an_embedding_client(tmp_path, monkeyp
         raise AssertionError("search_vectors must not be called without an embedding client")
 
     monkeypatch.setattr(store, "search_vectors", _fail_if_called)
-    world = SocialMemoryWorld(store, _NoopModel())
+    world = SocialMemoryWorld(store, SilentTransport())
 
     async def scenario():
         await world.start()
@@ -560,7 +538,7 @@ def test_storage_side_embedding_worker_never_carries_a_query_instruction(tmp_pat
     store.ensure_space("s1")
     store.add_manual_memory("s1", ManualMemoryRequest(content="a memory", about_user=True))
     client = FakeEmbeddingClient(model=MODEL, dim=DIM)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     async def scenario():
         await world.start()

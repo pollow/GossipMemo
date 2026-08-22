@@ -24,37 +24,15 @@ import asyncio
 import logging
 from pathlib import Path
 
+from harness import SilentTransport
+
 from gossipmemo import world as world_module
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
-from gossipmemo.context_budget import ContextBudget
 from gossipmemo.models import ManualMemoryRequest, MessageInput, TurnRequest
 from gossipmemo.store import SqliteWorldStore
-from gossipmemo.transport import ChatCompletionRequest, ProviderGate, RetryPolicy
 from gossipmemo.world import SocialMemoryWorld
 from tests.fakes_embedding import FakeEmbeddingClient
-
-
-class _NoopModel:
-    """Minimal `LlmTransport` double -- extraction/reasoning stages are
-    never exercised by these tests, only the embedding worker is."""
-
-    configured = False
-    gate = ProviderGate()
-    context_budget = ContextBudget()
-    retry_policy = RetryPolicy(attempts=1, base_seconds=0.001, max_seconds=0.001)
-
-    async def aclose(self):
-        return None
-
-    def prepare(self, messages, *, structured: bool) -> ChatCompletionRequest:
-        return ChatCompletionRequest(
-            model="fake", messages=list(messages),
-            response_format={"type": "json_object"} if structured else None,
-        )
-
-    async def complete(self, request: ChatCompletionRequest) -> str:
-        return "{}"
 
 
 class _FlakyEmbeddingClient:
@@ -125,7 +103,7 @@ def test_worker_drains_pending_in_batches_with_no_instruction_prefix(tmp_path, m
     store = _store(tmp_path)
     _add_memories(store, 5)
     client = FakeEmbeddingClient(model="fake-embedding", dim=8)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     asyncio.run(_start_drain_stop(world, store, client.model, client.dim))
 
@@ -143,7 +121,7 @@ def test_worker_drains_pending_in_batches_with_no_instruction_prefix(tmp_path, m
 def test_worker_is_a_noop_with_nothing_pending(tmp_path):
     store = _store(tmp_path)
     client = FakeEmbeddingClient()
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     asyncio.run(_start_drain_stop(world, store, client.model, client.dim))
 
@@ -160,7 +138,7 @@ def test_worker_survives_provider_exception_and_recovers_next_round(tmp_path, mo
     _add_memories(store, 3)
     delegate = FakeEmbeddingClient()
     flaky = _FlakyEmbeddingClient(delegate, failures=2)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=flaky)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=flaky)
 
     with caplog.at_level(logging.ERROR, logger="gossipmemo.world"):
         asyncio.run(_start_drain_stop(world, store, flaky.model, flaky.dim))
@@ -183,7 +161,9 @@ def test_embedding_failure_never_reaches_the_turn_path(tmp_path, monkeypatch):
         async def embed(self, texts, *, instruction=None):
             raise RuntimeError("embedding provider unavailable")
 
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=_AlwaysFailsEmbeddingClient())
+    world = SocialMemoryWorld(
+        store, SilentTransport(), embedding_client=_AlwaysFailsEmbeddingClient()
+    )
 
     async def scenario():
         await world.start()
@@ -203,7 +183,7 @@ def test_embedding_failure_never_reaches_the_turn_path(tmp_path, monkeypatch):
 
 def test_unconfigured_embedding_starts_cleanly_and_health_reflects_it(tmp_path):
     store = _store(tmp_path)
-    world = SocialMemoryWorld(store, _NoopModel())
+    world = SocialMemoryWorld(store, SilentTransport())
 
     asyncio.run(_start_stop(world))
 
@@ -216,7 +196,7 @@ def test_health_reports_enabled_and_pending_count(tmp_path):
     store = _store(tmp_path)
     _add_memories(store, 2)
     client = FakeEmbeddingClient()
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     health_before = world.health()
     assert health_before.embedding_enabled is True
@@ -265,7 +245,7 @@ def test_probe_failure_disables_subsystem_but_still_starts(tmp_path):
         llm_timeout_seconds=2.0,
     )
     store = _store(tmp_path)
-    world = SocialMemoryWorld(store, _NoopModel(), settings=settings)
+    world = SocialMemoryWorld(store, SilentTransport(), settings=settings)
 
     asyncio.run(_start_stop(world))
 
@@ -285,7 +265,7 @@ def test_startup_backfill_processes_pre_existing_rows(tmp_path):
     # injected directly (as tests do), but the point under test is that
     # `start()` schedules a full backfill over rows that already existed
     # before the process came up, not just newly-arriving ones.
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     assert store.pending_embedding_count(model=client.model, dim=client.dim) == 4
 
@@ -319,7 +299,7 @@ class _ClosableEmbeddingClient:
 def test_stop_closes_an_embedding_client_that_declares_aclose(tmp_path):
     store = _store(tmp_path)
     client = _ClosableEmbeddingClient()
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     asyncio.run(_start_stop(world))
 
@@ -333,6 +313,6 @@ def test_stop_does_not_choke_on_a_client_with_no_aclose(tmp_path):
     store = _store(tmp_path)
     client = FakeEmbeddingClient()
     assert not hasattr(client, "aclose")
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=client)
+    world = SocialMemoryWorld(store, SilentTransport(), embedding_client=client)
 
     asyncio.run(_start_stop(world))  # must not raise
