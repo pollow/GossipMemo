@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -141,6 +143,24 @@ def test_static_css_served_without_session_as_text_css(tmp_path: Path):
         response = await client.get("/admin/static/admin.css")
         assert response.status_code == 200
         assert response.headers["content-type"].startswith("text/css")
+
+    asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
+
+
+def test_stylesheet_link_carries_a_content_hash(tmp_path: Path):
+    """The CSS is cached `immutable` under a filename that never changes,
+    so the `<link>` must carry a hash of the file: without it a browser
+    renders the previous release's stylesheet against new markup for a
+    day after a deploy. The hash must match the bytes actually served."""
+
+    async def scenario(client):
+        page_response = await client.get("/admin/login")
+        match = re.search(
+            r'href="/admin/static/admin\.css\?v=([0-9a-f]{12})"', page_response.text
+        )
+        assert match, page_response.text
+        css = await client.get("/admin/static/admin.css")
+        assert hashlib.sha256(css.content).hexdigest()[:12] == match.group(1)
 
     asyncio.run(_run(tmp_path, ADMIN_PASSWORD, scenario))
 

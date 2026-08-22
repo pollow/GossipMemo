@@ -8,8 +8,10 @@ will reuse (table, pagination, breadcrumbs).
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
+from pathlib import Path
 
 from fastapi.responses import HTMLResponse
 
@@ -19,6 +21,35 @@ from fastapi.responses import HTMLResponse
 CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'self'; form-action 'self'"
 
 DEFAULT_PAGE_SIZE = 50
+
+#: The stylesheet on disk. The router serves this file; this module builds
+#: the `<link>` that points at it, so they agree on one path.
+CSS_PATH = Path(__file__).parent / "static" / "admin.css"
+
+
+def _css_href() -> str:
+    """The stylesheet URL, carrying a hash of the file's current contents.
+
+    The response is cached `immutable` for a day, and the filename never
+    changes, so without this a browser keeps rendering the *previous*
+    release's stylesheet against the new HTML for up to 24 hours after a
+    deploy -- not a subtly stale look but a broken one, since the markup
+    and the CSS ship together and are written against each other. The
+    hash changes whenever the file does, which is precisely when the
+    cached copy must be abandoned. Read once at import: the file is
+    baked into the image and cannot change under a running process.
+    """
+
+    try:
+        digest = hashlib.sha256(CSS_PATH.read_bytes()).hexdigest()[:12]
+    except OSError:
+        # Missing stylesheet is the router's problem to report, not a
+        # reason for every page to fail to render.
+        return "/admin/static/admin.css"
+    return f"/admin/static/admin.css?v={digest}"
+
+
+CSS_HREF = _css_href()
 
 
 def esc(value: object) -> str:
@@ -188,7 +219,7 @@ def page(*, title: str, body: str, breadcrumbs: list[tuple[str, str]] | None = N
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{esc(title)}</title>
-<link rel="stylesheet" href="/admin/static/admin.css">
+<link rel="stylesheet" href="{esc(CSS_HREF)}">
 </head>
 <body>
 <header><h1>{esc(title)}</h1><nav>{nav_html}</nav></header>

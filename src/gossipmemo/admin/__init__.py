@@ -10,7 +10,6 @@ session instead of reusing the bearer api_key).
 from __future__ import annotations
 
 import secrets
-from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import FileResponse
@@ -18,12 +17,9 @@ from fastapi.responses import FileResponse
 from ..config import Settings
 from ..world import SocialMemoryWorld
 from .auth import AdminAuth
-from .render import CONTENT_SECURITY_POLICY
+from .render import CONTENT_SECURITY_POLICY, CSS_PATH
 from .search import register as register_search_view
 from .views import register_admin_views
-
-_STATIC_DIR = Path(__file__).parent / "static"
-_CSS_PATH = _STATIC_DIR / "admin.css"
 
 
 def create_admin_router(settings: Settings, world: SocialMemoryWorld) -> APIRouter | None:
@@ -42,7 +38,7 @@ def create_admin_router(settings: Settings, world: SocialMemoryWorld) -> APIRout
     @router.get("/static/admin.css", include_in_schema=False)
     async def admin_css() -> FileResponse:
         return FileResponse(
-            _CSS_PATH,
+            CSS_PATH,
             media_type="text/css",
             headers={
                 "Cache-Control": "public, max-age=86400, immutable",
