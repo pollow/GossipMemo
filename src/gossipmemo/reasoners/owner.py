@@ -366,7 +366,7 @@ async def _digest_evidence(
                 # Ignore any model-copied IDs here and deterministically
                 # inherit the trusted server-side union.
                 return [OwnerEvidenceDigestView(
-                    summary="\n".join(item.summary for item in result.items)[:600],
+                    summary="\n".join(item.summary for item in result.items),
                     source_memory_ids=sorted(allowed),
                     basis="compressed", uncertainty="", semantic_subject="",
                 )]

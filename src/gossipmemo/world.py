@@ -6,7 +6,7 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .config import Settings
+from .config import ConfigurationError, Settings
 from .embedding import (
     DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS,
     EmbeddingClient,
@@ -138,8 +138,18 @@ class SocialMemoryWorld:
             embedding_client_getter=embedding_client_getter,
             embedding_query_timeout_seconds=embedding_query_timeout,
         )
+        disabled = tuple(settings.disabled_reasoners) if settings is not None else ()
+        unknown = [name for name in disabled if name not in reasoners]
+        if unknown:
+            raise ConfigurationError(
+                "GOSSIPMEMO_REASONING_DISABLED names unknown reasoners: "
+                + ", ".join(sorted(unknown))
+                + " (known: " + ", ".join(sorted(reasoners)) + ")"
+            )
+        if disabled:
+            logger.warning("reasoners_disabled", extra={"reasoners": sorted(disabled)})
         self.reasoning_pipeline = ReasoningPipeline(
-            [reasoners[name] for name in DEFAULT_REASONING_PIPELINE],
+            [reasoners[name] for name in DEFAULT_REASONING_PIPELINE if name not in disabled],
             should_continue=lambda: not self._stopping,
         )
         self._tasks: set[asyncio.Task[Any]] = set()

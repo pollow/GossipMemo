@@ -25,7 +25,8 @@ if TYPE_CHECKING:
 
 
 async def _reason_user_model(
-    transport: LlmTransport, settings: ReasoningSettings, memories: Sequence[MemoryView],
+    transport: LlmTransport, settings: ReasoningSettings, user_model: UserModelView,
+    memories: Sequence[MemoryView],
     inferred_memories: Sequence[MemoryView] = (), hypotheses: Sequence[HypothesisView] = (),
     *,
     store: WorldStore | None = None,
@@ -35,7 +36,7 @@ async def _reason_user_model(
 ) -> UserModelReasoningResult:
     projection, actions = await owner_reasoning(
         transport, settings, settings.prompts.user_model_reasoning_system,
-        UserModelView(space_id="current"),
+        user_model,
         memories, inferred_memories, hypotheses, PersonProjectionResult,
         UserReasoningActionsResult,
         store=store, space_id=space_id, embedding_client_getter=embedding_client_getter,
@@ -69,18 +70,18 @@ def build_user_model_reasoner(
             return None
         evidence = [memory for memory in memories if memory.basis != "inferred"]
         inferred, hypotheses = store.owner_review_context(space_id, "user", None)
-        return watermark, evidence, inferred, hypotheses
+        return watermark, user_model, evidence, inferred, hypotheses
 
     def call(space_id: str, context):
-        _, evidence, inferred, hypotheses = context
+        _, user_model, evidence, inferred, hypotheses = context
         return (
             "reason-user-model",
             partial(reason_user_model, space_id=space_id),
-            (evidence, inferred, hypotheses),
+            (user_model, evidence, inferred, hypotheses),
         )
 
     def apply(space_id: str, context, result) -> bool:
-        watermark, _, _, hypotheses = context
+        watermark, _, _, _, hypotheses = context
         return store.apply_user_model_reasoning(
             space_id, watermark, result, {hypothesis.id for hypothesis in hypotheses}
         )

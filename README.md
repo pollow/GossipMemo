@@ -338,6 +338,14 @@ The first five run as one ordered pipeline per space — Person, Relationship,
 UserModel, Coverage, LearningGoals — so a card is refreshed before anything
 audits what it still lacks. Continuity runs on its own message-count trigger.
 
+`GOSSIPMEMO_REASONING_DISABLED` takes a comma-separated list of reasoner names
+(`person`, `relationship`, `user_model`, `coverage`, `learning_goals`) to drop
+from that pipeline. It is an operational escape hatch, not a tuning knob: a
+reasoner whose cost or correctness is known-broken can be parked without taking
+the rest of the pipeline down, and its projection simply stays stale until it is
+re-enabled. An unknown name is a startup error rather than a silent no-op.
+Continuity and extraction are not part of this pipeline and cannot be disabled.
+
 Person, Relationship, and UserModel reasoning is two-staged: a projection call
 rewrites the card, then an epistemic review call decides what to infer and what
 to merely suspect. That split is what keeps *inference* out of the card:

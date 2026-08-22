@@ -91,3 +91,25 @@ def test_context_budget_rejects_unusable_values():
 
     with pytest.raises(ValueError, match="usable"):
         ContextBudget(10, 8, 3)
+
+
+def test_disabled_reasoners_are_dropped_from_the_pipeline(tmp_path):
+    from harness import NoopTransport, settings
+
+    from gossipmemo.config import ConfigurationError
+    from gossipmemo.store import SqliteWorldStore
+    from gossipmemo.world import SocialMemoryWorld
+
+    store = SqliteWorldStore(tmp_path / "world.db")
+    world = SocialMemoryWorld(
+        store, NoopTransport(),
+        settings=settings(tmp_path, disabled_reasoners=("user_model", "coverage")),
+    )
+    names = [reasoner.name for reasoner in world.reasoning_pipeline._reasoners]
+    assert names == ["person", "relationship", "learning_goals"]
+
+    with pytest.raises(ConfigurationError, match="nope"):
+        SocialMemoryWorld(
+            SqliteWorldStore(tmp_path / "other.db"), NoopTransport(),
+            settings=settings(tmp_path, disabled_reasoners=("nope",)),
+        )

@@ -65,6 +65,10 @@ class Settings:
     extraction_clarification_probe: bool = False
     admin_password: str = ""
     admin_playground_enabled: bool = False
+    # Reasoners skipped by the per-space pipeline. An operational escape hatch for a
+    # reasoner whose cost or correctness is known-broken, so the rest of the pipeline
+    # keeps running; the skipped projection simply stays stale.
+    disabled_reasoners: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         missing = [
@@ -208,6 +212,11 @@ class Settings:
             ),
             admin_password=_env("GOSSIPMEMO_ADMIN_PASSWORD"),
             admin_playground_enabled=_flag_env("GOSSIPMEMO_ADMIN_PLAYGROUND_ENABLED"),
+            disabled_reasoners=tuple(
+                name for name in (
+                    part.strip() for part in _env("GOSSIPMEMO_REASONING_DISABLED").split(",")
+                ) if name
+            ),
         )
 
 

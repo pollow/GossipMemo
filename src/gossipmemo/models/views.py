@@ -56,7 +56,7 @@ class ContinuityView(BaseModel):
 
 
 class OwnerEvidenceDigestView(BaseModel):
-    summary: str = Field(min_length=1, max_length=600)
+    summary: str = Field(min_length=1)
     source_memory_ids: list[str] = Field(min_length=1, max_length=512)
     basis: str = "explicit"
     uncertainty: str = ""

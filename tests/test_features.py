@@ -32,6 +32,7 @@ from gossipmemo.models import (
     SourceRef,
     SupersedeRequest,
     TurnRequest,
+    UserModelView,
 )
 from gossipmemo.query import synthesize
 from gossipmemo.reasoners import ReasoningSettings
@@ -900,7 +901,8 @@ def test_user_owner_review_schema_excludes_inferred_memory_actions():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             adapter = OpenAICompatibleAdapter(
                 "http://llm.test/v1", "key", "test-model", client=client)
-            await _reason_user_model(adapter, REASONING, [])
+            await _reason_user_model(
+                adapter, REASONING, UserModelView(space_id="personal"), [])
 
     asyncio.run(scenario())
     assert "hypothesis_actions" in payloads[1]["messages"][-1]["content"]
