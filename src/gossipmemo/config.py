@@ -54,7 +54,7 @@ class Settings:
     llm_context_window_tokens: int = 65536
     llm_output_reserve_tokens: int = 8192
     llm_context_safety_tokens: int = 4096
-    llm_trace_path: Path | None = None
+    llm_trace_path: Path | None = None  # directory: one JSON file per LLM call, in per-day subdirs
     prompts_path: Path | None = None
     induction_time: str = "00:00"
     embedding_base_url: str = ""

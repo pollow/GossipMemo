@@ -221,10 +221,19 @@ def test_structured_raises_after_exhausting_retries() -> None:
     assert len(calls) == 2  # initial attempt + 1 retry
 
 
+def _trace_files(trace_dir) -> list:
+    """All trace JSON files under `trace_dir`, sorted by path (= chronological)."""
+
+    return sorted(trace_dir.glob("*/*.json"))
+
+
 def test_trace_records_the_verbatim_request_and_completion(tmp_path) -> None:
     """The audit seam: what went over the wire, plus the reasoner label."""
 
-    trace_path = tmp_path / "trace" / "llm.jsonl"
+    import datetime as dt
+    import re
+
+    trace_path = tmp_path / "trace"
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
@@ -244,7 +253,18 @@ def test_trace_records_the_verbatim_request_and_completion(tmp_path) -> None:
                 await adapter.complete(request)
 
     asyncio.run(run())
-    records = [json.loads(line) for line in trace_path.read_text().splitlines()]
+
+    files = _trace_files(trace_path)
+    assert len(files) == 2
+
+    today = dt.datetime.now().astimezone().strftime("%Y-%m-%d")
+    for path in files:
+        assert path.parent.name == today
+        assert re.fullmatch(
+            r"\d{9}-audit-coverage-\d{4}(-\d+)?\.json", path.name
+        ), path.name
+
+    records = [json.loads(path.read_text()) for path in files]
     assert [item["sequence"] for item in records] == [1, 2]
     assert records[0]["label"] == "audit-coverage"
     assert records[0]["completion"] == "{}"
@@ -252,6 +272,56 @@ def test_trace_records_the_verbatim_request_and_completion(tmp_path) -> None:
         {"role": "system", "content": "be brief"},
         {"role": "user", "content": "audit M1"},
     ]
+
+
+def test_trace_files_do_not_collide_within_the_same_millisecond(tmp_path) -> None:
+    """Two calls with the same label in the same millisecond both survive."""
+
+    trace_path = tmp_path / "trace"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client, trace_path=trace_path)
+            request = ChatCompletionRequest(
+                model="m", messages=[ChatMessage(role="user", content="hi")])
+            with llm_call_tier(TIER_BACKGROUND, "same-label"):
+                await asyncio.gather(*(adapter.complete(request) for _ in range(5)))
+
+    asyncio.run(run())
+
+    files = _trace_files(trace_path)
+    assert len(files) == 5
+    records = [json.loads(path.read_text()) for path in files]
+    assert sorted(item["sequence"] for item in records) == [1, 2, 3, 4, 5]
+
+
+def test_trace_path_pointing_at_a_regular_file_disables_tracing(tmp_path, caplog) -> None:
+    """A pre-existing single-file JSONL trace must not crash the process."""
+
+    trace_path = tmp_path / "old-trace.jsonl"
+    trace_path.write_text('{"sequence": 1}\n')
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    async def run() -> str:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            adapter = OpenAICompatibleAdapter(
+                "http://x", "k", "m", client=client, trace_path=trace_path)
+            return await adapter.complete(
+                ChatCompletionRequest(
+                    model="m", messages=[ChatMessage(role="user", content="hi")]))
+
+    with caplog.at_level("WARNING"):
+        result = asyncio.run(run())
+
+    assert result == "ok"
+    # The old file is left untouched -- no migration, no crash.
+    assert trace_path.read_text() == '{"sequence": 1}\n'
 
 
 def test_trace_is_off_by_default() -> None:

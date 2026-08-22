@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
@@ -100,6 +102,7 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self.context_budget = context_budget or ContextBudget()
         self.trace_path = trace_path
         self._trace_sequence = count(1)
+        self._trace_disabled = False
         self._client = client
         self._owns_client = client is None
         self._headers = dict(headers or {})
@@ -290,19 +293,41 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
         self, request: ChatCompletionRequest, label: str, tier: int, status: int,
         *, completion: str | None = None, error: str | None = None,
     ) -> None:
-        """Append one request/response pair to the trace file, verbatim.
+        """Write one request/response pair to its own trace file, verbatim.
 
         Off unless `GOSSIPMEMO_LLM_TRACE_PATH` is set. This is the audit
         seam for prompt construction, so nothing here is truncated or
         summarized: what the record holds is exactly what went over the
         wire, plus the reasoner `label` that structured logging alone
-        cannot recover. Failures never propagate -- a broken trace must
-        not take a reasoning pass down with it.
+        cannot recover.
+
+        One JSON file is written per call, under a per-day subdirectory of
+        `trace_path` (a directory), named by local time so an operator can
+        pick days the way they experience them:
+
+            <trace_path>/<YYYY-MM-DD>/<HHMMSSmmm>-<label>-<sequence>.json
+
+        `timestamp` inside the record itself stays UTC -- only the
+        filename and directory use local time. The file is opened
+        exclusively (`O_CREAT | O_EXCL`) and a numeric suffix is added on
+        collision, since `self._trace_sequence` resets on process restart
+        and does not by itself guarantee a unique name. Failures never
+        propagate -- a broken trace must not take a reasoning pass down
+        with it. If `trace_path` turns out to be an existing regular file
+        (the old single-JSONL-file layout), tracing is disabled for the
+        rest of the process instead of crashing.
         """
-        if self.trace_path is None:
+        if self.trace_path is None or self._trace_disabled:
             return
+        if self.trace_path.is_file():
+            logger.warning(
+                "llm_trace_path_is_file", extra={"path": str(self.trace_path)}
+            )
+            self._trace_disabled = True
+            return
+        sequence = next(self._trace_sequence)
         record = {
-            "sequence": next(self._trace_sequence),
+            "sequence": sequence,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "label": label,
             "tier": tier,
@@ -313,10 +338,33 @@ class OpenAICompatibleAdapter(AbstractAsyncContextManager["OpenAICompatibleAdapt
             "completion": completion,
             "error": error,
         }
+        now_local = datetime.now().astimezone()
+        day_dir = self.trace_path / now_local.strftime("%Y-%m-%d")
+        time_prefix = now_local.strftime("%H%M%S") + f"{now_local.microsecond // 1000:03d}"
+        safe_label = re.sub(r"[^a-z0-9-]", "-", label.lower())
+        payload = json.dumps(record, indent=2, ensure_ascii=False, default=str)
         try:
-            self.trace_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.trace_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+            day_dir.mkdir(parents=True, exist_ok=True)
+            base_name = f"{time_prefix}-{safe_label}-{sequence:04d}"
+            max_attempts = 10
+            for attempt in range(max_attempts):
+                name = base_name if attempt == 0 else f"{base_name}-{attempt}"
+                target = day_dir / f"{name}.json"
+                try:
+                    fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                except FileExistsError:
+                    continue
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                        handle.write(payload)
+                finally:
+                    pass
+                break
+            else:
+                logger.warning(
+                    "llm_trace_write_failed",
+                    extra={"path": str(day_dir), "reason": "exhausted unique name attempts"},
+                )
         except OSError:
             logger.warning("llm_trace_write_failed", extra={"path": str(self.trace_path)})
 

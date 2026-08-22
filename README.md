@@ -109,10 +109,14 @@ request. Two extraction fragments interpolate the configured user name and must
 keep their `$quoted_user_name` / `$user_name` placeholder; an override that
 invents a placeholder or drops a required one fails at startup.
 
-To audit prompt construction, set `GOSSIPMEMO_LLM_TRACE_PATH` to a JSONL file.
-Every provider request is then appended verbatim together with its completion,
-the reasoner label that issued it (`audit-coverage`, `plan-learning-goals`, and
-so on), and the estimated token count. The trace holds full message bodies by
+To audit prompt construction, set `GOSSIPMEMO_LLM_TRACE_PATH` to a directory.
+Every provider request then gets its own JSON file, written verbatim together
+with its completion, the reasoner label that issued it (`audit-coverage`,
+`plan-learning-goals`, and so on), and the estimated token count. Files are
+grouped into per-day subdirectories and named by local time so an operator can
+find a day's calls at a glance:
+`<dir>/<YYYY-MM-DD>/<HHMMSSmmm>-<label>-<sequence>.json` (the `timestamp` field
+recorded inside each file stays UTC). The trace holds full message bodies by
 design, so it is a local debugging tool rather than something to leave on: it is
 off unless the variable is set, and a write failure never interrupts reasoning.
 
