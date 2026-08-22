@@ -49,7 +49,7 @@ def create_admin_router(settings: Settings, world: SocialMemoryWorld) -> APIRout
 
     router.include_router(auth.router())
 
-    register_admin_views(router, auth.require_session, world.store)
+    register_admin_views(router, auth.require_session, world.store, settings.llm_trace_path)
     register_search_view(router, auth.require_session, world.store)
 
     return router

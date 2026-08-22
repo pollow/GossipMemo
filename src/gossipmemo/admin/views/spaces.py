@@ -218,7 +218,10 @@ def _render_space_list(spaces) -> str:
         total=len(spaces),
         base_path="/admin/spaces",
     )
-    tables_link = '<p><a href="/admin/tables">Raw tables</a></p>'
+    tables_link = (
+        '<p><a href="/admin/tables">Raw tables</a> &middot; '
+        '<a href="/admin/playground">Reasoner playground</a></p>'
+    )
     return page(
         title="GossipMemo Admin",
         breadcrumbs=[("Admin", "/admin")],

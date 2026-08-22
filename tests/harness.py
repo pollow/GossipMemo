@@ -116,6 +116,7 @@ async def run_admin(
     also_seed=None,
     admin_password: str = ADMIN_PASSWORD,
     authenticate: bool = True,
+    settings_overrides: dict | None = None,
 ):
     """Build the app, seed, optionally log in, then hand `scenario` the client.
 
@@ -123,11 +124,14 @@ async def run_admin(
     teardown happens even when an assertion fails. `fixtures` maps each
     seeded space id to whatever that file's `seeder` returned.
     `authenticate=False` is for the tests that check a route redirects to
-    the login page.
+    the login page. `settings_overrides` reaches `settings()` verbatim --
+    e.g. `{"llm_trace_path": some_dir}` for the playground tests.
     """
     store = SqliteWorldStore(tmp_path / "world.db")
     world = SocialMemoryWorld(store, NoopTransport())
-    app = create_app(settings(tmp_path, admin_password=admin_password), world)
+    app = create_app(
+        settings(tmp_path, admin_password=admin_password, **(settings_overrides or {})), world
+    )
     fixtures: dict[str, dict] = {}
     async with app.router.lifespan_context(app):
         async with asgi_client(app) as client:

@@ -203,6 +203,7 @@ def table_component(
 _TOP_NAV = (
     ("Spaces", "/admin/spaces"),
     ("Raw tables", "/admin/tables"),
+    ("Playground", "/admin/playground"),
 )
 
 
