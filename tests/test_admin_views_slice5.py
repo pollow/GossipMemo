@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import struct
 from datetime import datetime, timezone
 from pathlib import Path
@@ -158,10 +159,14 @@ def test_admin_tables_embeddings_shows_dim_and_norm_not_raw_floats(tmp_path: Pat
         response = await client.get("/admin/tables/embeddings")
         assert response.status_code == 200
         assert owner_id in response.text
-        assert "<td>3</td>" in response.text  # dim
-        assert "1.000000" in response.text  # L2 norm of (0.6, 0.8, 0.0)
-        assert "0.6" not in response.text
-        assert "0.8" not in response.text
+        cells = re.findall(r"<td>([^<]*)</td>", response.text)
+        assert "3" in cells  # dim
+        assert "1.000000" in cells  # L2 norm of (0.6, 0.8, 0.0)
+        # The raw components must never be rendered. Match whole cells
+        # rather than searching the page: the "Created at" cell carries
+        # microseconds, so a second ending in 0 followed by a 6 or an 8
+        # ("...T12:20.612345") puts "0.6" on the page about 2% of runs.
+        assert not any(cell.startswith("[") or cell in {"0.6", "0.8", "0.0"} for cell in cells)
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
