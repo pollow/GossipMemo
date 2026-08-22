@@ -114,28 +114,25 @@ def test_shipped_defaults_use_exactly_their_declared_placeholders():
             assert f"${name}" in text
 
 
-def test_override_using_an_undeclared_placeholder_is_rejected_at_load(tmp_path):
-    path = write(
-        tmp_path,
-        'extraction_person_identity_rule = "$user_name lives in $city."\n',
-    )
-
-    with pytest.raises(ConfigurationError, match=r"extraction_person_identity_rule: \$city"):
-        PromptLibrary.from_file(path)
-
-
-def test_override_dropping_a_required_placeholder_is_rejected_at_load(tmp_path):
-    path = write(tmp_path, 'extraction_user_evidence_rule = "The user is the user."\n')
-
-    with pytest.raises(ConfigurationError, match=r"must still use the placeholder \$quoted"):
-        PromptLibrary.from_file(path)
-
-
-def test_stray_dollar_sign_in_a_placeholder_fragment_is_rejected_at_load(tmp_path):
-    path = write(tmp_path, 'extraction_person_identity_rule = "$user_name owes $ 5."\n')
-
-    with pytest.raises(ConfigurationError, match="stray"):
-        PromptLibrary.from_file(path)
+@pytest.mark.parametrize(
+    "body,message",
+    [
+        # An undeclared placeholder would silently never be substituted.
+        ('extraction_person_identity_rule = "$user_name lives in $city."\n',
+         r"extraction_person_identity_rule: \$city"),
+        # Dropping a required one would silently drop the fact it carries.
+        ('extraction_user_evidence_rule = "The user is the user."\n',
+         r"must still use the placeholder \$quoted"),
+        ('extraction_person_identity_rule = "$user_name owes $ 5."\n', "stray"),
+        ('extraction_sytsem = "typo"\n', "extraction_sytsem"),
+        ("extraction_system = 3\n", "extraction_system"),
+        ('coverage_root_viewpoints = "text"\n', "coverage_root_viewpoints"),
+        ('[coverage_root_viewpoints]\nM99 = "no such root"\n', "M99"),
+    ],
+)
+def test_malformed_override_is_rejected_at_load(tmp_path, body, message):
+    with pytest.raises(ConfigurationError, match=message):
+        PromptLibrary.from_file(write(tmp_path, body))
 
 
 def test_fragments_without_placeholders_keep_a_dollar_sign_verbatim(tmp_path):
@@ -144,29 +141,6 @@ def test_fragments_without_placeholders_keep_a_dollar_sign_verbatim(tmp_path):
     prompts = PromptLibrary.from_file(path)
 
     assert "Costs are in $ only." in continuity_prompt(None, [], prompts=prompts)
-
-
-def test_unknown_override_key_is_rejected_rather_than_ignored(tmp_path):
-    path = write(tmp_path, 'extraction_sytsem = "typo"\n')
-
-    with pytest.raises(ConfigurationError, match="extraction_sytsem"):
-        PromptLibrary.from_file(path)
-
-
-def test_non_string_override_value_is_rejected(tmp_path):
-    path = write(tmp_path, "extraction_system = 3\n")
-
-    with pytest.raises(ConfigurationError, match="extraction_system"):
-        PromptLibrary.from_file(path)
-
-
-def test_non_table_and_unknown_root_overrides_are_rejected(tmp_path):
-    with pytest.raises(ConfigurationError, match="coverage_root_viewpoints"):
-        PromptLibrary.from_file(write(tmp_path, 'coverage_root_viewpoints = "text"\n'))
-    with pytest.raises(ConfigurationError, match="M99"):
-        PromptLibrary.from_file(
-            write(tmp_path, '[coverage_root_viewpoints]\nM99 = "no such root"\n')
-        )
 
 
 def test_configured_but_missing_prompts_file_fails_at_startup(tmp_path):

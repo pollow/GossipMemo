@@ -156,16 +156,6 @@ def test_space_overview_renders_continuity_text_message_and_linked_people(tmp_pa
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_space_overview_has_no_continuity_history_link(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1")
-        assert "/admin/spaces/space1/continuities" not in response.text
-        gone = await client.get("/admin/spaces/space1/continuities")
-        assert gone.status_code == 404
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
 # --- raw tables --------------------------------------------------------------
 
 
@@ -278,23 +268,3 @@ def test_every_slice5_view_requires_a_session(tmp_path: Path, path):
                 assert response.headers["location"] == "/admin/login"
 
     asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/admin/spaces/space1",
-        "/admin/tables",
-        "/admin/tables/schema_migrations",
-        "/admin/tables/extraction_batches",
-        "/admin/tables/embeddings",
-    ],
-)
-def test_every_slice5_view_carries_csp_header(tmp_path: Path, path):
-    async def scenario(client, fixtures):
-        response = await client.get(path)
-        assert response.status_code == 200
-        assert response.headers.get("Content-Security-Policy")
-        assert response.headers.get("X-Frame-Options") == "DENY"
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))

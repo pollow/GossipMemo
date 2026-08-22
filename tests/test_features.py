@@ -751,18 +751,13 @@ class _SchemaCapturingModel(FakeModel):
         return json.dumps(self.response)
 
 
-def test_extract_probe_off_requests_the_unchanged_base_schema():
-    model = _SchemaCapturingModel({"people": [], "memories": []})
-
-    result = asyncio.run(_extract(model, REASONING, [_clarification_message()]))
-
-    assert "clarifications" not in model.system_content
+def test_extract_requests_the_clarification_schema_only_when_probing():
+    off = _SchemaCapturingModel({"people": [], "memories": []})
+    result = asyncio.run(_extract(off, REASONING, [_clarification_message()]))
+    assert "clarifications" not in off.system_content
     assert type(result) is ExtractionResult
 
-
-def test_extract_probe_on_requests_the_clarification_schema():
-    settings = ReasoningSettings(extraction_clarification_probe=True)
-    model = _SchemaCapturingModel(
+    on = _SchemaCapturingModel(
         {
             "people": [],
             "memories": [],
@@ -776,10 +771,11 @@ def test_extract_probe_on_requests_the_clarification_schema():
             ],
         }
     )
-
-    result = asyncio.run(_extract(model, settings, [_clarification_message()]))
-
-    assert "clarifications" in model.system_content
+    result = asyncio.run(
+        _extract(on, ReasoningSettings(extraction_clarification_probe=True),
+                 [_clarification_message()])
+    )
+    assert "clarifications" in on.system_content
     assert isinstance(result, ExtractedClarificationResult)
     assert result.clarifications[0].question == "Which Bob?"
 

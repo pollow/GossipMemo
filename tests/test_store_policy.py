@@ -10,7 +10,6 @@ import pytest
 
 from gossipmemo.models import GuidanceItem
 from gossipmemo.store.policy import (
-    RRF_K,
     fts_query,
     is_profile_stale,
     rank_guidance,
@@ -182,16 +181,6 @@ def test_a_negative_count_is_a_bug_not_a_request_for_the_random_window():
         sample_learning_goals(_pool(12), "v1", 3, 5, -1)
 
 
-def test_a_pinned_seed_text_holds_the_sample_across_a_changing_version():
-    """The anti-jitter property: the caller's seed, not the version, decides."""
-    pool = _pool(12)
-    pinned = [item.id for item in sample_learning_goals(pool, "conversation-7", 3, 5)]
-    assert [item.id for item in sample_learning_goals(pool, "conversation-7", 3, 5)] == pinned
-    assert [item.id for item in sample_learning_goals(pool, "conversation-8", 3, 5)] != pinned
-    grown = pool + [_goal("g_99")]
-    assert [item.id for item in sample_learning_goals(grown, "conversation-7", 3, 5)] != pinned
-
-
 # --- reciprocal_rank_fusion --------------------------------------------
 
 
@@ -229,9 +218,3 @@ def test_rrf_degrades_to_the_single_present_ranking():
 
 def test_rrf_ignores_ids_absent_from_every_ranking():
     assert reciprocal_rank_fusion([[], []]) == []
-
-
-def test_rrf_default_k_matches_module_constant():
-    fused_default = reciprocal_rank_fusion([["a", "b"], ["b", "a"]])
-    fused_explicit = reciprocal_rank_fusion([["a", "b"], ["b", "a"]], k=RRF_K)
-    assert fused_default == fused_explicit

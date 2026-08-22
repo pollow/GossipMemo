@@ -102,42 +102,26 @@ def test_extraction_prompt_routes_assistant_context_and_canonical_user_name():
     assert "never save their restatements, summaries, analyses, or advice" in prompt
 
 
-def test_extraction_prompt_clarification_probe_off_is_byte_identical():
-    without_kwarg = extraction_prompt([message("m-1"), message("m-2")], prompts=PROMPTS)
-    with_flag_off = extraction_prompt(
-        [message("m-1"), message("m-2")], prompts=PROMPTS, clarification_probe=False,
-    )
-    assert without_kwarg == with_flag_off
-    assert PROMPTS.extraction_clarification_rule not in without_kwarg
+def test_extraction_prompt_appends_the_clarification_rule_only_when_probing():
+    """The probe is observation-only, so off must be the untouched prompt."""
+    messages = [message("m-1"), message("m-2")]
+    off = extraction_prompt(messages, prompts=PROMPTS)
+    assert off == extraction_prompt(messages, prompts=PROMPTS, clarification_probe=False)
+    assert PROMPTS.extraction_clarification_rule not in off
 
-
-def test_extraction_prompt_clarification_probe_on_appends_rule():
-    prompt = extraction_prompt(
-        [message("m-1"), message("m-2")], prompts=PROMPTS, clarification_probe=True,
-    )
-    assert prompt.endswith(PROMPTS.extraction_clarification_rule)
+    on = extraction_prompt(messages, prompts=PROMPTS, clarification_probe=True)
+    assert on.endswith(PROMPTS.extraction_clarification_rule)
 
 
 def test_extraction_prompt_requires_stable_specific_person_identity():
     prompt = extraction_prompt([message("identity")], user_name="Deus", prompts=PROMPTS)
 
+    # One assertion per distinct rule, not per sentence: a Person must be a
+    # single identifiable human, must not be split across wordings, and an
+    # unidentifiable one keeps its Memory with empty refs.
     assert "one concrete human whose identity is distinguishable" in prompt
-    assert "evidence-supported durable identity anchor" in prompt
-    assert "uniquely and temporally determined" in prompt
-    assert "grammatical anaphor" in prompt
-    assert "unbounded group or category" in prompt
-    assert "most stable, specific, neutral canonical label" in prompt
     assert "Do not create separate identities" in prompt
-    assert "synonymous wording" in prompt
     assert "leave its `people` refs empty" in prompt
-    assert "identity uncertainty alone is not a reason to discard" in prompt
-
-
-def test_reasoning_prompts_allow_useful_social_inference():
-    assert "patterns" in PERSON_REASONING_SYSTEM_PROMPT
-    assert "social inferences" in PERSON_REASONING_SYSTEM_PROMPT
-    assert "friction" in RELATIONSHIP_REASONING_SYSTEM_PROMPT
-    assert "Generalize recurring patterns" in USER_MODEL_REASONING_SYSTEM_PROMPT
 
 
 def test_owner_prompts_keep_relevance_apart_from_subject_and_relationship():

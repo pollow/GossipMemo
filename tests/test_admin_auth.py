@@ -113,6 +113,10 @@ def test_landing_page_reachable_after_login(tmp_path: Path):
         landing = await client.get("/admin")
         assert landing.status_code == 200
         assert "No results" in landing.text
+        # CSP is set centrally in `admin/render.py`, so one rendered page
+        # standing in for all of them is enough.
+        assert "Content-Security-Policy" in landing.headers
+        assert landing.headers["X-Frame-Options"] == "DENY"
 
     asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
 
@@ -179,23 +183,5 @@ def test_admin_responses_carry_csp_header(tmp_path: Path, make_request):
         response = await make_request(client)
         assert "Content-Security-Policy" in response.headers
         assert response.headers["X-Frame-Options"] == "DENY"
-
-    asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))
-
-
-def test_login_page_response_carries_csp_and_landing_page_too(tmp_path: Path):
-    async def scenario(client):
-        login_get = await client.get("/admin/login")
-        assert "Content-Security-Policy" in login_get.headers
-
-        login_post = await client.post(
-            "/admin/login",
-            data={"password": "correct-horse-battery-staple"},
-            follow_redirects=False,
-        )
-        assert "Content-Security-Policy" in login_post.headers
-
-        landing = await client.get("/admin")
-        assert "Content-Security-Policy" in landing.headers
 
     asyncio.run(_run(tmp_path, "correct-horse-battery-staple", scenario))

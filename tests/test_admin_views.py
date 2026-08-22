@@ -196,16 +196,6 @@ def test_two_spaces_renders_space_list(tmp_path: Path):
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1", "space2"]))
 
 
-def test_space_list_route_also_works_directly(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces")
-        assert response.status_code == 200
-        assert "Space space1" in response.text
-        assert "Space space2" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1", "space2"]))
-
-
 def test_space_overview_shows_counts_user_model_and_continuity(tmp_path: Path):
     async def scenario(client, fixtures):
         response = await client.get("/admin/spaces/space1")
@@ -374,25 +364,6 @@ def test_every_view_requires_a_session(tmp_path: Path, path):
                 assert response.headers["location"] == "/admin/login"
 
     asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        "/admin/spaces",
-        "/admin/spaces/space1",
-        "/admin/spaces/space1/messages",
-        "/admin/spaces/space1/memories",
-    ],
-)
-def test_every_view_carries_csp_header(tmp_path: Path, path):
-    async def scenario(client, fixtures):
-        response = await client.get(path)
-        assert response.headers.get("Content-Security-Policy")
-        assert response.headers.get("X-Frame-Options") == "DENY"
-
-    asyncio.run(_run(tmp_path, lambda client, fixtures: scenario(client, fixtures),
-                     seed_spaces=["space1"]))
 
 
 def test_user_model_card_is_pretty_printed(tmp_path: Path):

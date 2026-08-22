@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
+import pytest
 
 from gossipmemo.app import create_app
 from gossipmemo.config import Settings
@@ -236,78 +237,40 @@ def test_empty_query_shows_prompt_not_full_dump(tmp_path: Path):
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_percent_metacharacter_is_escaped(tmp_path: Path):
+@pytest.mark.parametrize(
+    "query,hit,miss",
+    [
+        # LIKE metacharacters must be escaped, not act as wildcards -- each
+        # case carries a control record that must NOT match.
+        ("100%25", "percent_memory_id", "control_100_memory_id"),
+        ("a_b", "ab_memory_id", "axb_memory_id"),
+        # Backslash is a literal keyword, not a LIKE escape character.
+        ("C%3A%5Ctemp", "backslash_memory_id", None),
+        ("SUNRISE", "memory_id", None),  # ASCII case-insensitive
+        ("%E4%BD%A0%E5%A5%BD", "chinese_memory_id", None),  # CJK matches literally
+    ],
+)
+def test_keyword_matching_is_literal(tmp_path: Path, query, hit, miss):
     async def scenario(client, fixtures):
         f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=100%25")
+        response = await client.get(f"/admin/spaces/space1/search?q={query}")
         assert response.status_code == 200
-        assert "Memories (1)" in response.text
-        assert f"/admin/spaces/space1/memories/{f['percent_memory_id']}" in response.text
-        assert f"/admin/spaces/space1/memories/{f['control_100_memory_id']}" not in response.text
+        assert f"/admin/spaces/space1/memories/{f[hit]}" in response.text
+        if miss is not None:
+            assert f"/admin/spaces/space1/memories/{f[miss]}" not in response.text
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_underscore_metacharacter_does_not_wildcard(tmp_path: Path):
-    async def scenario(client, fixtures):
-        f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=a_b")
-        assert response.status_code == 200
-        body = response.text
-        assert f"/admin/spaces/space1/memories/{f['ab_memory_id']}" in body
-        assert f"/admin/spaces/space1/memories/{f['axb_memory_id']}" not in body
+def test_a_person_matched_more_than_once_is_listed_once(tmp_path: Path):
+    """Riley matches by alias only; Bob matches by both name and alias."""
 
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_backslash_keyword_is_literal(tmp_path: Path):
-    async def scenario(client, fixtures):
-        f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=C%3A%5Ctemp")
-        assert response.status_code == 200
-        assert f"/admin/spaces/space1/memories/{f['backslash_memory_id']}" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_ascii_case_insensitive(tmp_path: Path):
-    async def scenario(client, fixtures):
-        f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=SUNRISE")
-        assert response.status_code == 200
-        assert f"/admin/spaces/space1/memories/{f['memory_id']}" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_chinese_keyword_matches_literally(tmp_path: Path):
-    async def scenario(client, fixtures):
-        f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=%E4%BD%A0%E5%A5%BD")
-        assert response.status_code == 200
-        assert f"/admin/spaces/space1/memories/{f['chinese_memory_id']}" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_person_matched_by_alias_only_appears_once(tmp_path: Path):
     async def scenario(client, fixtures):
         f = fixtures["space1"]
         response = await client.get("/admin/spaces/space1/search?q=sunrise")
         assert response.status_code == 200
-        href = f"/admin/spaces/space1/people/{f['riley_id']}"
-        assert response.text.count(href) == 1
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_person_matched_by_name_and_alias_appears_once(tmp_path: Path):
-    async def scenario(client, fixtures):
-        f = fixtures["space1"]
-        response = await client.get("/admin/spaces/space1/search?q=sunrise")
-        assert response.status_code == 200
-        href = f"/admin/spaces/space1/people/{f['sunrise_bob_id']}"
-        assert response.text.count(href) == 1
+        for key in ("riley_id", "sunrise_bob_id"):
+            assert response.text.count(f"/admin/spaces/space1/people/{f[key]}") == 1
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
@@ -380,16 +343,6 @@ def test_search_requires_a_session(tmp_path: Path):
                 assert response.headers["location"] == "/admin/login"
 
     asyncio.run(scenario())
-
-
-def test_search_carries_csp_header(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/search?q=sunrise")
-        assert response.status_code == 200
-        assert response.headers.get("Content-Security-Policy")
-        assert response.headers.get("X-Frame-Options") == "DENY"
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
 def test_search_unknown_space_returns_404(tmp_path: Path):

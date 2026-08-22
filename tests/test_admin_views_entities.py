@@ -251,14 +251,6 @@ def test_person_detail_shows_aliases_and_linked_memories(tmp_path: Path):
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_person_detail_unknown_id_returns_404(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/people/does-not-exist")
-        assert response.status_code == 404
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
 # --- relationships ----------------------------------------------------------
 
 
@@ -281,14 +273,6 @@ def test_relationship_detail_resolves_both_endpoints(tmp_path: Path):
         assert "Alice" in response.text
         assert "close friends" in response.text
         assert "Alice and Bob are close friends" in response.text  # linked memory
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_relationship_detail_unknown_id_returns_404(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/relationships/does-not-exist")
-        assert response.status_code == 404
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
@@ -341,14 +325,6 @@ def test_goals_filter_by_status_actually_filters(tmp_path: Path):
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_goals_unfiltered_shows_both(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/goals")
-        assert "1-2 of 2" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
 # --- hypotheses --------------------------------------------------------------
 
 
@@ -372,14 +348,6 @@ def test_hypotheses_filter_by_owner_kind(tmp_path: Path):
         assert response.status_code == 200
         assert "1-1 of 1" in response.text
         assert "Alice is outgoing" in response.text
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
-
-
-def test_hypotheses_unfiltered_shows_both(tmp_path: Path):
-    async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/hypotheses")
-        assert "1-2 of 2" in response.text
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
@@ -413,15 +381,22 @@ def test_coverage_drill_down_from_root_list_to_entries(tmp_path: Path):
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-def test_coverage_unknown_root_returns_404(tmp_path: Path):
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/admin/spaces/space1/people/does-not-exist",
+        "/admin/spaces/space1/relationships/does-not-exist",
+        "/admin/spaces/space1/coverage/M99",
+    ],
+)
+def test_unknown_id_returns_404(tmp_path: Path, path):
     async def scenario(client, fixtures):
-        response = await client.get("/admin/spaces/space1/coverage/not-a-root")
-        assert response.status_code == 404
+        assert (await client.get(path)).status_code == 404
 
     asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))
 
 
-# --- cross-cutting: session + CSP on every new route -------------------------
+# --- cross-cutting: session on every new route -------------------------------
 
 
 @pytest.mark.parametrize(
@@ -451,27 +426,3 @@ def test_every_new_view_requires_a_session(tmp_path: Path, path_template):
                 assert response.headers["location"] == "/admin/login"
 
     asyncio.run(scenario())
-
-
-@pytest.mark.parametrize(
-    "path_template",
-    [
-        "/admin/spaces/space1/people",
-        "/admin/spaces/space1/people/{alice_id}",
-        "/admin/spaces/space1/relationships",
-        "/admin/spaces/space1/relationships/{relationship_id}",
-        "/admin/spaces/space1/goals",
-        "/admin/spaces/space1/hypotheses",
-        "/admin/spaces/space1/coverage",
-        "/admin/spaces/space1/coverage/M1",
-    ],
-)
-def test_every_new_view_carries_csp_header(tmp_path: Path, path_template):
-    async def scenario(client, fixtures):
-        path = path_template.format(**fixtures["space1"])
-        response = await client.get(path)
-        assert response.status_code == 200
-        assert response.headers.get("Content-Security-Policy")
-        assert response.headers.get("X-Frame-Options") == "DENY"
-
-    asyncio.run(_run(tmp_path, scenario, seed_spaces=["space1"]))

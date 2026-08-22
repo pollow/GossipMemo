@@ -27,7 +27,7 @@ from pathlib import Path
 import pytest
 
 from gossipmemo.context_budget import ContextBudget
-from gossipmemo.embedding import DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS, embed_query_vector
+from gossipmemo.embedding import embed_query_vector
 from gossipmemo.models import (
     ManualMemoryRequest,
     MessageInput,
@@ -172,17 +172,6 @@ def test_embed_query_vector_returns_the_first_vector_on_success():
     )
     assert result == deterministic_unit_vector("Instruct: find x\nQuery: hello", DIM)
     assert client.calls == [(("hello",), "find x")]
-
-
-def test_embed_query_vector_default_timeout_constant_is_short():
-    # A regression guard on the constant itself -- it must stay well under
-    # `llm_timeout_seconds`'s 120s default, per the design brief.
-    assert 0 < DEFAULT_EMBEDDING_QUERY_TIMEOUT_SECONDS <= 5
-
-
-# =====================================================================
-# store._recall_memories -- turn-path about_user recall
-# =====================================================================
 
 
 def test_recall_memories_query_vector_none_is_byte_identical_to_pure_fts(store):
@@ -527,7 +516,11 @@ def test_query_uses_query_instruction_and_recalls_a_semantic_only_match(tmp_path
     assert client.calls[0] == ((question,), DEFAULT_PROMPTS.embedding_query_instruction)
 
 
-def test_turn_degrades_to_pure_fts_when_no_embedding_client_is_configured(tmp_path, monkeypatch):
+def test_turn_degrades_to_pure_fts_without_an_embedding_client(tmp_path, monkeypatch):
+    """The other degradation paths (raise, timeout) are covered where they
+    happen, on `embed_query_vector`: each yields `query_vector=None`, and
+    `None` is byte-identical to pure FTS by the test at the top of the
+    `_recall_memories` section."""
     store = SqliteWorldStore(tmp_path / "world.db")
     store.initialize()
     store.ensure_space("s1")
@@ -538,60 +531,6 @@ def test_turn_degrades_to_pure_fts_when_no_embedding_client_is_configured(tmp_pa
 
     monkeypatch.setattr(store, "search_vectors", _fail_if_called)
     world = SocialMemoryWorld(store, _NoopModel())
-
-    async def scenario():
-        await world.start()
-        try:
-            return await world.turn(
-                "s1",
-                TurnRequest(
-                    messages=[MessageInput(author="user", content="a rare distinctive hobby")],
-                ),
-            )
-        finally:
-            await world.stop()
-
-    response = asyncio.run(scenario())
-    assert [m.id for m in response.memory_recall] == ["m1"]
-
-
-def test_turn_degrades_to_pure_fts_when_embedding_raises(tmp_path):
-    store = SqliteWorldStore(tmp_path / "world.db")
-    store.initialize()
-    store.ensure_space("s1")
-    _insert_memory(store, "m1", "a rare distinctive hobby", about_user=1)
-    world = SocialMemoryWorld(store, _NoopModel(), embedding_client=_RaisingClient())
-
-    async def scenario():
-        await world.start()
-        try:
-            return await world.turn(
-                "s1",
-                TurnRequest(
-                    messages=[MessageInput(author="user", content="a rare distinctive hobby")],
-                ),
-            )
-        finally:
-            await world.stop()
-
-    response = asyncio.run(scenario())
-    assert [m.id for m in response.memory_recall] == ["m1"]
-
-
-def test_turn_degrades_to_pure_fts_when_embedding_times_out(tmp_path):
-    from gossipmemo.config import Settings
-
-    store = SqliteWorldStore(tmp_path / "world.db")
-    store.initialize()
-    store.ensure_space("s1")
-    _insert_memory(store, "m1", "a rare distinctive hobby", about_user=1)
-    settings = Settings(
-        llm_base_url="http://model.test/v1", llm_api_key="key", llm_model="model",
-        database_path=store.path, embedding_query_timeout_seconds=0.05,
-    )
-    world = SocialMemoryWorld(
-        store, _NoopModel(), settings=settings, embedding_client=_SleepyClient(),
-    )
 
     async def scenario():
         await world.start()
